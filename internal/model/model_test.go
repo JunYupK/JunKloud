@@ -45,3 +45,10 @@ func TestProblemFilesNotSerialised(t *testing.T) {
 		t.Fatalf("Problem JSON leaks package files: %s", b)
 	}
 }
+
+func TestSessionStates(t *testing.T) {
+	want := []string{"PREPARING", "RUNNING", "GRADING", "COMPLETED", "SETUP_ERROR", "GRADING_ERROR", "ABANDONED"}
+	if got := SessionStates(); !reflect.DeepEqual(got, want) {
+		t.Fatalf("SessionStates() = %v, want %v", got, want)
+	}
+}

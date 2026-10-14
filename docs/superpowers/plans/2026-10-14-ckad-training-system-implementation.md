@@ -145,17 +145,17 @@ Task 2에서 `internal/model`에 아래 타입을 정의한다. 패키지 간에
 
 **Interfaces:** Produces `store.Open(path string) (*Store,error)`, `Close() error`; Store methods `CreateSession(ctx,SessionRecord) error`, `LoadSession(ctx,id string) (SessionRecord,error)`, `Transition(ctx,id,from,to string) error`, `PutOperation(ctx,Operation) error`, `PutInventory(ctx,Inventory) error`, `CreateSubmission(ctx,Submission) error`, `SaveRun(ctx,GradingRun) error`, `SaveValidation(ctx,ValidationRecord) error`, `RecordReview(ctx,sessionID,problemID string,at time.Time) error`. `lock.Acquire(path string) (release func() error,err error)`.
 
-- [ ] **실패 테스트 작성:** `TestSaveRunAtomic`, `TestTransitionCompareAndSwap`, `TestCorruptDBPreserved`, `TestLockAcrossProcesses`. 별도 프로세스의 경합, 도중 rollback, 같은 제출의 변경 거부를 검증한다.
+- [x] **실패 테스트 작성:** `TestSaveRunAtomic`, `TestTransitionCompareAndSwap`, `TestCorruptDBPreserved`, `TestLockAcrossProcesses`. 별도 프로세스의 경합, 도중 rollback, 같은 제출의 변경 거부를 검증한다.
   ```go
   err := s.Transition(ctx, "s1", "RUNNING", "GRADING")
   testutil.NoError(t, err)
   err = s.Transition(ctx, "s1", "RUNNING", "GRADING")
   testutil.ErrorIs(t, err, store.ErrStateConflict)
   ```
-- [ ] **실패 확인:** `go test ./internal/store ./internal/lock -v`에서 상태 충돌·중복 잠금 관련 실패 확인.
-- [ ] **최소 구현:** `database/sql`+modernc driver, foreign keys, bounded busy timeout, migration version, 명시적 트랜잭션. 제출·grading run은 append-only이며 update로 점수를 덮어쓰지 않는다. Linux file lock으로 프로세스 종료 시 잠금이 해제되게 한다. DB 손상 시 원본 보존. API 작업과 DB transaction을 묶었다고 가정하지 않는다.
-- [ ] **통과 확인:** 동일 명령 PASS 및 `go test -race ./internal/store ./internal/lock`. kill된 프로세스의 lock 회수와 다른 조회 프로세스의 동작 확인.
-- [ ] **커밋:** `feat: persist sessions and recoverable operations`.
+- [x] **실패 확인:** `go test ./internal/store ./internal/lock -v`에서 상태 충돌·중복 잠금 관련 실패 확인.
+- [x] **최소 구현:** `database/sql`+modernc driver, foreign keys, bounded busy timeout, migration version, 명시적 트랜잭션. 제출·grading run은 append-only이며 update로 점수를 덮어쓰지 않는다. Linux file lock으로 프로세스 종료 시 잠금이 해제되게 한다. DB 손상 시 원본 보존. API 작업과 DB transaction을 묶었다고 가정하지 않는다.
+- [x] **통과 확인:** 동일 명령 PASS 및 `go test -race ./internal/store ./internal/lock`. kill된 프로세스의 lock 회수와 다른 조회 프로세스의 동작 확인.
+- [x] **커밋:** `feat: persist sessions and recoverable operations`.
 
 ### Task 4: 전용 클러스터 식별·명령 실행·초기 적용
 

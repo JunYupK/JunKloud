@@ -9,6 +9,27 @@ const (
 	ModeMock     = "mock"
 )
 
+// Session states (spec section 9.1). The normal flow is PREPARING, RUNNING,
+// GRADING, COMPLETED. SETUP_ERROR and GRADING_ERROR record failures and
+// ABANDONED records a session the learner ended to start over.
+const (
+	StatePreparing    = "PREPARING"
+	StateRunning      = "RUNNING"
+	StateGrading      = "GRADING"
+	StateCompleted    = "COMPLETED"
+	StateSetupError   = "SETUP_ERROR"
+	StateGradingError = "GRADING_ERROR"
+	StateAbandoned    = "ABANDONED"
+)
+
+// SessionStates lists every valid session state.
+func SessionStates() []string {
+	return []string{
+		StatePreparing, StateRunning, StateGrading, StateCompleted,
+		StateSetupError, StateGradingError, StateAbandoned,
+	}
+}
+
 // SessionRecord is one practice, retry or mock-exam session. StartedAt is nil
 // until the clock starts. Marks holds the learner's per-problem flags.
 type SessionRecord struct {
