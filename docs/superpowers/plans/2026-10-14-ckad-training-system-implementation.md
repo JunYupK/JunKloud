@@ -126,7 +126,7 @@ Task 2에서 `internal/model`에 아래 타입을 정의한다. 패키지 간에
 
 **Interfaces:** Produces `problem.Load(dir string) (model.Problem,error)`, `Freeze(p model.Problem, seed uint64) (model.FrozenProblem,error)`, `Select(bank []model.Problem, opts SelectOptions) ([]model.Problem,error)`, `ResolveAsset(root,path string) (string,error)`. `SelectOptions{Mode,Domain,Difficulty,Tag string; Count int; Seed uint64}`.
 
-- [ ] **실패 테스트 작성:** `TestFreezeStable`, `TestInvalidDefinition`, `TestAssetEscape`, `TestSelectInsufficient`. 정상 fixture ID는 `service-test`, primary domain은 `networking`. 중복 YAML key·알 수 없는 kind·순환 DependsOn·잘못된 배점·범위 밖 포트·중복 ID를 거부한다.
+- [x] **실패 테스트 작성:** `TestFreezeStable`, `TestInvalidDefinition`, `TestAssetEscape`, `TestSelectInsufficient`. 정상 fixture ID는 `service-test`, primary domain은 `networking`. 중복 YAML key·알 수 없는 kind·순환 DependsOn·잘못된 배점·범위 밖 포트·중복 ID를 거부한다.
   ```go
   a, err := problem.Freeze(p, 38129); testutil.NoError(t, err)
   b, err := problem.Freeze(p, 38129); testutil.NoError(t, err)
@@ -134,10 +134,10 @@ Task 2에서 `internal/model`에 아래 타입을 정의한다. 패키지 간에
   _, err = problem.ResolveAsset(root, "../solution/answer.yaml")
   testutil.ErrorIs(t, err, problem.ErrAssetEscape)
   ```
-- [ ] **실패 확인:** `go test ./internal/problem -run 'TestFreeze|TestInvalid|TestAsset|TestSelect' -v`에서 미구현 동작 실패 확인.
-- [ ] **최소 구현:** strict YAML→JSON 변환과 JSON Schema 2020-12 validation 후 타입 변환. 수량·시간 문자열의 parsing을 명시한다. 이름 등 scalar parameter만 구조적으로 치환하고 누락 변수를 거부한다. hash는 정규화한 정의와 package 파일을 정렬해 계산한다. symlink 실제 경로와 상위 이탈을 검사한다. 난수 알고리즘 version은 `seed-v1`로 기록하며 정렬된 후보와 고정 PRNG 규칙을 golden test에 고정한다.
-- [ ] **통과 확인:** 위 테스트와 `go test ./internal/model ./internal/problem` PASS. 다른 seed의 유효값, 한글·공백 경로, 중복 선택 방지, 5~20 / retry 1~20 경계를 확인한다.
-- [ ] **커밋:** `feat: validate and freeze declarative problems`.
+- [x] **실패 확인:** `go test ./internal/problem -run 'TestFreeze|TestInvalid|TestAsset|TestSelect' -v`에서 미구현 동작 실패 확인.
+- [x] **최소 구현:** strict YAML→JSON 변환과 JSON Schema 2020-12 validation 후 타입 변환. 수량·시간 문자열의 parsing을 명시한다. 이름 등 scalar parameter만 구조적으로 치환하고 누락 변수를 거부한다. hash는 정규화한 정의와 package 파일을 정렬해 계산한다. symlink 실제 경로와 상위 이탈을 검사한다. 난수 알고리즘 version은 `seed-v1`로 기록하며 정렬된 후보와 고정 PRNG 규칙을 golden test에 고정한다.
+- [x] **통과 확인:** 위 테스트와 `go test ./internal/model ./internal/problem` PASS. 다른 seed의 유효값, 한글·공백 경로, 중복 선택 방지, 5~20 / retry 1~20 경계를 확인한다.
+- [x] **커밋:** `feat: validate and freeze declarative problems`.
 
 ### Task 3: SQLite 기록·원자적 결과·환경 잠금
 

@@ -1,0 +1,67 @@
+# INVALID: case expected_score differs from its PASS points
+schema_version: 1
+id: service-test
+version: 1.0.0
+title: Expose the web Deployment with a Service
+domain: networking
+difficulty: easy
+type: build
+tags: [service]
+competencies:
+  - "Use Kubernetes primitives to implement common deployment strategies"
+  - "Provide and troubleshoot access to applications via services"
+capabilities: []
+parameters:
+  namespace: [svc-alpha, svc-bravo, svc-charlie]
+  service_name: [web, frontend]
+  port: [8080, 9090]
+namespace: "${namespace}"
+budget:
+  cpu: 250m
+  memory: 128Mi
+sources:
+  - https://kubernetes.io/docs/concepts/services-networking/service/
+criteria:
+  - id: service-exists
+    kind: resource
+    target: {api_version: v1, kind: Service, namespace: "${namespace}", name: "${service_name}"}
+    points: 2
+  - id: service-port
+    kind: field
+    target: {api_version: v1, kind: Service, namespace: "${namespace}", name: "${service_name}"}
+    points: 3
+    depends_on: [service-exists]
+    args:
+      path: spec.ports[0].port
+      equals: "${port}"
+  - id: service-reachable
+    kind: http
+    target: {api_version: v1, kind: Service, namespace: "${namespace}", name: "${service_name}"}
+    points: 5
+    depends_on: [service-port]
+    timeout: 30s
+    args:
+      port: "${port}"
+      path: /
+      status: 200
+setup:
+  - kind: apply
+    args: {path: setup/deployment.yaml}
+solution:
+  - kind: apply
+    args: {path: solution/answer.yaml}
+initial_expected:
+  service-exists: FAIL
+  service-port: FAIL
+  service-reachable: FAIL
+initial_score: 0
+cases:
+  - id: wrong-port
+    actions:
+      - kind: apply
+        args: {path: cases/wrong-port.yaml}
+    expected:
+      service-exists: PASS
+      service-port: FAIL
+      service-reachable: FAIL
+    expected_score: 5
