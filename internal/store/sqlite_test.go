@@ -119,7 +119,7 @@ func TestOpenMigratesAndReopens(t *testing.T) {
 	testutil.NoError(t, s.Close())
 
 	db := rawDB(t, path)
-	testutil.Equal(t, count(t, db, `SELECT MAX(version) FROM schema_migrations`), 1)
+	testutil.Equal(t, count(t, db, `SELECT MAX(version) FROM schema_migrations`), 2)
 
 	s2, err := store.Open(path)
 	testutil.NoError(t, err)
@@ -127,7 +127,7 @@ func TestOpenMigratesAndReopens(t *testing.T) {
 	got, err := s2.LoadSession(ctx, "s1")
 	testutil.NoError(t, err)
 	testutil.Equal(t, got.ID, "s1")
-	testutil.Equal(t, count(t, db, `SELECT COUNT(*) FROM schema_migrations`), 1)
+	testutil.Equal(t, count(t, db, `SELECT COUNT(*) FROM schema_migrations`), 2)
 }
 
 func TestSessionRoundTrip(t *testing.T) {
@@ -279,6 +279,128 @@ func TestSaveRunAtomic(t *testing.T) {
 	testutil.NoError(t, err)
 	testutil.Equal(t, got.Evaluation.Score == nil, true)
 	testutil.Equal(t, got.Evaluation.Complete, false)
+}
+
+func TestSaveRunAndTransition(t *testing.T) {
+	s, path := openStore(t)
+	mustCreate(t, s, "s1", model.StateGrading)
+	testutil.NoError(t, s.CreateSubmission(ctx, submission("sub1", "s1")))
+	db := rawDB(t, path)
+
+	// Happy path: the run, its results and the new state are committed together.
+	testutil.NoError(t, s.SaveRunAndTransition(ctx, run("r1", "sub1"), "s1", model.StateGrading, model.StateCompleted))
+	got, err := s.LoadSession(ctx, "s1")
+	testutil.NoError(t, err)
+	testutil.Equal(t, got.State, model.StateCompleted)
+	gotRun, err := s.GetRun(ctx, "r1")
+	testutil.NoError(t, err)
+	testutil.Equal(t, *gotRun.Evaluation.Score, 4)
+	testutil.Equal(t, count(t, db, `SELECT COUNT(*) FROM criterion_results WHERE run_id='r1'`), 2)
+
+	// A failed compare-and-swap rolls the run back: nothing is left behind.
+	err = s.SaveRunAndTransition(ctx, run("r2", "sub1"), "s1", model.StateGrading, model.StateCompleted)
+	testutil.ErrorIs(t, err, store.ErrStateConflict)
+	_, err = s.GetRun(ctx, "r2")
+	testutil.ErrorIs(t, err, store.ErrNotFound)
+	testutil.Equal(t, count(t, db, `SELECT COUNT(*) FROM grading_runs`), 1)
+	testutil.Equal(t, count(t, db, `SELECT COUNT(*) FROM criterion_results WHERE run_id='r2'`), 0)
+
+	// A failing run (duplicate run id) leaves the session state unchanged.
+	mustCreate(t, s, "s2", model.StateGrading)
+	testutil.NoError(t, s.CreateSubmission(ctx, submission("sub2", "s2")))
+	err = s.SaveRunAndTransition(ctx, run("r1", "sub2"), "s2", model.StateGrading, model.StateCompleted)
+	testutil.ErrorIs(t, err, store.ErrAlreadyExists)
+	got, _ = s.LoadSession(ctx, "s2")
+	testutil.Equal(t, got.State, model.StateGrading)
+
+	// A run failing part-way through its results rolls back run and state.
+	bad := run("r3", "sub2")
+	bad.Evaluation.Results[1].CriterionID = "c1"
+	if err := s.SaveRunAndTransition(ctx, bad, "s2", model.StateGrading, model.StateCompleted); err == nil {
+		t.Fatal("duplicate criterion ids accepted")
+	}
+	got, _ = s.LoadSession(ctx, "s2")
+	testutil.Equal(t, got.State, model.StateGrading)
+	_, err = s.GetRun(ctx, "r3")
+	testutil.ErrorIs(t, err, store.ErrNotFound)
+
+	// Unknown session, and a submission that belongs to another session.
+	testutil.ErrorIs(t, s.SaveRunAndTransition(ctx, run("r4", "sub2"), "s1", model.StateCompleted, model.StateCompleted), store.ErrNotFound)
+	testutil.ErrorIs(t, s.SaveRunAndTransition(ctx, run("r4", "sub2"), "nope", model.StateGrading, model.StateCompleted), store.ErrNotFound)
+	testutil.ErrorIs(t, s.SaveRunAndTransition(ctx, run("r4", "nope"), "s2", model.StateGrading, model.StateCompleted), store.ErrNotFound)
+	_, err = s.GetRun(ctx, "r4")
+	testutil.ErrorIs(t, err, store.ErrNotFound)
+
+	// An error-grading run can be saved as incomplete while moving to GRADING_ERROR.
+	errRun := run("r5", "sub2")
+	errRun.Evaluation.Score, errRun.Evaluation.Complete = nil, false
+	errRun.Evaluation.Results[1].Status = model.StatusError
+	testutil.NoError(t, s.SaveRunAndTransition(ctx, errRun, "s2", model.StateGrading, model.StateGradingError))
+	got, _ = s.LoadSession(ctx, "s2")
+	testutil.Equal(t, got.State, model.StateGradingError)
+
+	// COMPLETED is not terminal: a resubmit after completion is legal.
+	testutil.NoError(t, s.Transition(ctx, "s1", model.StateCompleted, model.StateGrading))
+}
+
+func TestEvaluationInvariant(t *testing.T) {
+	s, path := openStore(t)
+	mustCreate(t, s, "s1", model.StateGrading)
+	testutil.NoError(t, s.CreateSubmission(ctx, submission("sub1", "s1")))
+	db := rawDB(t, path)
+
+	cases := map[string]func(*model.Evaluation){
+		"complete without score":   func(e *model.Evaluation) { e.Score = nil },
+		"complete without results": func(e *model.Evaluation) { e.Results = nil },
+		"complete with ERROR":      func(e *model.Evaluation) { e.Results[1].Status = model.StatusError },
+		"incomplete with score":    func(e *model.Evaluation) { e.Complete = false },
+	}
+	for name, mutate := range cases {
+		t.Run(name, func(t *testing.T) {
+			r := run("bad-"+strings.ReplaceAll(name, " ", "-"), "sub1")
+			mutate(&r.Evaluation)
+			testutil.ErrorIs(t, s.SaveRun(ctx, r), store.ErrIncompleteEvaluation)
+			// The same rule guards the atomic path, which then leaves the state alone.
+			r.ID += "-t"
+			testutil.ErrorIs(t, s.SaveRunAndTransition(ctx, r, "s1", model.StateGrading, model.StateCompleted), store.ErrIncompleteEvaluation)
+			got, _ := s.LoadSession(ctx, "s1")
+			testutil.Equal(t, got.State, model.StateGrading)
+		})
+	}
+	testutil.Equal(t, count(t, db, `SELECT COUNT(*) FROM grading_runs`), 0)
+
+	// The database refuses the same shapes even if the Go check is bypassed.
+	for _, stmt := range []string{
+		`INSERT INTO grading_runs VALUES ('x1','sub1','a','b',NULL,8,1)`,
+		`INSERT INTO grading_runs VALUES ('x2','sub1','a','b',3,8,0)`,
+	} {
+		if _, err := db.Exec(stmt); err == nil {
+			t.Errorf("%q succeeded, want rejection", stmt)
+		}
+	}
+	_, err := db.Exec(`INSERT INTO grading_runs VALUES ('x3','sub1','a','b',3,8,1)`)
+	testutil.NoError(t, err)
+	if _, err := db.Exec(`INSERT INTO criterion_results VALUES ('x3',0,'c1','ERROR','',0,'{}')`); err == nil {
+		t.Error("ERROR result inside a complete run succeeded, want rejection")
+	}
+}
+
+func TestAbandonedIsTerminal(t *testing.T) {
+	s, _ := openStore(t)
+	mustCreate(t, s, "s1", model.StateRunning)
+	testutil.NoError(t, s.Transition(ctx, "s1", model.StateRunning, model.StateAbandoned))
+
+	testutil.ErrorIs(t, s.Transition(ctx, "s1", model.StateAbandoned, model.StateRunning), store.ErrSessionAbandoned)
+	testutil.ErrorIs(t, s.Transition(ctx, "s1", model.StateAbandoned, model.StateAbandoned), store.ErrSessionAbandoned)
+	testutil.NoError(t, s.CreateSubmission(ctx, submission("sub1", "s1")))
+	testutil.ErrorIs(t, s.SaveRunAndTransition(ctx, run("r1", "sub1"), "s1", model.StateAbandoned, model.StateCompleted), store.ErrSessionAbandoned)
+	_, err := s.GetRun(ctx, "r1")
+	testutil.ErrorIs(t, err, store.ErrNotFound)
+
+	// A caller that guesses the wrong source state still cannot move it.
+	testutil.ErrorIs(t, s.Transition(ctx, "s1", model.StateRunning, model.StateGrading), store.ErrStateConflict)
+	got, _ := s.LoadSession(ctx, "s1")
+	testutil.Equal(t, got.State, model.StateAbandoned)
 }
 
 func TestSubmissionsAndRunsAreAppendOnly(t *testing.T) {

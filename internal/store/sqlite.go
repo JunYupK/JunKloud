@@ -30,6 +30,10 @@ var (
 	ErrStateConflict = errors.New("store: session state conflict")
 	// ErrInvalidState: a session state name is not one of model.SessionStates.
 	ErrInvalidState = errors.New("store: invalid session state")
+	// ErrSessionAbandoned: ABANDONED is terminal; no transition may leave it.
+	ErrSessionAbandoned = errors.New("store: session is abandoned")
+	// ErrIncompleteEvaluation: an evaluation violates the completed-grade invariant (see SaveRun).
+	ErrIncompleteEvaluation = errors.New("store: evaluation is not a valid grade")
 	// ErrOperationMismatch: PutOperation tried to change an existing operation's identity fields.
 	ErrOperationMismatch = errors.New("store: operation identity changed")
 	// ErrCorrupt: the database file is damaged. The file is left untouched.

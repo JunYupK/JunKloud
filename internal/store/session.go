@@ -143,37 +143,54 @@ func (s *Store) LoadSession(ctx context.Context, id string) (model.SessionRecord
 // processes racing for the same step cannot both win. It returns
 // ErrStateConflict, naming the actual state, when the session is elsewhere,
 // ErrNotFound for an unknown session and ErrInvalidState for an unknown
-// state name. Which transitions are legal is the session layer's rule; the
-// store only guarantees atomicity.
+// state name.
+//
+// The store enforces atomicity and one rule: ABANDONED is terminal, so a
+// transition from it returns ErrSessionAbandoned. COMPLETED is deliberately
+// not terminal (a resubmit after completion is legal). Which other edges are
+// legal is the session layer's rule. To store a final grading run and change
+// the state together, use SaveRunAndTransition.
 func (s *Store) Transition(ctx context.Context, id, from, to string) error {
+	if err := checkTransition(from, to); err != nil {
+		return err
+	}
+	return s.inTx(ctx, func(tx *sql.Tx) error { return transitionTx(ctx, tx, id, from, to) })
+}
+
+func checkTransition(from, to string) error {
 	if err := validState(from); err != nil {
 		return err
 	}
 	if err := validState(to); err != nil {
 		return err
 	}
-	return s.inTx(ctx, func(tx *sql.Tx) error {
-		res, err := tx.ExecContext(ctx, `UPDATE sessions SET state = ? WHERE id = ? AND state = ?`, to, id, from)
-		if err != nil {
-			return fmt.Errorf("store: transition %q: %w", id, err)
-		}
-		n, err := res.RowsAffected()
-		if err != nil {
-			return fmt.Errorf("store: transition %q: %w", id, err)
-		}
-		if n == 1 {
-			return nil
-		}
-		var actual string
-		err = tx.QueryRowContext(ctx, `SELECT state FROM sessions WHERE id = ?`, id).Scan(&actual)
-		if errors.Is(err, sql.ErrNoRows) {
-			return fmt.Errorf("%w: session %q", ErrNotFound, id)
-		}
-		if err != nil {
-			return fmt.Errorf("store: transition %q: %w", id, err)
-		}
-		return fmt.Errorf("%w: session %q is %s, expected %s", ErrStateConflict, id, actual, from)
-	})
+	if from == model.StateAbandoned {
+		return fmt.Errorf("%w: cannot leave %s", ErrSessionAbandoned, model.StateAbandoned)
+	}
+	return nil
+}
+
+func transitionTx(ctx context.Context, tx *sql.Tx, id, from, to string) error {
+	res, err := tx.ExecContext(ctx, `UPDATE sessions SET state = ? WHERE id = ? AND state = ?`, to, id, from)
+	if err != nil {
+		return fmt.Errorf("store: transition %q: %w", id, err)
+	}
+	n, err := res.RowsAffected()
+	if err != nil {
+		return fmt.Errorf("store: transition %q: %w", id, err)
+	}
+	if n == 1 {
+		return nil
+	}
+	var actual string
+	err = tx.QueryRowContext(ctx, `SELECT state FROM sessions WHERE id = ?`, id).Scan(&actual)
+	if errors.Is(err, sql.ErrNoRows) {
+		return fmt.Errorf("%w: session %q", ErrNotFound, id)
+	}
+	if err != nil {
+		return fmt.Errorf("store: transition %q: %w", id, err)
+	}
+	return fmt.Errorf("%w: session %q is %s, expected %s", ErrStateConflict, id, actual, from)
 }
 
 // RecordReview appends one review event: the learner opened the solution or
