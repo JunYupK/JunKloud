@@ -1,8 +1,8 @@
 # JunKloud — 로컬 CKAD 실전 훈련 시스템 설계
 
 - 작성일: 2026-10-14 (Asia/Seoul)
-- 상태: 대화에서 합의한 설계를 정리한 **written spec 검토본**
-- 구현 승인 상태: 미승인. 이 문서 승인 이후 implementation plan을 별도로 작성·검토한다.
+- 상태: **사용자 승인 완료** — 2026-10-14, 구현 계획 작성 요청으로 written spec 승인 확인.
+- 구현 승인 상태: 미승인. implementation plan을 별도로 작성·검토하고 실행 방식을 선택한다.
 - 대상 저장소: https://github.com/JunYupK/JunKloud
 - 설계 원칙: 실제 CKAD 학습 효율, 신뢰할 수 있는 채점, 반복 가능한 환경, 불필요한 기능 최소화.
 
@@ -49,7 +49,7 @@ MVP에서 하지 않는 것: SaaS, 사용자 계정, 다중 사용자, 클라우
 
 2026-10-14에 조회한 Linux Foundation FAQ와 Important Instructions는 CKAD 시험 환경을 Kubernetes **v1.37**, Linux 명령줄 기반 수행형 시험, **15~20개 과제·120분**으로 안내한다. 상품 안내 페이지에는 v1.35 표기도 남아 있어 출처 간 차이가 있다. 실제 시험 환경을 직접 설명하는 FAQ와 Important Instructions를 버전 기준으로 삼는다. [S1][S2][S4]
 
-CNCF의 공식 curriculum 저장소에는 v1.37 PDF가 게시되어 있다. 조사 도구에서는 PDF 본문 직접 가져오기가 실패했다. 아래 역량 범위는 공식 Linux Foundation 상품 페이지의 Domains & Competencies와 CNCF의 공개 영역별 가중치를 근거로 작성했다. PDF 본문을 읽었다고 간주하지 않는다. 구현 계획 확정 전 공식 PDF와 이 역량 매핑의 일치 여부를 확인하고, 차이가 있으면 해당 설계를 수정한다. [S3][S4]
+CNCF의 공식 curriculum 저장소에는 v1.37 PDF가 게시되어 있다. 초기 웹 조사에서는 PDF 본문 가져오기가 실패했으나, 2026-10-14 구현 계획 작성 과정에서 공식 원본을 직접 읽고 2페이지를 렌더링해 영역 배치까지 확인했다. 아래 역량 범위와 공식 배점이 일치하며 Kustomize는 Application Deployment에 포함된다. 확인한 PDF의 SHA-256은 `7736d2f0291239d62e9fc618304413ee9b6e53fc4580aac70bf4328203c1c210`이다. [S3][S4]
 
 | 영역 | 모의시험 배점 | 포함할 학습 역량 |
 | --- | ---: | --- |
@@ -380,9 +380,9 @@ MVP의 문제 schema·version·결과 기록만으로 향후 확장의 근거를
 
 ## 15. 설계 검토와 다음 단계
 
-이 문서는 합의한 방향에 구체적인 CLI 계약·오류 처리·검증 기준을 붙인 검토본이다. 사용자 written spec 승인 전 구현 계획·제품 코드·의존성 설치를 시작하지 않는다.
+이 문서는 합의한 방향에 구체적인 CLI 계약·오류 처리·검증 기준을 붙인 승인된 설계다. 2026-10-14에 사용자가 구현 계획 작성을 요청했다. 구현 계획 검토와 실행 방식 선택 전 제품 코드·의존성 설치를 시작하지 않는다.
 
-승인 이후에는 공식 curriculum PDF 본문과 역량 매핑의 교차 확인, 버전 고정 및 환경 capability 검증을 포함하는 implementation plan을 작성한다. 구체적인 SQLite driver·CLI parser 등 교체 가능한 내부 라이브러리는 그 계획에서 검증해 선택한다. 환경 기능과 문제 채점 계약을 바꾸는 선택은 이 설계의 변경으로 기록한다.
+공식 curriculum PDF 본문과 역량 매핑의 교차 확인은 완료했다. implementation plan에는 버전 고정 및 환경 capability 검증을 포함한다. 구체적인 SQLite driver·CLI parser 등 교체 가능한 내부 라이브러리는 그 계획에서 선택한다. 환경 기능과 문제 채점 계약을 바꾸는 선택은 이 설계의 변경으로 기록한다.
 
 ## 16. 공식 참고 자료
 
@@ -390,7 +390,7 @@ MVP의 문제 schema·version·결과 기록만으로 향후 확장의 근거를
 
 - [S1 — Linux Foundation CKAD FAQ](https://docs.linuxfoundation.org/tc-docs/certification/faq-cka-ckad-cks): 시험 버전·시간·합격 기준.
 - [S2 — Important Instructions: CKA and CKAD](https://docs.linuxfoundation.org/tc-docs/certification/tips-cka-and-ckad): 과제 수·Linux CLI·SSH 작업 흐름·기본 도구·시험 버전.
-- [S3 — CNCF CKAD Curriculum](https://github.com/cncf/curriculum/tree/master/ckad), [v1.37 PDF 게시 위치](https://github.com/cncf/curriculum/blob/master/CKAD_Curriculum_v1.37.pdf): 영역별 배점과 공식 curriculum 관리 위치. PDF 본문 직접 확인 제한은 3.1에 명시.
+- [S3 — CNCF CKAD Curriculum](https://github.com/cncf/curriculum/tree/master/ckad), [v1.37 PDF 게시 위치](https://github.com/cncf/curriculum/blob/master/CKAD_Curriculum_v1.37.pdf): 영역별 배점과 공식 curriculum. 본문·페이지 확인 결과와 hash는 3.1에 명시.
 - [S4 — Linux Foundation CKAD](https://training.linuxfoundation.org/certification/certified-kubernetes-application-developer-ckad/): Domains & Competencies. 상품 페이지의 버전 표기 차이는 3.1 참고.
 - [S5 — Resources Allowed](https://docs.linuxfoundation.org/tc-docs/certification/certification-resources-allowed): CKAD 허용 문서와 검색 범위.
 - [S6 — Candidate Handbook: Exam Rules and Policies](https://docs.linuxfoundation.org/tc-docs/certification/lf-handbook2/exam-rules-and-policies): 공개 시험 규칙.
