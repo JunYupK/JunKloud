@@ -1,10 +1,11 @@
 #!/usr/bin/env bash
 # Runtime test for the reproducible Linux dev/workspace environment.
 #
-# This script drives `docker compose` against runtime/compose.yaml using an
-# isolated, throwaway project name so it never touches a real learner's
-# persistent `learner-home` volume -- every volume this run creates is
-# removed again in the cleanup trap below ("temporary volumes only").
+# This script drives `docker compose` against the repo root's compose.yaml
+# using an isolated, throwaway project name so it never touches a real
+# learner's persistent `learner-home` volume -- every volume this run
+# creates is removed again in the cleanup trap below ("temporary volumes
+# only").
 #
 # It verifies:
 #   1. the workspace container is Linux, running on the host's native CPU
@@ -13,7 +14,7 @@
 #      container being recreated (the home volume, not the container layer,
 #      holds state), and
 #   3. kind/kubectl/Helm inside the image report exactly the versions pinned
-#      in versions.lock.yaml.
+#      in runtime/versions.lock.yaml.
 #
 # Runs from inside the Linux dev/workspace container (Docker socket shared
 # with the host) or directly on a host that has docker + the compose plugin.
@@ -23,9 +24,9 @@ REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 PROJECT="ckad-runtime-test-$$"
 
 # `docker compose` resolves a bare `compose.yaml` (and the build context "."
-# and volume source "..") relative to the current directory, so cd into
-# runtime/ once up front instead of passing an absolute -f path.
-cd "${REPO_ROOT}/runtime"
+# and volume source ".") relative to the current directory, so cd into the
+# repo root once up front instead of passing an absolute -f path.
+cd "${REPO_ROOT}"
 
 # On Git-Bash/MSYS hosts (Windows), bash rewrites POSIX-looking absolute
 # paths in command-line *arguments* into Windows paths -- including ones
@@ -50,15 +51,16 @@ fail() {
 }
 
 # Reads the pinned version for `tools.<name>.version` straight out of
-# versions.lock.yaml on the machine running *this script* (not inside the
-# throwaway container compose() talks to). That file is always reachable
-# here via REPO_ROOT, computed from this script's own path, regardless of
-# whether this script runs on the host or inside the dev/workspace container.
+# runtime/versions.lock.yaml on the machine running *this script* (not
+# inside the throwaway container compose() talks to). That file is always
+# reachable here via REPO_ROOT, computed from this script's own path,
+# regardless of whether this script runs on the host or inside the
+# dev/workspace container.
 #
 # This deliberately avoids reading the file through a bind mount inside the
 # nested test container: when this script itself runs inside a container
 # (Docker-outside-of-Docker, sharing the host's Docker socket), a relative
-# bind-mount source like "..:/src" is resolved by the *daemon*, not by the
+# bind-mount source like ".:/src" is resolved by the *daemon*, not by the
 # container issuing the request -- so a second, nested container cannot
 # reliably see the first container's bind-mounted repo. A tiny awk scalar
 # reader for our own fixed-shape YAML sidesteps that entirely.
@@ -74,7 +76,7 @@ lock_version() {
       print line
       exit
     }
-  ' "${REPO_ROOT}/versions.lock.yaml"
+  ' "${REPO_ROOT}/runtime/versions.lock.yaml"
 }
 
 echo "==> building workspace image (project ${PROJECT})"
@@ -112,7 +114,7 @@ test "${persisted}" = "keep" || fail "expected persisted file content 'keep', go
 compose exec -T workspace bash -ic 'alias user_check' | grep -q keep \
   || fail "alias 'user_check' did not survive container recreation"
 
-echo "==> verifying kind/kubectl/Helm versions match versions.lock.yaml"
+echo "==> verifying kind/kubectl/Helm versions match runtime/versions.lock.yaml"
 kind_want="$(lock_version kind | tr -d '\r')"
 kind_have="$(compose exec -T workspace kind version | awk '{print $2}' | tr -d '\r')"
 test "${kind_have}" = "${kind_want}" || fail "kind version '${kind_have}' != lock '${kind_want}'"

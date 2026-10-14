@@ -1,0 +1,3 @@
+# JunKloud CKAD workspace shell
+export PS1="[ckad] \u@\h:\w\$ "
+if [ -f ~/.bash_aliases ]; then . ~/.bash_aliases; fi

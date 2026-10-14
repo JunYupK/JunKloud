@@ -10,8 +10,11 @@
 #               detector needs, for building/testing the Go CLI itself.
 #
 # Every downloaded tool is pinned to an exact version and verified against a
-# SHA-256 checksum recorded in /versions.lock.yaml (see that file for
+# SHA-256 checksum recorded in runtime/versions.lock.yaml (see that file for
 # provenance). `latest` is never used anywhere in this file.
+#
+# Build context is the repo root (see compose.yaml); paths below into
+# runtime/ are relative to that root.
 FROM debian@sha256:7c7b2c966bc9ee8cedfeef67e0e279108992c77681fa595db4a9d65c06ccc587 AS base
 
 ARG TARGETARCH
@@ -31,7 +34,7 @@ RUN apt-get update \
         tar \
     && rm -rf /var/lib/apt/lists/*
 
-# ---- pinned tool versions; must match /versions.lock.yaml ----
+# ---- pinned tool versions; must match runtime/versions.lock.yaml ----
 ARG KIND_VERSION=v0.33.0
 ARG KIND_SHA256_AMD64=aee6151561422756b764a4ae28e7f44cda5af5a9eead3cc9985112b1de8d8e0d
 ARG KIND_SHA256_ARM64=20022bee6cfcd5086cb7234d218e3454e6090022f2a8f55d1fa7fcf42c3867a2
@@ -92,7 +95,7 @@ RUN set -eu; \
     install -m 0755 "/tmp/linux-${TARGETARCH}/helm" /usr/local/bin/helm; \
     rm -rf /tmp/helm.tgz "/tmp/linux-${TARGETARCH}"
 
-# yq: YAML processor used to read versions.lock.yaml and problem schemas.
+# yq: YAML processor used to read runtime/versions.lock.yaml and problem schemas.
 RUN set -eu; \
     case "${TARGETARCH}" in \
         amd64) sha="${YQ_SHA256_AMD64}" ;; \
@@ -107,7 +110,7 @@ RUN set -eu; \
 # Docker CLI (client only, no daemon): talks to the host engine over the
 # socket compose mounts in. download.docker.com publishes no standalone
 # checksum file for these static tarballs, so this sha256 is self-computed
-# from the artifact (see versions.lock.yaml for provenance).
+# from the artifact (see runtime/versions.lock.yaml for provenance).
 RUN set -eu; \
     case "${TARGETARCH}" in \
         amd64) sha="${DOCKER_CLI_SHA256_AMD64}"; dlarch=x86_64 ;; \
@@ -153,27 +156,29 @@ RUN set -eu; \
     echo "${sha}  /usr/local/lib/docker/cli-plugins/docker-buildx" | sha256sum -c -; \
     chmod +x /usr/local/lib/docker/cli-plugins/docker-buildx
 
-# learner user + a baked-in home skeleton. When compose mounts a fresh named
-# volume over /home/learner, Docker seeds it from this image content on
-# first use (and never again) -- that is how a user's dotfiles survive
-# `docker compose down` + `up` across the one path that matters: an *empty*
-# volume only ever gets this seed once. runtime/entrypoint.sh additionally
-# guards against the (already empty) volume missing these files for any
-# reason, without ever clobbering a file that is already there.
+# learner user + a baked-in home skeleton. runtime/bashrc.defaults holds the
+# actual default .bashrc content (independently editable/reviewable, per the
+# plan's file ownership table); /etc/skel is the canonical place that content
+# lives in the image, and both the image-baked /home/learner and
+# entrypoint.sh's own no-clobber fallback copy FROM there.
+#
+# When compose mounts a fresh named volume over /home/learner, Docker seeds
+# it from this image content on first use (and never again) -- that is how a
+# user's dotfiles survive `docker compose down` + `up` across the one path
+# that matters: an *empty* volume only ever gets this seed once.
+# runtime/entrypoint.sh additionally guards against the (already empty)
+# volume missing these files for any reason, without ever clobbering a file
+# that is already there.
 RUN groupadd -g 1000 learner \
-    && useradd -m -u 1000 -g 1000 -d /home/learner -s /bin/bash learner \
-    && { \
-        echo '# JunKloud CKAD workspace shell'; \
-        echo 'export PS1="[ckad] \u@\h:\w\$ "'; \
-        echo 'if [ -f ~/.bash_aliases ]; then . ~/.bash_aliases; fi'; \
-    } > /home/learner/.bashrc \
-    && echo '# user aliases persist here across problem resets' > /home/learner/.bash_aliases \
-    && mkdir -p /etc/skel \
-    && cp /home/learner/.bashrc /etc/skel/.bashrc \
-    && cp /home/learner/.bash_aliases /etc/skel/.bash_aliases \
+    && useradd -m -u 1000 -g 1000 -d /home/learner -s /bin/bash learner
+
+COPY runtime/bashrc.defaults /etc/skel/.bashrc
+RUN echo '# user aliases persist here across problem resets' > /etc/skel/.bash_aliases \
+    && cp /etc/skel/.bashrc /home/learner/.bashrc \
+    && cp /etc/skel/.bash_aliases /home/learner/.bash_aliases \
     && chown -R learner:learner /home/learner
 
-COPY entrypoint.sh /usr/local/bin/entrypoint.sh
+COPY runtime/entrypoint.sh /usr/local/bin/entrypoint.sh
 RUN chmod +x /usr/local/bin/entrypoint.sh
 
 WORKDIR /src

@@ -23,7 +23,7 @@ services:
       sock-init:
         condition: service_completed_successfully
     volumes:
-      - ..:/src
+      - .:/src
       - learner-home:/home/learner
       - /var/run/docker.sock:/var/run/docker.sock
     working_dir: /src
@@ -39,7 +39,7 @@ services:
       sock-init:
         condition: service_completed_successfully
     volumes:
-      - ..:/src
+      - .:/src
       - learner-home:/home/learner
       - /var/run/docker.sock:/var/run/docker.sock
     working_dir: /src

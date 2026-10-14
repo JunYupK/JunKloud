@@ -1,5 +1,5 @@
 # Pinned, checksum-verified artifact versions for the reproducible Linux
-# dev/workspace environment (runtime/Dockerfile, runtime/compose.yaml).
+# dev/workspace environment (Dockerfile, compose.yaml, at the repo root).
 #
 # Every checksum below was independently verified on 2026-10-14 by streaming
 # the published artifact over HTTPS and computing its SHA-256 locally, then
@@ -11,7 +11,7 @@
 # against.
 #
 # Do not bump a version here without re-running that verification and
-# updating runtime/Dockerfile's matching ARG defaults in the same change.
+# updating the root Dockerfile's matching ARG defaults in the same change.
 schema_version: 1
 
 go:
