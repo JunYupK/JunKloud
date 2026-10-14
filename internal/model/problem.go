@@ -130,6 +130,16 @@ type ResourceBudget struct {
 	MemoryBytes int64 `json:"memory_bytes"`
 }
 
+// ResourceScope declares what setup, solution and cases may create beyond
+// the problem's own namespace: extra owned namespaces and named
+// cluster-scoped objects (Namespace empty). The zero value means only the
+// problem namespace and no cluster-scoped objects. Enforcement against applied
+// objects belongs to the code that applies them.
+type ResourceScope struct {
+	Namespaces       []string    `json:"namespaces,omitempty"`
+	ClusterResources []ObjectRef `json:"cluster_resources,omitempty"`
+}
+
 // Problem is a validated problem.yaml plus the package files it was loaded
 // with. Parameters maps each parameter name to its allowed scalar values.
 // InitialExpected / Case.Expected map criterion IDs to the expected status.
@@ -151,6 +161,7 @@ type Problem struct {
 	Capabilities    []string          `json:"capabilities,omitempty"`
 	Parameters      map[string][]any  `json:"parameters,omitempty"`
 	Namespace       string            `json:"namespace"`
+	Scope           ResourceScope     `json:"scope"`
 	Budget          ResourceBudget    `json:"budget"`
 	Sources         []string          `json:"sources,omitempty"`
 	Criteria        []Criterion       `json:"criteria"`

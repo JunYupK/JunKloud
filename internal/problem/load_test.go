@@ -90,6 +90,15 @@ func TestInvalidDefinition(t *testing.T) {
 		"bad-timeout":            "/criteria/2/timeout",
 		"bad-quantity":           "memory",
 		"bad-namespace":          "Svc_Bravo",
+		// Resource scope (spec §6.2, ruling R13).
+		"scope-problem-namespace":           `scope namespace "svc-alpha" is the problem namespace`,
+		"scope-duplicate-namespace":         `duplicate scope namespace "svc-alpha-client"`,
+		"scope-bad-namespace":               `scope namespace "Client_NS" is not a DNS-1123 label`,
+		"scope-namespaced-cluster-resource": "/scope/cluster_resources/0",
+		// Directories overlay package files instead of replacing problem.yaml:
+		// references in every package text file must be declared parameters.
+		"undeclared-ref-in-setup":    `setup/deployment.yaml: undefined parameter "servce_name"`,
+		"undeclared-ref-in-provided": `setup/provided/client-pod.yaml: undefined parameter "clinet"`,
 	}
 	entries, err := os.ReadDir("testdata/invalid")
 	testutil.NoError(t, err)
@@ -97,18 +106,68 @@ func TestInvalidDefinition(t *testing.T) {
 
 	for name, want := range cases {
 		t.Run(name, func(t *testing.T) {
-			def, err := os.ReadFile(filepath.Join("testdata/invalid", name+".yaml"))
-			testutil.NoError(t, err)
 			dir := copyFixture(t, t.TempDir())
-			writeFile(t, filepath.Join(dir, "problem.yaml"), string(def))
+			src := filepath.Join("testdata/invalid", name)
+			if info, err := os.Stat(src); err == nil && info.IsDir() {
+				overlay(t, src, dir)
+			} else {
+				def, err := os.ReadFile(src + ".yaml")
+				testutil.NoError(t, err)
+				writeFile(t, filepath.Join(dir, "problem.yaml"), string(def))
+			}
 
-			_, err = problem.Load(dir)
+			_, err := problem.Load(dir)
 			testutil.ErrorIs(t, err, problem.ErrInvalidDefinition)
 			if !strings.Contains(err.Error(), want) {
 				t.Fatalf("error %q does not mention %q", err, want)
 			}
 		})
 	}
+}
+
+func TestLoadScope(t *testing.T) {
+	dir := copyFixture(t, t.TempDir())
+	def, err := os.ReadFile(filepath.Join(dir, "problem.yaml"))
+	testutil.NoError(t, err)
+	writeFile(t, filepath.Join(dir, "problem.yaml"), strings.Replace(string(def), "budget:\n", `scope:
+  namespaces: ["${namespace}-client"]
+  cluster_resources:
+    - {api_version: rbac.authorization.k8s.io/v1, kind: ClusterRole, name: "${service_name}-reader"}
+budget:
+`, 1))
+
+	p, err := problem.Load(dir)
+	testutil.NoError(t, err)
+	testutil.Equal(t, p.Scope, model.ResourceScope{
+		Namespaces:       []string{"${namespace}-client"},
+		ClusterResources: []model.ObjectRef{{APIVersion: "rbac.authorization.k8s.io/v1", Kind: "ClusterRole", Name: "${service_name}-reader"}},
+	})
+
+	f, err := problem.Freeze(p, 38129)
+	testutil.NoError(t, err)
+	testutil.Equal(t, f.Definition.Scope, model.ResourceScope{
+		Namespaces:       []string{goldenNamespace + "-client"},
+		ClusterResources: []model.ObjectRef{{APIVersion: "rbac.authorization.k8s.io/v1", Kind: "ClusterRole", Name: goldenServiceName + "-reader"}},
+	})
+	// Freeze leaves the input's scope unrendered.
+	testutil.Equal(t, p.Scope.Namespaces, []string{"${namespace}-client"})
+}
+
+func TestLoadDefaultScope(t *testing.T) {
+	// Absent scope: only the problem's own namespace, no cluster objects.
+	p, err := problem.Load(validFixture)
+	testutil.NoError(t, err)
+	testutil.Equal(t, p.Scope, model.ResourceScope{})
+}
+
+func TestLoadSkipsBinaryFilesForReferences(t *testing.T) {
+	dir := copyFixture(t, t.TempDir())
+	writeFile(t, filepath.Join(dir, "setup", "provided", "blob.bin"), "\x00${not_a_param}")
+	p, err := problem.Load(dir)
+	testutil.NoError(t, err)
+	f, err := problem.Freeze(p, 1)
+	testutil.NoError(t, err)
+	testutil.Equal(t, string(f.Assets["blob.bin"]), "\x00${not_a_param}")
 }
 
 func TestLoadRequiresPackageFiles(t *testing.T) {

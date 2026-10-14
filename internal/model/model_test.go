@@ -14,7 +14,7 @@ var snakeCase = regexp.MustCompile(`^[a-z][a-z0-9_]*$`)
 // field of every shared value type serialises under a snake_case name.
 func TestJSONNamesAreSnakeCase(t *testing.T) {
 	types := []any{
-		ObjectRef{}, Criterion{}, Action{}, ResourceBudget{}, Problem{}, Case{}, FrozenProblem{},
+		ObjectRef{}, ResourceScope{}, Criterion{}, Action{}, ResourceBudget{}, Problem{}, Case{}, FrozenProblem{},
 		SessionRecord{}, Submission{}, Evidence{}, CheckResult{}, Evaluation{}, GradingRun{},
 		ValidationRecord{}, Identity{}, OwnedResource{}, Inventory{}, Operation{},
 	}

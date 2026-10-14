@@ -35,6 +35,15 @@
       }
     },
     "namespace": { "type": "string", "minLength": 1 },
+    "scope": {
+      "description": "What setup, solution and cases may create beyond the problem namespace. Absent: only the problem namespace, no cluster-scoped objects.",
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "namespaces": { "type": "array", "uniqueItems": true, "items": { "type": "string", "minLength": 1 } },
+        "cluster_resources": { "type": "array", "items": { "$ref": "#/$defs/cluster_ref" } }
+      }
+    },
     "budget": {
       "type": "object",
       "additionalProperties": false,
@@ -72,6 +81,16 @@
         "api_version": { "type": "string", "minLength": 1 },
         "kind": { "type": "string", "minLength": 1 },
         "namespace": { "type": "string" },
+        "name": { "type": "string", "minLength": 1 }
+      }
+    },
+    "cluster_ref": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["api_version", "kind", "name"],
+      "properties": {
+        "api_version": { "type": "string", "minLength": 1 },
+        "kind": { "type": "string", "minLength": 1 },
         "name": { "type": "string", "minLength": 1 }
       }
     },

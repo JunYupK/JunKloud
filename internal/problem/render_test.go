@@ -47,7 +47,12 @@ func TestFreezeStable(t *testing.T) {
 		t.Fatalf("question not rendered: %s", a.Question)
 	}
 	testutil.Equal(t, len(a.Assets), 1)
-	testutil.Equal(t, a.Assets["client-pod.yaml"], p.Files["setup/provided/client-pod.yaml"])
+	// Provided text assets are rendered with the same frozen values.
+	asset := string(a.Assets["client-pod.yaml"])
+	if !strings.Contains(asset, `namespace: "`+goldenNamespace+`"`) || strings.Contains(asset, "${") {
+		t.Fatalf("provided asset not rendered: %s", asset)
+	}
+	testutil.Equal(t, string(p.Files["setup/provided/client-pod.yaml"]) != asset, true)
 	for name, content := range a.Assets {
 		for _, marker := range []string{"REFERENCE-ANSWER-MARKER", "WRONG-CASE-MARKER", "해설"} {
 			if strings.Contains(string(content), marker) || strings.Contains(a.Question, marker) {

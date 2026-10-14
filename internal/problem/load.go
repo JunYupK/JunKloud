@@ -38,7 +38,9 @@ const DefinitionFile = "problem.yaml"
 // schemas/problem-v1.schema.json, conversion to model types (durations via
 // time.ParseDuration, quantities via Kubernetes resource.ParseQuantity), then
 // semantic checks (unique IDs, dependency graph, expected vectors and
-// scores, parameter types and references, ports, namespaces). Every other
+// scores, parameter types and references, ports, namespaces, resource
+// scope), and every ${name} in setup/, solution/ and cases/ text files must
+// be a declared parameter. Every other
 // package file is loaded into Problem.Files; symlinks must resolve inside
 // dir. All errors wrap ErrInvalidDefinition.
 func Load(dir string) (model.Problem, error) {
@@ -76,6 +78,9 @@ func load(dir string) (model.Problem, error) {
 	p.Files = files
 	if err := validate(p); err != nil {
 		return model.Problem{}, fmt.Errorf("%s: %w", DefinitionFile, err)
+	}
+	if err := checkPackageReferences(p); err != nil {
+		return model.Problem{}, err
 	}
 	return p, nil
 }
@@ -154,26 +159,27 @@ func validateSchema(doc []byte) error {
 
 // Raw shapes of the schema-validated JSON document, before type conversion.
 type rawProblem struct {
-	SchemaVersion   int               `json:"schema_version"`
-	ID              string            `json:"id"`
-	Version         string            `json:"version"`
-	Title           string            `json:"title"`
-	Domain          string            `json:"domain"`
-	Difficulty      string            `json:"difficulty"`
-	Type            string            `json:"type"`
-	Tags            []string          `json:"tags"`
-	Competencies    []string          `json:"competencies"`
-	Capabilities    []string          `json:"capabilities"`
-	Parameters      map[string][]any  `json:"parameters"`
-	Namespace       string            `json:"namespace"`
-	Budget          rawBudget         `json:"budget"`
-	Sources         []string          `json:"sources"`
-	Criteria        []rawCriterion    `json:"criteria"`
-	Setup           []model.Action    `json:"setup"`
-	Solution        []model.Action    `json:"solution"`
-	InitialExpected map[string]string `json:"initial_expected"`
-	InitialScore    int               `json:"initial_score"`
-	Cases           []model.Case      `json:"cases"`
+	SchemaVersion   int                 `json:"schema_version"`
+	ID              string              `json:"id"`
+	Version         string              `json:"version"`
+	Title           string              `json:"title"`
+	Domain          string              `json:"domain"`
+	Difficulty      string              `json:"difficulty"`
+	Type            string              `json:"type"`
+	Tags            []string            `json:"tags"`
+	Competencies    []string            `json:"competencies"`
+	Capabilities    []string            `json:"capabilities"`
+	Parameters      map[string][]any    `json:"parameters"`
+	Namespace       string              `json:"namespace"`
+	Scope           model.ResourceScope `json:"scope"`
+	Budget          rawBudget           `json:"budget"`
+	Sources         []string            `json:"sources"`
+	Criteria        []rawCriterion      `json:"criteria"`
+	Setup           []model.Action      `json:"setup"`
+	Solution        []model.Action      `json:"solution"`
+	InitialExpected map[string]string   `json:"initial_expected"`
+	InitialScore    int                 `json:"initial_score"`
+	Cases           []model.Case        `json:"cases"`
 }
 
 // rawBudget holds quantities as written: a string ("250m") or a JSON number
@@ -222,6 +228,7 @@ func convert(doc []byte) (model.Problem, error) {
 		Competencies:    r.Competencies,
 		Capabilities:    r.Capabilities,
 		Namespace:       r.Namespace,
+		Scope:           r.Scope,
 		Budget:          model.ResourceBudget{CPUMillis: cpu.MilliValue(), MemoryBytes: memory.Value()},
 		Sources:         r.Sources,
 		Setup:           normalizeActions(r.Setup),
@@ -347,6 +354,29 @@ func validate(p model.Problem) error {
 	return checkEveryParameterValue(p)
 }
 
+// referencingDirs hold package files that are rendered with the frozen
+// parameters: setup/ (including setup/provided/) when applied or handed out,
+// solution/ and cases/ when applied.
+var referencingDirs = []string{"setup/", "solution/", "cases/"}
+
+// checkPackageReferences requires every ${name} in the package's text files
+// under referencingDirs to name a declared parameter, so a typo fails at load
+// time instead of at apply time. Binary files are not scanned or rendered.
+func checkPackageReferences(p model.Problem) error {
+	for _, name := range slices.Sorted(maps.Keys(p.Files)) {
+		content := p.Files[name]
+		if !slices.ContainsFunc(referencingDirs, func(dir string) bool { return strings.HasPrefix(name, dir) }) || !isText(content) {
+			continue
+		}
+		for _, m := range refPattern.FindAllSubmatch(content, -1) {
+			if _, ok := p.Parameters[string(m[1])]; !ok {
+				return fmt.Errorf("%s: %w %q", name, ErrUndefinedParameter, m[1])
+			}
+		}
+	}
+	return nil
+}
+
 // checkAcyclic rejects dependency cycles (including self-dependencies) and
 // names the cycle.
 func checkAcyclic(criteria []model.Criterion) error {
@@ -461,6 +491,9 @@ func validateRendered(p model.Problem) error {
 	if !dnsLabel.MatchString(p.Namespace) {
 		return fmt.Errorf("namespace %q is not a DNS-1123 label", p.Namespace)
 	}
+	if err := checkScope(p); err != nil {
+		return err
+	}
 	for _, c := range p.Criteria {
 		if ns := c.Target.Namespace; ns != "" && !dnsLabel.MatchString(ns) {
 			return fmt.Errorf("criterion %q: target namespace %q is not a DNS-1123 label", c.ID, ns)
@@ -478,6 +511,30 @@ func validateRendered(p model.Problem) error {
 			if err := checkPorts(a.Args, "args"); err != nil {
 				return fmt.Errorf("%s action %d: %w", group, i, err)
 			}
+		}
+	}
+	return nil
+}
+
+// checkScope validates the rendered resource scope: extra namespaces are
+// distinct DNS-1123 labels other than the problem namespace, and cluster
+// resources are fully named cluster-scoped objects.
+func checkScope(p model.Problem) error {
+	seen := map[string]bool{}
+	for _, ns := range p.Scope.Namespaces {
+		switch {
+		case !dnsLabel.MatchString(ns):
+			return fmt.Errorf("scope namespace %q is not a DNS-1123 label", ns)
+		case ns == p.Namespace:
+			return fmt.Errorf("scope namespace %q is the problem namespace, which is always in scope", ns)
+		case seen[ns]:
+			return fmt.Errorf("duplicate scope namespace %q", ns)
+		}
+		seen[ns] = true
+	}
+	for i, r := range p.Scope.ClusterResources {
+		if r.APIVersion == "" || r.Kind == "" || r.Name == "" || r.Namespace != "" {
+			return fmt.Errorf("scope cluster_resources[%d] must name api_version, kind and name and no namespace", i)
 		}
 	}
 	return nil

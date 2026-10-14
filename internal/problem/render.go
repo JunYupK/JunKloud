@@ -1,6 +1,7 @@
 package problem
 
 import (
+	"bytes"
 	"crypto/sha256"
 	"encoding/binary"
 	"encoding/hex"
@@ -11,6 +12,7 @@ import (
 	"regexp"
 	"slices"
 	"strings"
+	"unicode/utf8"
 
 	"github.com/JunYupK/JunKloud/internal/model"
 )
@@ -35,7 +37,8 @@ var refPattern = regexp.MustCompile(`\$\{([a-z][a-z0-9_]*)\}`)
 // definition and question with them. Parameter names are visited in sorted
 // order; each takes values[next() % len(values)] from a SplitMix64 stream
 // seeded with seed XOR FNV-1a("seed-v1/parameters/" + p.ID). Only the
-// English question and setup/provided/ files become public; the rest of the
+// English question and setup/provided/ files become public (text files
+// rendered with the same values, binary files verbatim); the rest of the
 // package stays in Definition.Files and is identified by Hash.
 func Freeze(p model.Problem, seed uint64) (model.FrozenProblem, error) {
 	hash, err := Hash(p)
@@ -53,9 +56,18 @@ func Freeze(p model.Problem, seed uint64) (model.FrozenProblem, error) {
 
 	assets := map[string][]byte{}
 	for name, content := range p.Files {
-		if rel, ok := strings.CutPrefix(name, ProvidedDir); ok {
-			assets[rel] = content
+		rel, ok := strings.CutPrefix(name, ProvidedDir)
+		if !ok {
+			continue
 		}
+		if isText(content) {
+			text, err := RenderText(string(content), params)
+			if err != nil {
+				return model.FrozenProblem{}, fmt.Errorf("freeze %s: %s: %w", p.ID, name, err)
+			}
+			content = []byte(text)
+		}
+		assets[rel] = content
 	}
 	return model.FrozenProblem{
 		Definition:    def,
@@ -152,6 +164,15 @@ func render(p model.Problem, params map[string]any) (model.Problem, string, erro
 	for name, values := range d.Parameters {
 		d.Parameters[name] = slices.Clone(values)
 	}
+	d.Scope = model.ResourceScope{}
+	for _, ns := range p.Scope.Namespaces {
+		d.Scope.Namespaces = append(d.Scope.Namespaces, text(ns))
+	}
+	for _, r := range p.Scope.ClusterResources {
+		d.Scope.ClusterResources = append(d.Scope.ClusterResources, model.ObjectRef{
+			APIVersion: text(r.APIVersion), Kind: text(r.Kind), Namespace: text(r.Namespace), Name: text(r.Name),
+		})
+	}
 	d.InitialExpected = maps.Clone(p.InitialExpected)
 	d.Files = maps.Clone(p.Files)
 	d.Criteria = make([]model.Criterion, len(p.Criteria))
@@ -184,6 +205,12 @@ func render(p model.Problem, params map[string]any) (model.Problem, string, erro
 		return model.Problem{}, "", firstErr
 	}
 	return d, q, nil
+}
+
+// isText reports whether a package file is rendered as text: valid UTF-8
+// without NUL bytes. Other files are copied verbatim.
+func isText(b []byte) bool {
+	return utf8.Valid(b) && !bytes.Contains(b, []byte{0})
 }
 
 // RenderValue structurally substitutes parameters into a decoded YAML/JSON
