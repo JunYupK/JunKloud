@@ -1,0 +1,14 @@
+# Force LF regardless of the checking-out machine's core.autocrlf. Several
+# of these files are built into (or executed inside) Linux containers --
+# shell scripts with CRLF line endings fail there (a CRLF shebang line does
+# not match `#!/usr/bin/env bash`), and Windows checkouts default
+# core.autocrlf to true, which would otherwise silently corrupt them.
+* text=auto eol=lf
+*.sh text eol=lf
+Dockerfile text eol=lf
+Makefile text eol=lf
+go.mod text eol=lf
+go.sum text eol=lf
+*.go text eol=lf
+*.yaml text eol=lf
+*.yml text eol=lf

@@ -1,0 +1,55 @@
+services:
+  # One-shot: the host's Docker socket arrives root:root mode 0660 through
+  # Docker Desktop's Windows/Mac bridge, so a non-root learner can't use it
+  # until something with root in the container relaxes that. Socket sharing
+  # is not a security boundary for this project (see the design doc, section
+  # 12) -- whoever can reach the socket already has full daemon access.
+  sock-init:
+    build:
+      context: .
+      dockerfile: Dockerfile
+      target: workspace
+    user: "0:0"
+    command: ["sh", "-c", "chmod 666 /var/run/docker.sock"]
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+
+  workspace:
+    build:
+      context: .
+      dockerfile: Dockerfile
+      target: workspace
+    depends_on:
+      sock-init:
+        condition: service_completed_successfully
+    volumes:
+      - ..:/src
+      - learner-home:/home/learner
+      - /var/run/docker.sock:/var/run/docker.sock
+    working_dir: /src
+    tty: true
+    stdin_open: true
+
+  dev:
+    build:
+      context: .
+      dockerfile: Dockerfile
+      target: dev
+    depends_on:
+      sock-init:
+        condition: service_completed_successfully
+    volumes:
+      - ..:/src
+      - learner-home:/home/learner
+      - /var/run/docker.sock:/var/run/docker.sock
+    working_dir: /src
+    tty: true
+    stdin_open: true
+
+# Learner home: dotfiles, shell history, personal solution files. Survives
+# `docker compose down` + `up` (container recreation); only `down -v` removes
+# it. The runtime test above always runs against a uniquely-named project so
+# it gets (and tears down) its own throwaway instance of this volume, never
+# a real learner's.
+volumes:
+  learner-home:
