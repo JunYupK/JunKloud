@@ -4,6 +4,8 @@ package environment
 
 import (
 	"errors"
+	"slices"
+	"strings"
 	"testing"
 
 	"github.com/JunYupK/JunKloud/internal/executil"
@@ -173,4 +175,61 @@ func TestRecoverIgnoresOtherStateDir(t *testing.T) {
 	_, _ = New(dir, st, WithRunner(fake)).Ensure(bg)
 	testutil.Equal(t, fake.count("kind create cluster --name "+ClusterName("feedfacecafe")), 0)
 	testutil.Equal(t, fake.count("kind create cluster --name junkloud-"), 1)
+}
+
+// TestCheckLiveState: the caller's identity equals the record, but the real
+// cluster behind it differs. Each live check (node container set, node
+// cluster label, TLS against the recorded CA, the cluster's own CA, marker
+// UID and content) must reject on its own, and Apply aimed at a namespace
+// that does not exist yet must make no write.
+func TestCheckLiveState(t *testing.T) {
+	otherCA := newTestCA(t, "other-ca")
+	cases := map[string]func(model.Identity, *liveSetup){
+		"extra-node":      func(_ model.Identity, s *liveSetup) { s.psIDs = []string{liveContainer, "fedcba9876543210"} },
+		"replaced-node":   func(_ model.Identity, s *liveSetup) { s.psIDs = []string{"fedcba9876543210"} },
+		"node-of-other":   func(_ model.Identity, s *liveSetup) { s.inspectLabel = "someone-else" },
+		"tls-other-ca":    func(_ model.Identity, s *liveSetup) { s.servingCA = &otherCA },
+		"root-ca-differs": func(_ model.Identity, s *liveSetup) { s.rootCA = otherCA.pem },
+		"marker-uid":      func(_ model.Identity, s *liveSetup) { s.markerUID = "uid-theirs" },
+		"marker-env":      func(_ model.Identity, s *liveSetup) { s.markerEnv = "someone-else" },
+		"marker-missing":  func(_ model.Identity, s *liveSetup) { s.markerUID = "" },
+	}
+	for name, setup := range cases {
+		t.Run(name, func(t *testing.T) {
+			m, id, api, fake := newLiveManager(t, setup)
+			err := m.Check(bg, id)
+			testutil.ErrorIs(t, err, ErrIdentityMismatch)
+
+			owner := Owner{
+				Inventory:        model.Inventory{EnvironmentID: id.ID, SessionID: "s1", ProblemID: "p1"},
+				Namespace:        "jk-new",
+				CreateNamespaces: true,
+			}
+			_, err = m.Apply(bg, id, owner, []Action{{Kind: model.ActionApply, Objects: []map[string]any{configMap("", "cm")}}})
+			testutil.ErrorIs(t, err, ErrIdentityMismatch)
+			testutil.Equal(t, api.writes(), 0)
+			for _, c := range fake.Calls() {
+				if !strings.HasPrefix(c, "docker ps ") && !strings.HasPrefix(c, "docker container inspect ") {
+					t.Fatalf("unexpected command %q", c)
+				}
+			}
+		})
+	}
+}
+
+// The harness reaches every live check: an unchanged world passes Check
+// after reading both CA and marker.
+func TestCheckLiveStateMatches(t *testing.T) {
+	m, id, api, _ := newLiveManager(t, func(model.Identity, *liveSetup) {})
+	testutil.NoError(t, m.Check(bg, id))
+	reqs := api.Requests()
+	for _, want := range []string{
+		"GET /api/v1/namespaces/kube-system/configmaps/kube-root-ca.crt",
+		"GET /api/v1/namespaces/" + MarkerNamespace + "/configmaps/" + MarkerName,
+	} {
+		if !slices.Contains(reqs, want) {
+			t.Fatalf("live check did not read %s; requests %v", want, reqs)
+		}
+	}
+	testutil.Equal(t, api.writes(), 0)
 }

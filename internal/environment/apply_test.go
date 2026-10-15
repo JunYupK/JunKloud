@@ -186,3 +186,34 @@ func TestMergeInventory(t *testing.T) {
 	inv = removeResource(inv, a.Ref)
 	testutil.Equal(t, len(inv.Resources), 0)
 }
+
+// TestRequiredNamespaces: only setup (CreateNamespaces) asks for the whole
+// bundle; later steps need just the namespaces they write into, and an
+// explicit Namespace object counts as the author creating it.
+func TestRequiredNamespaces(t *testing.T) {
+	actions := []Action{
+		{Kind: model.ActionApply, Objects: []map[string]any{configMap("", "a"), configMap("", "b"), clusterRole("svc-alpha-reader")}},
+		{Kind: model.ActionDeleteOwned, Targets: []model.ObjectRef{{APIVersion: "v1", Kind: "ConfigMap", Namespace: "svc-alpha-client", Name: "c"}}},
+	}
+	owner := testOwner()
+	owner.Inventory.Resources = []model.OwnedResource{{Ref: model.ObjectRef{APIVersion: "v1", Kind: "ConfigMap", Namespace: "svc-alpha-client", Name: "c"}, UID: "u"}}
+	steps, err := planApply(owner, actions, testMapper())
+	testutil.NoError(t, err)
+
+	// Solution/case: the problem namespace only; delete-owned and
+	// cluster-scoped objects need none.
+	testutil.Equal(t, requiredNamespaces(owner, steps), []string{"svc-alpha"})
+	// delete-owned alone needs no namespace at all.
+	testutil.Equal(t, len(requiredNamespaces(owner, steps[1:])), 0)
+
+	// Setup: the whole bundle, created when missing.
+	owner.CreateNamespaces = true
+	testutil.Equal(t, requiredNamespaces(owner, steps), []string{"svc-alpha", "svc-alpha-client"})
+
+	// An explicit Namespace object in the actions is the author's creation.
+	owner.CreateNamespaces = false
+	explicit, err := planApply(owner, []Action{{Kind: model.ActionApply, Objects: []map[string]any{
+		namespaceObj("svc-alpha-client"), configMap("svc-alpha-client", "d")}}}, testMapper())
+	testutil.NoError(t, err)
+	testutil.Equal(t, len(requiredNamespaces(owner, explicit)), 0)
+}

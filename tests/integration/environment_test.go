@@ -413,12 +413,13 @@ func TestEnvironment(t *testing.T) {
 		// Same manager, identity pointing at the foreign nodes.
 		forged := id
 		forged.ContainerIDs = foreign.containers
-		testutil.ErrorIs(t, m.Check(ctx, forged), environment.ErrIdentityMismatch)
+		expectMismatch(t, m.Check(ctx, forged))
 		_, err := m.Apply(ctx, forged, environment.Owner{
-			Inventory: model.Inventory{EnvironmentID: forged.ID, SessionID: "s1", ProblemID: "p1"},
-			Namespace: "foreign-app",
+			Inventory:        model.Inventory{EnvironmentID: forged.ID, SessionID: "s1", ProblemID: "p1"},
+			Namespace:        "jk-new", // absent in both clusters: a broken gate would create it
+			CreateNamespaces: true,
 		}, []environment.Action{{Kind: model.ActionApply, Objects: []map[string]any{cm("", "sentinel")}}})
-		testutil.ErrorIs(t, err, environment.ErrIdentityMismatch)
+		expectMismatch(t, err)
 
 		// A state directory whose record claims the foreign cluster, with
 		// its real CA, nodes, kubeconfig and the UID of the squatter marker:
@@ -437,14 +438,15 @@ func TestEnvironment(t *testing.T) {
 
 		err = other.Check(ctx, claim)
 		t.Logf("foreign claim rejected: %v", err)
-		testutil.ErrorIs(t, err, environment.ErrIdentityMismatch)
+		expectMismatch(t, err)
 		_, err = other.Ensure(ctx)
-		testutil.ErrorIs(t, err, environment.ErrIdentityMismatch)
+		expectMismatch(t, err)
 		_, err = other.Apply(ctx, claim, environment.Owner{
-			Inventory: model.Inventory{EnvironmentID: claim.ID, SessionID: "s1", ProblemID: "p1"},
-			Namespace: "foreign-app",
+			Inventory:        model.Inventory{EnvironmentID: claim.ID, SessionID: "s1", ProblemID: "p1"},
+			Namespace:        "jk-new",
+			CreateNamespaces: true,
 		}, []environment.Action{{Kind: model.ActionApply, Objects: []map[string]any{cm("", "sentinel")}}})
-		testutil.ErrorIs(t, err, environment.ErrIdentityMismatch)
+		expectMismatch(t, err)
 		ops, err := otherStore.ListOperations(ctx, environment.OperationCreate)
 		testutil.NoError(t, err)
 		testutil.Equal(t, len(ops), 0)
@@ -456,7 +458,23 @@ func TestEnvironment(t *testing.T) {
 		testutil.NoError(t, err)
 		testutil.Equal(t, sentinel.Data, map[string]string{"owner": "not-junkloud"})
 		testutil.Equal(t, len(sentinel.Labels), 0)
+		for _, cs := range []kubernetes.Interface{foreign.client, kubeClient(t, m, id)} {
+			_, err := cs.CoreV1().Namespaces().Get(ctx, "jk-new", metav1.GetOptions{})
+			if !apierrors.IsNotFound(err) {
+				t.Fatalf("namespace jk-new must not exist after rejected Apply calls: %v", err)
+			}
+		}
 	})
+}
+
+// expectMismatch records (without stopping the test) a missing
+// ErrIdentityMismatch, so the foreign-cluster mutation check below still runs
+// and shows whether a weakened gate let a write through.
+func expectMismatch(t *testing.T, err error) {
+	t.Helper()
+	if !errors.Is(err, environment.ErrIdentityMismatch) {
+		t.Errorf("got error %v, want error matching %v", err, environment.ErrIdentityMismatch)
+	}
 }
 
 func mustKubeconfigBytes(t *testing.T, path string) []byte {
@@ -478,8 +496,9 @@ func testApply(t *testing.T, m *environment.Manager, st *store.Store, id model.I
 	ctx := context.Background()
 	cs := kubeClient(t, m, id)
 	owner := environment.Owner{
-		Inventory: model.Inventory{EnvironmentID: id.ID, SessionID: "s1", ProblemID: "service-test"},
-		Namespace: "jk-p1",
+		Inventory:        model.Inventory{EnvironmentID: id.ID, SessionID: "s1", ProblemID: "service-test"},
+		Namespace:        "jk-p1",
+		CreateNamespaces: true, // setup
 		Scope: model.ResourceScope{
 			Namespaces: []string{"jk-p1-client"},
 			ClusterResources: []model.ObjectRef{
@@ -532,6 +551,10 @@ func testApply(t *testing.T, m *environment.Manager, st *store.Store, id model.I
 	testutil.NoError(t, err)
 	testutil.Equal(t, again, inv)
 
+	// Solution, case and later steps never create namespaces.
+	later := owner
+	later.CreateNamespaces = false
+
 	notExists := func(ns, name string) {
 		t.Helper()
 		_, err := cs.CoreV1().ConfigMaps(ns).Get(ctx, name, metav1.GetOptions{})
@@ -541,12 +564,12 @@ func testApply(t *testing.T, m *environment.Manager, st *store.Store, id model.I
 	}
 	// Out of scope: refused before anything (even the valid first object)
 	// is created.
-	_, err = m.Apply(ctx, id, owner, []environment.Action{{Kind: model.ActionApply, Objects: []map[string]any{
+	_, err = m.Apply(ctx, id, later, []environment.Action{{Kind: model.ActionApply, Objects: []map[string]any{
 		cm("", "should-not-exist"), cm("default", "escaped")}}})
 	testutil.ErrorIs(t, err, environment.ErrOutOfScope)
 	notExists("jk-p1", "should-not-exist")
 	notExists("default", "escaped")
-	_, err = m.Apply(ctx, id, owner, []environment.Action{{Kind: model.ActionApply, Objects: []map[string]any{
+	_, err = m.Apply(ctx, id, later, []environment.Action{{Kind: model.ActionApply, Objects: []map[string]any{
 		{"apiVersion": "rbac.authorization.k8s.io/v1", "kind": "ClusterRole", "metadata": map[string]any{"name": "jk-undeclared"}}}}})
 	testutil.ErrorIs(t, err, environment.ErrOutOfScope)
 	_, err = cs.RbacV1().ClusterRoles().Get(ctx, "jk-undeclared", metav1.GetOptions{})
@@ -559,7 +582,7 @@ func testApply(t *testing.T, m *environment.Manager, st *store.Store, id model.I
 	learner, err := cs.CoreV1().ConfigMaps("jk-p1").Create(ctx, &corev1.ConfigMap{
 		ObjectMeta: metav1.ObjectMeta{Name: "learner-made"}, Data: map[string]string{"mine": "yes"}}, metav1.CreateOptions{})
 	testutil.NoError(t, err)
-	_, err = m.Apply(ctx, id, owner, []environment.Action{{Kind: model.ActionApply, Objects: []map[string]any{cm("", "learner-made")}}})
+	_, err = m.Apply(ctx, id, later, []environment.Action{{Kind: model.ActionApply, Objects: []map[string]any{cm("", "learner-made")}}})
 	testutil.ErrorIs(t, err, environment.ErrNotOwned)
 	now, err := cs.CoreV1().ConfigMaps("jk-p1").Get(ctx, "learner-made", metav1.GetOptions{})
 	testutil.NoError(t, err)
@@ -568,8 +591,9 @@ func testApply(t *testing.T, m *environment.Manager, st *store.Store, id model.I
 	unowned, err := cs.CoreV1().Namespaces().Create(ctx, &corev1.Namespace{ObjectMeta: metav1.ObjectMeta{Name: "jk-unowned"}}, metav1.CreateOptions{})
 	testutil.NoError(t, err)
 	_, err = m.Apply(ctx, id, environment.Owner{
-		Inventory: model.Inventory{EnvironmentID: id.ID, SessionID: "s1", ProblemID: "other"},
-		Namespace: "jk-unowned",
+		Inventory:        model.Inventory{EnvironmentID: id.ID, SessionID: "s1", ProblemID: "other"},
+		Namespace:        "jk-unowned",
+		CreateNamespaces: true, // not even setup may take over an unmarked namespace
 	}, []environment.Action{{Kind: model.ActionApply, Objects: []map[string]any{cm("", "x")}}})
 	testutil.ErrorIs(t, err, environment.ErrNotOwned)
 	ns, err := cs.CoreV1().Namespaces().Get(ctx, "jk-unowned", metav1.GetOptions{})
@@ -578,13 +602,13 @@ func testApply(t *testing.T, m *environment.Manager, st *store.Store, id model.I
 	notExists("jk-unowned", "x")
 
 	// delete-owned removes only recorded objects.
-	_, err = m.Apply(ctx, id, owner, []environment.Action{{Kind: model.ActionDeleteOwned, Targets: []model.ObjectRef{
+	_, err = m.Apply(ctx, id, later, []environment.Action{{Kind: model.ActionDeleteOwned, Targets: []model.ObjectRef{
 		{APIVersion: "v1", Kind: "ConfigMap", Name: "learner-made"}}}})
 	testutil.ErrorIs(t, err, environment.ErrNotOwned)
 	_, err = cs.CoreV1().ConfigMaps("jk-p1").Get(ctx, "learner-made", metav1.GetOptions{})
 	testutil.NoError(t, err)
 
-	after, err := m.Apply(ctx, id, owner, []environment.Action{{Kind: model.ActionDeleteOwned, Targets: []model.ObjectRef{
+	after, err := m.Apply(ctx, id, later, []environment.Action{{Kind: model.ActionDeleteOwned, Targets: []model.ObjectRef{
 		{APIVersion: "v1", Kind: "ConfigMap", Name: "web-config"}}}})
 	testutil.NoError(t, err)
 	if slices.ContainsFunc(after.Resources, func(r model.OwnedResource) bool { return r.Ref.Name == "web-config" }) {
@@ -603,8 +627,50 @@ func testApply(t *testing.T, m *environment.Manager, st *store.Store, id model.I
 		time.Sleep(200 * time.Millisecond)
 	}
 
+	// A namespace the learner deleted is not recreated by later steps; only
+	// an explicit setup (CreateNamespaces) creates it again.
+	oldClientNS := liveMeta(t, cs, model.ObjectRef{APIVersion: "v1", Kind: "Namespace", Name: "jk-p1-client"}).UID
+	testutil.NoError(t, cs.CoreV1().Namespaces().Delete(ctx, "jk-p1-client", metav1.DeleteOptions{}))
+	nsGone := func() bool {
+		_, err := cs.CoreV1().Namespaces().Get(ctx, "jk-p1-client", metav1.GetOptions{})
+		return apierrors.IsNotFound(err)
+	}
+	deadline = time.Now().Add(2 * time.Minute)
+	for !nsGone() {
+		if time.Now().After(deadline) {
+			t.Fatal("namespace jk-p1-client was not deleted")
+		}
+		time.Sleep(500 * time.Millisecond)
+	}
+	later.Inventory = after
+	_, err = m.Apply(ctx, id, later, []environment.Action{{Kind: model.ActionApply, Objects: []map[string]any{cm("jk-p1-client", "client-config")}}})
+	testutil.ErrorIs(t, err, environment.ErrNamespaceMissing)
+	testutil.Equal(t, nsGone(), true)
+	// delete-owned of an object that went with the namespace succeeds
+	// without bringing the namespace back.
+	afterDelete, err := m.Apply(ctx, id, later, []environment.Action{{Kind: model.ActionDeleteOwned, Targets: []model.ObjectRef{
+		{APIVersion: "v1", Kind: "ConfigMap", Namespace: "jk-p1-client", Name: "client-config"}}}})
+	testutil.NoError(t, err)
+	testutil.Equal(t, nsGone(), true)
+	testutil.Equal(t, len(afterDelete.Resources), len(after.Resources)-1)
+	// Setup recreates it explicitly, as a new namespace.
+	resetup := owner
+	resetup.Inventory = afterDelete
+	recreated, err := m.Apply(ctx, id, resetup, setup)
+	testutil.NoError(t, err)
+	newClientNS := liveMeta(t, cs, model.ObjectRef{APIVersion: "v1", Kind: "Namespace", Name: "jk-p1-client"}).UID
+	if newClientNS == oldClientNS {
+		t.Fatal("namespace was not recreated")
+	}
+	for _, r := range recreated.Resources {
+		if r.Ref.Kind == "Namespace" && r.Ref.Name == "jk-p1-client" {
+			testutil.Equal(t, r.UID, string(newClientNS))
+		}
+	}
+	later.Inventory = recreated
+
 	// Unsupported kinds are explicit.
-	_, err = m.Apply(ctx, id, owner, []environment.Action{{Kind: model.ActionHelm}})
+	_, err = m.Apply(ctx, id, later, []environment.Action{{Kind: model.ActionHelm}})
 	testutil.ErrorIs(t, err, environment.ErrUnsupportedAction)
 }
 

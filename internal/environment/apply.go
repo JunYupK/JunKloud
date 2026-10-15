@@ -37,6 +37,10 @@ var (
 	// ErrInvalidAction: an action or object is malformed (unknown kind,
 	// missing name, unknown resource type, nothing to do).
 	ErrInvalidAction = errors.New("environment: invalid action")
+	// ErrNamespaceMissing: a namespace the actions write into does not exist
+	// (or is terminating) and the owner did not ask for namespace creation.
+	// Apply never silently recreates a namespace a learner deleted.
+	ErrNamespaceMissing = errors.New("environment: problem namespace missing")
 	// ErrInvalidOwner: the owner cannot be marked on objects (bad IDs or
 	// namespaces, or a reserved namespace).
 	ErrInvalidOwner = errors.New("environment: invalid owner")
@@ -50,12 +54,21 @@ var reservedNamespaces = []string{"default", "kube-system", "kube-public", "kube
 // Inventory carries the owner (EnvironmentID, SessionID, ProblemID) and the
 // resources it already owns; delete-owned may only remove those. Namespace is
 // the problem namespace; it and Scope.Namespaces form the problem's namespace
-// bundle, which Apply creates (marked as the owner's) when missing. Scope
-// also lists the only cluster-scoped objects the problem may create.
+// bundle. Scope also lists the only cluster-scoped objects the problem may
+// create.
+//
+// CreateNamespaces is for the initial setup only: Apply then creates every
+// missing bundle namespace (marked as the owner's) before the actions. Without
+// it (solution, case and later steps), Apply creates no namespace on its own:
+// every namespace an apply object writes into must already exist and carry
+// the owner's marks, or Apply fails with ErrNamespaceMissing before changing
+// anything. A Namespace object listed explicitly in the actions is still
+// applied like any other object.
 type Owner struct {
-	Inventory model.Inventory
-	Namespace string
-	Scope     model.ResourceScope
+	Inventory        model.Inventory
+	Namespace        string
+	Scope            model.ResourceScope
+	CreateNamespaces bool
 }
 
 // Action is one rendered setup, solution or case step. Callers decode the
@@ -81,8 +94,9 @@ type Action struct {
 func OwnerID(inv model.Inventory) string { return inv.SessionID + "/" + inv.ProblemID }
 
 // Apply verifies id (as Check does), plans every action against the owner's
-// scope, and only then changes the cluster: it ensures the namespace bundle,
-// then runs the actions in order. Every created object carries the owner
+// scope, reads every namespace it needs (see Owner.CreateNamespaces), and only
+// then changes the cluster: with CreateNamespaces it creates the missing
+// bundle namespaces, then it runs the actions in order. Every created object carries the owner
 // labels and annotation and is recorded, with its UID, in the returned
 // inventory. The intent is stored as an Operation before the first change
 // and the inventory is stored after each change, so an interruption leaves
@@ -101,6 +115,11 @@ func (m *Manager) Apply(ctx context.Context, id model.Identity, owner Owner, act
 		return inv, err
 	}
 	steps, err := planApply(owner, actions, cl.mapper)
+	if err != nil {
+		return inv, err
+	}
+	// Read-only: every namespace must be usable before the first write.
+	nsPlan, err := checkNamespaces(ctx, cl, owner, steps)
 	if err != nil {
 		return inv, err
 	}
@@ -130,8 +149,8 @@ func (m *Manager) Apply(ctx context.Context, id model.Identity, owner Owner, act
 		return m.store.PutInventory(ctx, inv)
 	}
 
-	for _, ns := range bundle(owner) {
-		r, err := ensureNamespace(ctx, cl, owner.Inventory, ns)
+	for _, n := range nsPlan {
+		r, err := ensureNamespace(ctx, cl, owner.Inventory, n)
 		if err != nil {
 			return inv, err
 		}
@@ -387,25 +406,84 @@ func resourceFor(cl *clients, p plannedObject) dynamic.ResourceInterface {
 	return cl.dyn.Resource(p.gvr)
 }
 
-// ensureNamespace creates a bundle namespace marked as the owner's, or
-// accepts an existing one only if it already carries the owner's marks.
-func ensureNamespace(ctx context.Context, cl *clients, inv model.Inventory, name string) (model.OwnedResource, error) {
-	ref := model.ObjectRef{APIVersion: "v1", Kind: "Namespace", Name: name}
-	ns, err := cl.kube.CoreV1().Namespaces().Get(ctx, name, metav1.GetOptions{})
-	if apierrors.IsNotFound(err) {
-		ns, err = cl.kube.CoreV1().Namespaces().Create(ctx, &corev1.Namespace{ObjectMeta: metav1.ObjectMeta{
-			Name: name, Labels: ownerLabels(inv), Annotations: map[string]string{AnnotationOwner: OwnerID(inv)},
-		}}, metav1.CreateOptions{FieldManager: fieldManager})
-	} else if err == nil {
-		if !ownedBy(ns.Labels, inv) {
-			return model.OwnedResource{}, fmt.Errorf("%w: namespace %q exists and is not marked as %s's", ErrNotOwned, name, OwnerID(inv))
-		}
-		if ns.DeletionTimestamp != nil {
-			return model.OwnedResource{}, fmt.Errorf("%w: namespace %q is terminating", ErrUnavailable, name)
+// namespaceState is a namespace Apply needs, as found before any write.
+type namespaceState struct {
+	name     string
+	existing *corev1.Namespace // nil: missing, to be created
+}
+
+// requiredNamespaces lists the namespaces Apply must find (or, with
+// CreateNamespaces, create) before running steps: the whole bundle with
+// CreateNamespaces, otherwise only the namespaces apply objects write into,
+// minus those an explicit Namespace object in the steps creates.
+func requiredNamespaces(owner Owner, steps []step) []string {
+	if owner.CreateNamespaces {
+		return bundle(owner)
+	}
+	explicit := map[string]bool{}
+	for _, s := range steps {
+		for _, p := range s.objects {
+			if s.kind == model.ActionApply && p.ref.Kind == "Namespace" && p.ref.APIVersion == "v1" {
+				explicit[p.ref.Name] = true
+			}
 		}
 	}
-	if err != nil {
-		return model.OwnedResource{}, apiError("ensure namespace "+name, err)
+	var out []string
+	for _, s := range steps {
+		for _, p := range s.objects {
+			ns := p.ref.Namespace
+			if s.kind != model.ActionApply || !p.namespaced || explicit[ns] || slices.Contains(out, ns) {
+				continue
+			}
+			out = append(out, ns)
+		}
+	}
+	return out
+}
+
+// checkNamespaces reads every required namespace without changing anything.
+// An existing one must carry the owner's marks and not be terminating; a
+// missing one is an error unless the owner asked for namespace creation.
+func checkNamespaces(ctx context.Context, cl *clients, owner Owner, steps []step) ([]namespaceState, error) {
+	inv := owner.Inventory
+	var out []namespaceState
+	for _, name := range requiredNamespaces(owner, steps) {
+		ns, err := cl.kube.CoreV1().Namespaces().Get(ctx, name, metav1.GetOptions{})
+		switch {
+		case apierrors.IsNotFound(err):
+			if !owner.CreateNamespaces {
+				return nil, fmt.Errorf("%w: namespace %q does not exist; it is not recreated outside setup", ErrNamespaceMissing, name)
+			}
+			out = append(out, namespaceState{name: name})
+		case err != nil:
+			return nil, apiError("read namespace "+name, err)
+		case !ownedBy(ns.Labels, inv):
+			return nil, fmt.Errorf("%w: namespace %q exists and is not marked as %s's", ErrNotOwned, name, OwnerID(inv))
+		case ns.DeletionTimestamp != nil:
+			return nil, fmt.Errorf("%w: namespace %q is terminating", ErrNamespaceMissing, name)
+		default:
+			out = append(out, namespaceState{name: name, existing: ns})
+		}
+	}
+	return out, nil
+}
+
+// ensureNamespace creates a namespace checkNamespaces found missing, marked
+// as the owner's, or returns the existing owned one's record.
+func ensureNamespace(ctx context.Context, cl *clients, inv model.Inventory, n namespaceState) (model.OwnedResource, error) {
+	ref := model.ObjectRef{APIVersion: "v1", Kind: "Namespace", Name: n.name}
+	ns := n.existing
+	if ns == nil {
+		var err error
+		ns, err = cl.kube.CoreV1().Namespaces().Create(ctx, &corev1.Namespace{ObjectMeta: metav1.ObjectMeta{
+			Name: n.name, Labels: ownerLabels(inv), Annotations: map[string]string{AnnotationOwner: OwnerID(inv)},
+		}}, metav1.CreateOptions{FieldManager: fieldManager})
+		if apierrors.IsAlreadyExists(err) {
+			return model.OwnedResource{}, fmt.Errorf("%w: namespace %q appeared concurrently", ErrNotOwned, n.name)
+		}
+		if err != nil {
+			return model.OwnedResource{}, apiError("create namespace "+n.name, err)
+		}
 	}
 	return model.OwnedResource{Ref: ref, UID: string(ns.UID), OwnerID: OwnerID(inv)}, nil
 }
@@ -467,7 +545,10 @@ func deleteObject(ctx context.Context, cl *clients, inv model.Inventory, p plann
 // objects not created yet have no UID. Stored as the apply intent.
 func plannedInventory(inv model.Inventory, owner Owner, steps []step) model.Inventory {
 	out := cloneInventory(inv)
-	for _, ns := range bundle(owner) {
+	for _, ns := range requiredNamespaces(owner, steps) {
+		if !owner.CreateNamespaces {
+			break
+		}
 		ref := model.ObjectRef{APIVersion: "v1", Kind: "Namespace", Name: ns}
 		if !hasResource(out, ref) {
 			out = upsertResource(out, model.OwnedResource{Ref: ref, OwnerID: OwnerID(inv)})
