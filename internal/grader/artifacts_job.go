@@ -513,19 +513,19 @@ func (c *ArtifactChecker) checkCronSchedule(ctx context.Context, t Target, crit 
 				continue
 			}
 			name := nameOf(j)
+			kind := scheduledByController(j)
+			if kind == runManual {
+				manual[name] = true // listed as ignored, whenever it was made
+				continue
+			}
 			if first {
 				seen[uidOf(j)] = true
 				continue
 			}
-			if seen[uidOf(j)] {
+			if seen[uidOf(j)] || kind != runScheduled {
 				continue
 			}
-			switch scheduledByController(j) {
-			case runScheduled:
-				runs = append(runs, cronRun{Job: name, Scheduled: stringAt(j, "metadata", "annotations", annotationCronScheduled)})
-			case runManual:
-				manual[name] = true
-			}
+			runs = append(runs, cronRun{Job: name, Scheduled: stringAt(j, "metadata", "annotations", annotationCronScheduled)})
 		}
 		first = false
 		if len(runs) >= a.MinRuns {
@@ -550,7 +550,7 @@ func (c *ArtifactChecker) checkCronSchedule(ctx context.Context, t Target, crit 
 			return model.CheckResult{}, fmt.Errorf("%w: CronJob %s was replaced or edited during the observation", ErrTargetChanged, ref.Name)
 		}
 	}
-	actual := map[string]any{"runs_observed": len(runs), "runs": append([]cronRun(nil), runs...)}
+	actual := map[string]any{"runs_observed": len(runs), "runs": append([]cronRun{}, runs...)}
 	if len(manual) > 0 {
 		actual["manual_jobs_ignored"] = len(manual)
 	}

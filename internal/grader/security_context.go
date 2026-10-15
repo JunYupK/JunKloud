@@ -31,9 +31,15 @@ import (
 //	behavior:   what a running pod does, read by exec (no shell):
 //	            {container?, uid?, gid?, non_root?, caps_absent?, caps_present?,
 //	            no_capabilities?, read_only_root?}. `id -u`, `id -g`,
-//	            /proc/self/status (CapEff) and /proc/self/mountinfo are read
+//	            /proc/self/status (CapEff, CapBnd) and /proc/self/mountinfo are read
 //	            from up to 3 running pods of the target; a pod that cannot be
 //	            examined makes the criterion ERROR.
+//
+// caps_present / caps_absent are judged on the bounding set (CapBnd, what the
+// process can ever hold) together with the effective set: a non-root process
+// has an empty effective set even when the pod adds NET_BIND_SERVICE, and
+// dropping a capability removes it from the bounding set. no_capabilities
+// means nothing is effective now (CapEff is empty).
 //
 // A declared field does not prove behaviour: give both when the problem
 // cares about the process, not the manifest.
@@ -448,6 +454,7 @@ func setText(s map[string]bool) string {
 type procFacts struct {
 	uid, gid int64
 	capEff   uint64
+	capBnd   uint64
 	rootRO   bool
 }
 
@@ -485,6 +492,7 @@ func (c *SecurityChecker) checkBehavior(ctx context.Context, ref model.ObjectRef
 		}
 		if needsCaps(b) {
 			entry["effective_capabilities"] = capNames(facts.capEff)
+			entry["bounding_capabilities"] = capNames(facts.capBnd)
 		}
 		if b.ReadOnlyRoot != nil {
 			entry["root_read_only"] = facts.rootRO
@@ -541,7 +549,7 @@ func (c *SecurityChecker) probePod(ctx context.Context, p object, container stri
 		if err != nil {
 			return f, err
 		}
-		if f.capEff, err = parseCapEff(out); err != nil {
+		if f.capEff, f.capBnd, err = parseCaps(out); err != nil {
 			return f, fmt.Errorf("%w: pod %s: %v", ErrInsufficientEvidence, nameOf(p), err)
 		}
 	}
@@ -559,17 +567,29 @@ func (c *SecurityChecker) probePod(ctx context.Context, p object, container stri
 	return f, nil
 }
 
-func parseCapEff(status string) (uint64, error) {
+// parseCaps reads CapEff (effective now) and CapBnd (bounding: what the
+// process can ever acquire) from /proc/self/status.
+func parseCaps(status string) (eff, bnd uint64, err error) {
+	found := 0
 	for _, line := range strings.Split(status, "\n") {
-		if v, ok := strings.CutPrefix(line, "CapEff:"); ok {
-			n, err := strconv.ParseUint(strings.TrimSpace(v), 16, 64)
-			if err != nil {
-				return 0, fmt.Errorf("unreadable CapEff %q", strings.TrimSpace(v))
+		for _, f := range []struct {
+			prefix string
+			dst    *uint64
+		}{{"CapEff:", &eff}, {"CapBnd:", &bnd}} {
+			if v, ok := strings.CutPrefix(line, f.prefix); ok {
+				n, perr := strconv.ParseUint(strings.TrimSpace(v), 16, 64)
+				if perr != nil {
+					return 0, 0, fmt.Errorf("unreadable %s %q", strings.TrimSuffix(f.prefix, ":"), strings.TrimSpace(v))
+				}
+				*f.dst = n
+				found++
 			}
-			return n, nil
 		}
 	}
-	return 0, errors.New("/proc/self/status has no CapEff line")
+	if found != 2 {
+		return 0, 0, errors.New("/proc/self/status lacks CapEff or CapBnd")
+	}
+	return eff, bnd, nil
 }
 
 func capNames(set uint64) []string {
@@ -625,13 +645,13 @@ func behaviorFailures(pod string, f procFacts, b *scBehavior) []string {
 		add("the process runs with gid %d, want %d", f.gid, *b.GID)
 	}
 	for _, n := range b.CapsAbsent {
-		if f.capEff&capBit(n) != 0 {
-			add("capability %s is still effective", n)
+		if (f.capEff|f.capBnd)&capBit(n) != 0 {
+			add("capability %s is still available to the process", n)
 		}
 	}
 	for _, n := range b.CapsPresent {
-		if f.capEff&capBit(n) == 0 {
-			add("capability %s is not effective", n)
+		if f.capBnd&capBit(n) == 0 {
+			add("capability %s is not available to the process", n)
 		}
 	}
 	if b.NoCapabilities && f.capEff != 0 {

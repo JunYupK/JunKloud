@@ -1,0 +1,5 @@
+replicaCount: 1
+image:
+  repository: docker.io/library/busybox
+  tag: "1.37.0"
+message: hello from the fixture chart

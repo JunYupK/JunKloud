@@ -1,11 +1,13 @@
 package grader
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"regexp"
+	"strconv"
 	"strings"
 
 	"github.com/JunYupK/JunKloud/internal/model"
@@ -34,7 +36,7 @@ import (
 //	                 must have rolled out (the ready checker's rules)
 //	wait:            poll up to the criterion timeout for the status
 //
-// Everything is read through `helm ... -o json` run with the environment's
+// Everything is read through `helm list/get values -o json` (and `helm get manifest`) run with the environment's
 // kubeconfig and context passed as flags (never $KUBECONFIG) and private
 // cache directories. helm is a pinned external tool (runtime/versions.lock.yaml).
 type helmArgs struct {
@@ -217,37 +219,54 @@ func (c *ArtifactChecker) checkHelm(ctx context.Context, t Target, crit model.Cr
 	return res, nil
 }
 
-// helmStatus reads `helm status -o json`. found=false only when helm says the
-// release does not exist.
+// helmStatus reads the release with `helm list --filter ^name$ -o json` (Helm 4 lists releases of every status by default)
+// (name, namespace, revision, status, chart "name-version", app_version): the
+// documented JSON that is stable across Helm versions. found=false only when
+// helm lists no such release.
 func (c *ArtifactChecker) helmStatus(ctx context.Context, ns, name string) (helmRelease, bool, error) {
-	res, err := c.helm(ctx, ns, "status", name, "-o", "json")
+	res, err := c.helm(ctx, ns, "list", "--filter", "^"+name+"$", "-o", "json")
 	if err != nil {
-		return helmRelease{}, false, fmt.Errorf("helm status: %w", err)
+		return helmRelease{}, false, fmt.Errorf("helm list: %w", err)
 	}
 	if res.ExitCode != 0 {
-		if strings.Contains(strings.ToLower(string(res.Stderr)), "release: not found") {
-			return helmRelease{}, false, nil
+		return helmRelease{}, false, fmt.Errorf("helm list failed (exit %d): %s", res.ExitCode, shortenLine(string(res.Stderr)))
+	}
+	var rows []struct {
+		Name       string `json:"name"`
+		Namespace  string `json:"namespace"`
+		Revision   string `json:"revision"`
+		Status     string `json:"status"`
+		Chart      string `json:"chart"`
+		AppVersion string `json:"app_version"`
+	}
+	if len(bytes.TrimSpace(res.Stdout)) == 0 {
+		return helmRelease{}, false, nil // "no results" prints nothing
+	}
+	if err := json.Unmarshal(res.Stdout, &rows); err != nil {
+		return helmRelease{}, false, fmt.Errorf("helm list: unreadable JSON answer")
+	}
+	for _, r := range rows {
+		if r.Name != name {
+			continue
 		}
-		return helmRelease{}, false, fmt.Errorf("helm status %s failed (exit %d): %s", name, res.ExitCode, shortenLine(string(res.Stderr)))
+		rev, err := strconv.Atoi(r.Revision)
+		if err != nil || r.Status == "" {
+			return helmRelease{}, false, fmt.Errorf("helm list: unreadable row for release %s", name)
+		}
+		chart, version := splitChart(r.Chart)
+		return helmRelease{status: r.Status, chart: chart, version: version, appVersion: r.AppVersion, revision: rev}, true, nil
 	}
-	var doc struct {
-		Version int `json:"version"`
-		Info    struct {
-			Status string `json:"status"`
-		} `json:"info"`
-		Chart struct {
-			Metadata struct {
-				Name       string `json:"name"`
-				Version    string `json:"version"`
-				AppVersion string `json:"appVersion"`
-			} `json:"metadata"`
-		} `json:"chart"`
+	return helmRelease{}, false, nil
+}
+
+var chartNameVersion = regexp.MustCompile(`^(.+?)-(v?[0-9]+\.[0-9]+\.[0-9]+.*)$`)
+
+// splitChart splits helm list's "name-version" chart column.
+func splitChart(s string) (name, version string) {
+	if m := chartNameVersion.FindStringSubmatch(s); m != nil {
+		return m[1], m[2]
 	}
-	if err := json.Unmarshal(res.Stdout, &doc); err != nil || doc.Info.Status == "" {
-		return helmRelease{}, false, fmt.Errorf("helm status %s: unreadable JSON answer", name)
-	}
-	m := doc.Chart.Metadata
-	return helmRelease{status: doc.Info.Status, chart: m.Name, version: m.Version, appVersion: m.AppVersion, revision: doc.Version}, true, nil
+	return s, ""
 }
 
 // helmValues evaluates the values requirements. Sensitive paths are never

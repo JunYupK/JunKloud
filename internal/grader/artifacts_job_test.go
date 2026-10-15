@@ -246,6 +246,14 @@ func TestCronScheduleNotProvedByManualJob(t *testing.T) {
 			t.Errorf("evidence does not mention the ignored manual job: %s", evidenceJSON(t, res))
 		}
 	})
+	t.Run("a manual job that existed before the window is still reported as ignored", func(t *testing.T) {
+		m := manualJob(t, "nightly-manual")
+		res, _, _ := gradeSchedule(t, [][]map[string]any{{m}, {m}}, "20s", cron)
+		testutil.Equal(t, res.Status, "FAIL")
+		if !strings.Contains(evidenceJSON(t, res), `"manual_jobs_ignored":1`) {
+			t.Errorf("evidence: %s", evidenceJSON(t, res))
+		}
+	})
 	t.Run("a job with the scheduled annotation written by a person", func(t *testing.T) {
 		forged := cronChild(t, "nightly-forged", "kubectl-client-side-apply", map[string]string{scheduledAnnotation: "2026-10-15T00:01:00Z"})
 		res, _, _ := gradeSchedule(t, [][]map[string]any{nil, {forged}}, "30s", cron)

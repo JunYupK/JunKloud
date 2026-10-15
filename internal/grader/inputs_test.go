@@ -238,7 +238,7 @@ func TestInputsOfHelmKustomizeAndRBAC(t *testing.T) {
 	})
 	t.Run("helm: no release", func(t *testing.T) {
 		h := deployedFixture()
-		h.fail = map[string]grader.ToolResult{" status web": exit(1, "Error: release: not found")}
+		h.fail = map[string]grader.ToolResult{" list ": out("[]")}
 		m := capture(t, grader.ArtifactConfig{Tools: h.tools(), KubeconfigPath: "/k", Context: "c"}, "", helmCrit(nil))
 		testutil.Equal(t, m["helm:jk-p1/web"], "absent")
 	})

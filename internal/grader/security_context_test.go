@@ -128,7 +128,11 @@ func capHex(bits ...uint) string {
 }
 
 func procStatus(capEff string) string {
-	return fmt.Sprintf("Name:\tapp\nUid:\t1000\t1000\t1000\t1000\nCapInh:\t0000000000000000\nCapPrm:\t%s\nCapEff:\t%s\nCapBnd:\t%s\nCapAmb:\t0000000000000000\nSeccomp:\t2\n", capEff, capEff, capEff)
+	return procStatusBnd(capEff, capEff)
+}
+
+func procStatusBnd(capEff, capBnd string) string {
+	return fmt.Sprintf("Name:\tapp\nUid:\t1000\t1000\t1000\t1000\nCapInh:\t0000000000000000\nCapPrm:\t%s\nCapEff:\t%s\nCapBnd:\t%s\nCapAmb:\t0000000000000000\nSeccomp:\t2\n", capEff, capEff, capBnd)
 }
 
 const mountsRW = "22 1 0:21 / / rw,relatime - overlay overlay rw,lowerdir=/x\n23 22 0:5 / /proc rw - proc proc rw\n"
@@ -173,8 +177,19 @@ func TestSecurityContextBehavior(t *testing.T) {
 		{name: "wrong gid", pods: behaviorPods("1000", "0", capHex(), mountsRW), behavior: map[string]any{"gid": 1000}, want: "FAIL", reason: []string{"gid 0"}},
 		{name: "capabilities dropped", pods: behaviorPods("1000", "1000", capHex(netBindService), mountsRW),
 			behavior: map[string]any{"caps_absent": []any{"NET_RAW", "CAP_SETUID"}, "caps_present": []any{"NET_BIND_SERVICE"}}, want: "PASS"},
+		{name: "non-root keeps an added capability only in the bounding set", pods: func() *fakePods {
+			p := behaviorPods("10001", "10001", capHex(), mountsRW)
+			inner := p.execFn
+			p.execFn = func(key string, cmd []string) (grader.ExecResult, error) {
+				if strings.Join(cmd, " ") == "cat /proc/self/status" {
+					return grader.ExecResult{Stdout: procStatusBnd(capHex(), capHex(netBindService))}, nil
+				}
+				return inner(key, cmd)
+			}
+			return p
+		}(), behavior: map[string]any{"caps_present": []any{"NET_BIND_SERVICE"}, "caps_absent": []any{"NET_RAW"}, "no_capabilities": false}, want: "PASS"},
 		{name: "capability still effective", pods: behaviorPods("1000", "1000", capHex(netRaw, setuid), mountsRW),
-			behavior: map[string]any{"caps_absent": []any{"NET_RAW"}}, want: "FAIL", reason: []string{"NET_RAW"}},
+			behavior: map[string]any{"caps_absent": []any{"NET_RAW"}}, want: "FAIL", reason: []string{"NET_RAW", "still available"}},
 		{name: "no effective capability at all", pods: behaviorPods("1000", "1000", capHex(), mountsRW), behavior: map[string]any{"no_capabilities": true}, want: "PASS"},
 		{name: "some effective capability", pods: behaviorPods("1000", "1000", capHex(netBindService), mountsRW), behavior: map[string]any{"no_capabilities": true}, want: "FAIL", reason: []string{"NET_BIND_SERVICE"}},
 		{name: "read-only root filesystem", pods: behaviorPods("1000", "1000", capHex(), mountsRO), behavior: map[string]any{"read_only_root": true}, want: "PASS"},

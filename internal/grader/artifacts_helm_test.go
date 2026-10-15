@@ -12,12 +12,12 @@ import (
 	"github.com/JunYupK/JunKloud/internal/testutil"
 )
 
+// helmStatusJSON is `helm list -o json` for the release "web".
 func helmStatusJSON(status, chart, version string, revision int) string {
-	raw, _ := json.Marshal(map[string]any{
-		"name": "web", "namespace": "jk-p1", "version": revision,
-		"info":  map[string]any{"status": status, "description": "Install complete"},
-		"chart": map[string]any{"metadata": map[string]any{"name": chart, "version": version, "appVersion": "1.27.0"}},
-	})
+	raw, _ := json.Marshal([]any{map[string]any{
+		"name": "web", "namespace": "jk-p1", "revision": fmt.Sprint(revision), "updated": "2026-10-15 09:00:00 +0000 UTC",
+		"status": status, "chart": chart + "-" + version, "app_version": "1.27.0",
+	}})
 	return string(raw)
 }
 
@@ -57,7 +57,7 @@ func (h helmFixture) tools() *fakeTools {
 			}
 		}
 		switch {
-		case strings.Contains(line, " status web"):
+		case strings.Contains(line, " list "):
 			return h.status(), nil
 		case strings.Contains(line, " get values web"):
 			return out(h.values), nil
@@ -116,7 +116,7 @@ func TestHelmRequiredNotRawApply(t *testing.T) {
 		raw := helmReader(t)
 		raw.put(deployRef, map[string]any{"apiVersion": "apps/v1", "kind": "Deployment", "metadata": map[string]any{"name": "web", "namespace": "jk-p1", "uid": "u"}, "spec": map[string]any{}})
 		h := deployedFixture()
-		h.fail = map[string]grader.ToolResult{" status web": exit(1, "Error: release: not found")}
+		h.fail = map[string]grader.ToolResult{" list ": out("[]")}
 		res := gradeOne(t, cfg(h, raw), "", helmCrit(nil))
 		testutil.Equal(t, res.Status, "FAIL")
 		reasonHas(t, res, "no Helm release", "web")
@@ -181,7 +181,7 @@ func TestHelmReleaseState(t *testing.T) {
 		{name: "rollback expected status", h: status("superseded", "web", "0.1.0", 1), args: map[string]any{"status": "superseded"}, want: "PASS"},
 		{name: "cluster unreachable is an error", h: func() helmFixture {
 			h := deployedFixture()
-			h.fail = map[string]grader.ToolResult{" status web": exit(1, "Error: Kubernetes cluster unreachable: dial tcp 127.0.0.1:1: connect: connection refused")}
+			h.fail = map[string]grader.ToolResult{" list ": exit(1, "Error: Kubernetes cluster unreachable: dial tcp 127.0.0.1:1: connect: connection refused")}
 			return h
 		}(), want: "ERROR"},
 		{name: "unreadable status is an error", h: func() helmFixture {
@@ -223,6 +223,14 @@ func TestHelmReleaseState(t *testing.T) {
 		testutil.Equal(t, ev.Results[0].Status, "PASS")
 		testutil.Equal(t, n, 3)
 	})
+}
+
+func TestHelmChartColumnWithDashes(t *testing.T) {
+	h := deployedFixture()
+	h.status = func() grader.ToolResult { return out(helmStatusJSON("deployed", "my-web", "1.0.0-rc.1", 1)) }
+	cfg := grader.ArtifactConfig{Reader: helmReader(t), Tools: h.tools(), KubeconfigPath: "/k", Context: "c"}
+	res := gradeOne(t, cfg, "", helmCrit(map[string]any{"chart": map[string]any{"name": "my-web", "version": "1.0.0-rc.1"}}))
+	testutil.Equal(t, res.Status, "PASS")
 }
 
 func TestHelmCommandLine(t *testing.T) {
