@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"strings"
 	"time"
 
 	"github.com/JunYupK/JunKloud/internal/model"
@@ -205,4 +206,45 @@ func (s *Store) RecordReview(ctx context.Context, sessionID, problemID string, a
 		}
 		return nil
 	})
+}
+
+// SessionStatus identifies a session and where it is.
+type SessionStatus struct {
+	ID    string
+	Mode  string
+	State string
+}
+
+// ActiveSessions returns the sessions of an environment that still occupy it
+// (model.ActiveSessionStates), ordered by ID. Reads never need the
+// environment lock, but a caller that acts on the answer (bank validation,
+// session start) holds the lock so no session can start in between.
+func (s *Store) ActiveSessions(ctx context.Context, environmentID string) ([]SessionStatus, error) {
+	if environmentID == "" {
+		return nil, errors.New("store: environment ID is required")
+	}
+	states := model.ActiveSessionStates()
+	marks := strings.TrimSuffix(strings.Repeat("?,", len(states)), ",")
+	args := []any{environmentID}
+	for _, st := range states {
+		args = append(args, st)
+	}
+	rows, err := s.r.QueryContext(ctx, `SELECT id, mode, state FROM sessions
+		WHERE environment_id = ? AND state IN (`+marks+`) ORDER BY id`, args...)
+	if err != nil {
+		return nil, fmt.Errorf("store: list active sessions of %q: %w", environmentID, err)
+	}
+	defer rows.Close()
+	var out []SessionStatus
+	for rows.Next() {
+		var st SessionStatus
+		if err := rows.Scan(&st.ID, &st.Mode, &st.State); err != nil {
+			return nil, fmt.Errorf("store: list active sessions of %q: %w", environmentID, err)
+		}
+		out = append(out, st)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("store: list active sessions of %q: %w", environmentID, err)
+	}
+	return out, nil
 }

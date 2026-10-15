@@ -52,3 +52,25 @@ func TestSessionStates(t *testing.T) {
 		t.Fatalf("SessionStates() = %v, want %v", got, want)
 	}
 }
+
+// TestActiveSessionStates keeps the "occupies the environment" set a strict
+// subset of the valid states and free of the terminal ones.
+func TestActiveSessionStates(t *testing.T) {
+	valid := map[string]bool{}
+	for _, s := range SessionStates() {
+		valid[s] = true
+	}
+	active := ActiveSessionStates()
+	want := []string{StatePreparing, StateRunning, StateGrading, StateGradingError, StateSetupError}
+	if !reflect.DeepEqual(active, want) {
+		t.Fatalf("ActiveSessionStates = %v, want %v", active, want)
+	}
+	for _, s := range active {
+		if !valid[s] {
+			t.Errorf("active state %q is not a session state", s)
+		}
+		if s == StateCompleted || s == StateAbandoned {
+			t.Errorf("terminal state %q listed as active", s)
+		}
+	}
+}

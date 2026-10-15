@@ -30,6 +30,17 @@ func SessionStates() []string {
 	}
 }
 
+// ActiveSessionStates lists the states in which a session still occupies its
+// environment: a session being prepared, running or graded, and the two
+// failure states whose resources and recovery the learner has not resolved
+// yet (SETUP_ERROR, GRADING_ERROR). COMPLETED (resubmits create new
+// submissions, never new cluster work) and ABANDONED are not active. Bank
+// validation and other environment-wide mutations refuse to run while any
+// session of the environment is active.
+func ActiveSessionStates() []string {
+	return []string{StatePreparing, StateRunning, StateGrading, StateGradingError, StateSetupError}
+}
+
 // SessionRecord is one practice, retry or mock-exam session. StartedAt is nil
 // until the clock starts. Marks holds the learner's per-problem flags.
 type SessionRecord struct {
