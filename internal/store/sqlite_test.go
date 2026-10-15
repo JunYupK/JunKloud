@@ -777,3 +777,26 @@ func TestReadersUnblockedByEnvironmentLock(t *testing.T) {
 	testutil.Equal(t, h.line(t), "state=GRADING")
 	testutil.NoError(t, h.cmd.Wait())
 }
+
+func TestListOperationsByKind(t *testing.T) {
+	s, _ := openStore(t)
+	mk := func(id, kind, phase string, at time.Time) model.Operation {
+		return model.Operation{ID: id, EnvironmentID: "env-" + id, Kind: kind, Phase: phase,
+			Planned: model.Inventory{EnvironmentID: "env-" + id}, CreatedAt: at}
+	}
+	later := mk("b", "environment-create", "planned", t0.Add(time.Minute))
+	earlier := mk("a", "environment-create", "done", t0)
+	other := mk("c", "apply", "planned", t0)
+	for _, op := range []model.Operation{later, earlier, other} {
+		testutil.NoError(t, s.PutOperation(ctx, op))
+	}
+
+	got, err := s.ListOperations(ctx, "environment-create")
+	testutil.NoError(t, err)
+	// Oldest first, only the requested kind, every phase.
+	testutil.Equal(t, got, []model.Operation{earlier, later})
+
+	none, err := s.ListOperations(ctx, "unknown-kind")
+	testutil.NoError(t, err)
+	testutil.Equal(t, len(none), 0)
+}

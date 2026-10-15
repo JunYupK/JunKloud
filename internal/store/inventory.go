@@ -52,22 +52,56 @@ func (s *Store) PutOperation(ctx context.Context, op model.Operation) error {
 
 // GetOperation returns a stored operation or ErrNotFound.
 func (s *Store) GetOperation(ctx context.Context, id string) (model.Operation, error) {
+	row := s.r.QueryRowContext(ctx, `SELECT id, environment_id, session_id, kind, phase, planned_json, created_at
+		FROM operations WHERE id = ?`, id)
+	op, err := scanOperation(row)
+	if errors.Is(err, sql.ErrNoRows) {
+		return model.Operation{}, fmt.Errorf("%w: operation %q", ErrNotFound, id)
+	}
+	return op, err
+}
+
+// ListOperations returns every operation of the given kind, oldest first
+// (ties broken by ID), whatever its phase. Recovery code uses it to find
+// intents an interrupted run left unfinished; which phases count as finished
+// is the caller's decision.
+func (s *Store) ListOperations(ctx context.Context, kind string) ([]model.Operation, error) {
+	rows, err := s.r.QueryContext(ctx, `SELECT id, environment_id, session_id, kind, phase, planned_json, created_at
+		FROM operations WHERE kind = ? ORDER BY created_at, id`, kind)
+	if err != nil {
+		return nil, fmt.Errorf("store: list operations %q: %w", kind, err)
+	}
+	defer rows.Close()
+	var ops []model.Operation
+	for rows.Next() {
+		op, err := scanOperation(rows)
+		if err != nil {
+			return nil, err
+		}
+		ops = append(ops, op)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("store: list operations %q: %w", kind, err)
+	}
+	return ops, nil
+}
+
+// scanOperation decodes one operations row. sql.ErrNoRows is returned as is.
+func scanOperation(row interface{ Scan(...any) error }) (model.Operation, error) {
 	var (
 		op      model.Operation
 		planned string
 		created string
 	)
-	err := s.r.QueryRowContext(ctx, `SELECT id, environment_id, session_id, kind, phase, planned_json, created_at
-		FROM operations WHERE id = ?`, id).
-		Scan(&op.ID, &op.EnvironmentID, &op.SessionID, &op.Kind, &op.Phase, &planned, &created)
+	err := row.Scan(&op.ID, &op.EnvironmentID, &op.SessionID, &op.Kind, &op.Phase, &planned, &created)
 	if errors.Is(err, sql.ErrNoRows) {
-		return model.Operation{}, fmt.Errorf("%w: operation %q", ErrNotFound, id)
+		return model.Operation{}, err
 	}
 	if err != nil {
-		return model.Operation{}, fmt.Errorf("store: load operation %q: %w", id, err)
+		return model.Operation{}, fmt.Errorf("store: load operation: %w", err)
 	}
 	if err := json.Unmarshal([]byte(planned), &op.Planned); err != nil {
-		return model.Operation{}, fmt.Errorf("store: decode operation %q: %w", id, err)
+		return model.Operation{}, fmt.Errorf("store: decode operation %q: %w", op.ID, err)
 	}
 	if op.CreatedAt, err = decodeTime(created); err != nil {
 		return model.Operation{}, err
