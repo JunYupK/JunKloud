@@ -13,6 +13,7 @@ import (
 	"encoding/hex"
 	"encoding/pem"
 	"errors"
+	"fmt"
 	"io/fs"
 	"net"
 	"os"
@@ -451,4 +452,44 @@ func TestStopPlatformOwnership(t *testing.T) {
 	fake.calls = nil
 	testutil.ErrorIs(t, m.StopPlatform(bg, other), ErrIdentityMismatch)
 	testutil.Equal(t, len(fake.Calls()), 0)
+}
+
+// When the registry cannot be reached (offline, rate-limited), preloading
+// still succeeds if the pinned digest's content for the platform is
+// complete in the local store (proved by saving it), and fails with the
+// pull error otherwise.
+func TestPreloadFallsBackToLocalContent(t *testing.T) {
+	img := PinnedImage{Name: "docker.io/library/busybox:1.37.0", Digest: "sha256:" + strings.Repeat("b", 64)}
+	pullFails := func(saveOK bool) *fakeRunner {
+		return &fakeRunner{respond: func(exe string, args []string) (executil.Result, error) {
+			switch {
+			case exe == "docker" && args[0] == "pull":
+				// executil.Runner puts the stderr tail into the error.
+				return executil.Result{ExitCode: 1}, fmt.Errorf("%w: exit status 1: 429 Too Many Requests", executil.ErrExit)
+			case exe == "docker" && args[0] == "save" && !saveOK:
+				return executil.Result{ExitCode: 1}, fmt.Errorf("%w: exit status 1: content digest not found", executil.ErrExit)
+			}
+			return executil.Result{}, nil
+		}}
+	}
+	for _, intoNode := range []bool{true, false} {
+		dir := t.TempDir()
+		ok := pullFails(true)
+		m := New(dir, openTestStore(t, dir), WithRunner(ok))
+		testutil.NoError(t, m.preload(bg, "junkloud-0123456789ab", "amd64", img, intoNode))
+		saved := ok.count("docker save --platform linux/amd64 --output ")
+		if saved != 1 {
+			t.Fatalf("intoNode=%v: local content not proved by one save (%d): %v", intoNode, saved, ok.Calls())
+		}
+		testutil.Equal(t, ok.count("kind load"), map[bool]int{true: 1, false: 0}[intoNode])
+
+		dir = t.TempDir()
+		missing := pullFails(false)
+		m = New(dir, openTestStore(t, dir), WithRunner(missing))
+		err := m.preload(bg, "junkloud-0123456789ab", "amd64", img, intoNode)
+		if err == nil || !strings.Contains(err.Error(), "429") {
+			t.Fatalf("intoNode=%v: missing local content not reported with the pull error: %v", intoNode, err)
+		}
+		testutil.Equal(t, missing.count("kind load"), 0)
+	}
 }

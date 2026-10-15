@@ -224,8 +224,18 @@ func (m *Manager) preload(ctx context.Context, cluster, arch string, img PinnedI
 		return fmt.Errorf("environment: invalid node architecture %q", arch)
 	}
 	platformFlag := "linux/" + arch
-	if err := m.command(ctx, pullTimeout, "docker", "pull", "--quiet", "--platform", platformFlag, img.Ref()); err != nil {
-		return fmt.Errorf("environment: pull %s: %w", img.Ref(), err)
+	// A failed pull (offline, registry rate limit) is tolerated only when
+	// the pinned digest's content for this platform is complete in the
+	// local store, which `docker save` of it proves below.
+	pullErr := m.command(ctx, pullTimeout, "docker", "pull", "--quiet", "--platform", platformFlag, img.Ref())
+	if pullErr != nil {
+		pullErr = fmt.Errorf("environment: pull %s: %w", img.Ref(), pullErr)
+	}
+	notLocal := func(err error) error {
+		if pullErr != nil {
+			return fmt.Errorf("%w (and it is not complete in the local image store: %v)", pullErr, err)
+		}
+		return err
 	}
 	// Re-point the tag on the shared engine at the pinned content. This
 	// overwrites a local tag of the same name (as `docker pull <tag>` of an
@@ -233,9 +243,9 @@ func (m *Manager) preload(ctx context.Context, cluster, arch string, img PinnedI
 	// because a digest reference cannot match after `docker save
 	// --platform` (it writes a reduced index). Accepted by ruling R19.
 	if err := m.command(ctx, dockerTimeout, "docker", "tag", img.Ref(), img.Name); err != nil {
-		return fmt.Errorf("environment: tag %s: %w", img.Name, err)
+		return notLocal(fmt.Errorf("environment: tag %s: %w", img.Name, err))
 	}
-	if !intoNode {
+	if !intoNode && pullErr == nil {
 		return nil
 	}
 	if err := os.MkdirAll(m.dir, 0o700); err != nil {
@@ -248,7 +258,10 @@ func (m *Manager) preload(ctx context.Context, cluster, arch string, img PinnedI
 	defer os.RemoveAll(tmp)
 	archive := filepath.Join(tmp, "image.tar")
 	if err := m.command(ctx, loadTimeout, "docker", "save", "--platform", platformFlag, "--output", archive, img.Name); err != nil {
-		return fmt.Errorf("environment: save %s: %w", img.Name, err)
+		return notLocal(fmt.Errorf("environment: save %s: %w", img.Name, err))
+	}
+	if !intoNode {
+		return nil
 	}
 	if err := m.command(ctx, loadTimeout, "kind", "load", "image-archive", archive, "--name", cluster); err != nil {
 		return fmt.Errorf("environment: load %s into %s: %w", img.Name, cluster, err)
