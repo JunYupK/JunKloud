@@ -233,7 +233,7 @@ Task 2에서 `internal/model`에 아래 타입을 정의한다. 패키지 간에
 
 **Interfaces:** Produces `ArtifactChecker`, `SecurityChecker` implementing Checker; `CaptureInputs(ctx,Target) (map[string]string,error)`. Kind는 `file,image,helm,kustomize,logs,job,authorization,security-context`. 제출 대상만 fingerprint하고 controller status 전체를 hash하지 않는다.
 
-- [ ] **실패 테스트 작성:** `TestHelmRequiredNotRawApply`, `TestImageActuallyRuns`, `TestOverlaySemantics`, `TestAssetSymlinkEscape`, `TestInputChange`, `TestCronScheduleNotProvedByManualJob`, `TestEffectiveIdentity`. 각 이름에 해당하는 원본 fixture와 오답을 test 파일에서 명시한다.
+- [x] **실패 테스트 작성:** `TestHelmRequiredNotRawApply`, `TestImageActuallyRuns`, `TestOverlaySemantics`, `TestAssetSymlinkEscape`, `TestInputChange`, `TestCronScheduleNotProvedByManualJob`, `TestEffectiveIdentity`. 각 이름에 해당하는 원본 fixture와 오답을 test 파일에서 명시한다.
   ```go
   testutil.Equal(t, rawAppliedWithoutRelease.Status, "FAIL")
   testutil.Equal(t, validOverlayDifferentKeyOrder.Status, "PASS")
@@ -241,9 +241,9 @@ Task 2에서 `internal/model`에 아래 타입을 정의한다. 패키지 간에
   testutil.Equal(t, manualJobOnlyProvesSchedule, false)
   ```
 - [ ] **실패 확인:** `go test ./internal/grader -run 'TestHelm|TestImage|TestOverlay|TestAssetSymlink|TestInputChange|TestCron|TestEffective' -v` 실패 확인.
-- [ ] **최소 구현:** Helm의 JSON 결과와 release 검증, Kustomize 렌더링 후 API 의미 비교, image ID/digest·archive 구조·실제 실행 확인. 현재 아키텍처 이미지로 검사하며 Docker 전역 cache를 정리하지 않는다. 파일은 Task 2 경로 검증 사용. Job 실행·CronJob template·schedule observation을 다른 Kind 인자로 구분한다. SA/RBAC는 실제 credential 또는 권한 review 결과, SecurityContext는 명시 필드와 필요 시 exec 결과를 검사한다.
-- [ ] **통과 확인:** `go test -tags=integration ./tests/integration -run TestArtifactGrading -count=1 -v` PASS. stdout/stderr·저장 evidence에 Secret이 없고 foreign Docker sentinel이 보존된다.
-- [ ] **커밋:** `feat: grade application artifacts and security behavior`.
+- [x] **최소 구현:** Helm의 JSON 결과와 release 검증, Kustomize 렌더링 후 API 의미 비교, image ID/digest·archive 구조·실제 실행 확인. 현재 아키텍처 이미지로 검사하며 Docker 전역 cache를 정리하지 않는다. 파일은 Task 2 경로 검증 사용. Job 실행·CronJob template·schedule observation을 다른 Kind 인자로 구분한다. SA/RBAC는 실제 credential 또는 권한 review 결과, SecurityContext는 명시 필드와 필요 시 exec 결과를 검사한다.
+- [x] **통과 확인:** `go test -tags=integration ./tests/integration -run TestArtifactGrading -count=1 -v` PASS. stdout/stderr·저장 evidence에 Secret이 없고 foreign Docker sentinel이 보존된다.
+- [x] **커밋:** `feat: grade application artifacts and security behavior`.
 
 ### Task 9: 문제 작성 검증과 검증 기록 무효화
 
