@@ -197,7 +197,9 @@ func WithPreloadedImages(images ...string) Option {
 
 // WithInputKey sets the secret key that keys the input fingerprints of
 // ArtifactChecker.CaptureInputs (same as ArtifactConfig.InputKey).
-func WithInputKey(key []byte) Option { return func(s *settings) { s.inputKey = append([]byte(nil), key...) } }
+func WithInputKey(key []byte) Option {
+	return func(s *settings) { s.inputKey = append([]byte(nil), key...) }
+}
 
 type redactorKey struct{}
 
