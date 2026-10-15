@@ -3,6 +3,7 @@
 package integration
 
 import (
+	"bytes"
 	"context"
 	"encoding/base64"
 	"encoding/json"
@@ -12,6 +13,7 @@ import (
 	"path/filepath"
 	"reflect"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -53,6 +55,7 @@ type artEnv struct {
 	engine   *grader.Engine
 	capturer *grader.ArtifactChecker
 	evidence []string // every evaluation as JSON, for the final leak scan
+	logged   []string // every verdict line shown with t.Logf
 }
 
 func (e *artEnv) kubectl(stdin string, args ...string) string {
@@ -89,7 +92,9 @@ func (e *artEnv) grade(ws string, assets map[string][]byte, criteria ...model.Cr
 	e.evidence = append(e.evidence, string(raw))
 	out := map[string]model.CheckResult{}
 	for _, r := range ev.Results {
-		e.t.Logf("%-12s %-5s %s", r.CriterionID, r.Status, r.Reason)
+		line := fmt.Sprintf("%-12s %-5s %s", r.CriterionID, r.Status, r.Reason)
+		e.logged = append(e.logged, line)
+		e.t.Log(line)
 		out[r.CriterionID] = r
 	}
 	return out
@@ -172,6 +177,10 @@ func TestArtifactGrading(t *testing.T) {
 		_, _ = toolEnv.Run(ctx, "docker", []string{"image", "rm", foreignImage}, nil)
 	})
 
+	stopCapture := captureProcessOutput(t)
+	fmt.Fprintln(os.Stderr, "output-capture-marker") // proves the capture below sees process output
+	tools := &recordingTools{inner: grader.NewToolRunner()}
+
 	m, id := bootEnvironment(t)
 	testutil.NoError(t, m.EnsurePlatform(ctx, id))
 	testutil.NoError(t, m.PreloadImages(ctx, id, environment.ProbeImage))
@@ -183,6 +192,7 @@ func TestArtifactGrading(t *testing.T) {
 		grader.WithProbeImage(environment.ProbeImage.Name),
 		grader.WithProbeControlNamespace(environment.PlatformNamespace),
 		grader.WithInputKey([]byte("integration-test-installation-key")),
+		grader.WithToolRunner(tools),
 	}
 	probes, err := grader.NewPodProbeRunner(m.KubeconfigPath(), id.Context, opts...)
 	testutil.NoError(t, err)
@@ -416,6 +426,17 @@ spec:
 		e.kubectl("", "rollout", "status", "deployment/web", "-n", artNamespace, "--timeout=120s")
 		churn := e.captureInputs(ws, assets, web, kz("overlay", "overlay"))
 		testutil.Equal(t, reflect.DeepEqual(before, churn), true)
+		// A criterion that names the Service sees the Deployment behind it.
+		e.kubectl("", "create", "service", "clusterip", "web-svc", "-n", artNamespace, "--tcp=80:8080")
+		e.kubectl("", "set", "selector", "service/web-svc", "-n", artNamespace, "app=web")
+		tcp := crit("tcp", model.CriterionTCP, 1, nsRef("v1", "Service", "web-svc"), map[string]any{"port": 80, "source": map[string]any{}}, 60*time.Second)
+		viaService := e.captureInputs(ws, assets, tcp)
+		if _, ok := viaService["object:apps/v1/Deployment/"+artNamespace+"/web"]; !ok {
+			t.Fatalf("the Deployment behind the Service is not fingerprinted: %v", viaService)
+		}
+		webBefore := e.captureInputs(ws, assets, web)
+		e.kubectl("", "label", "deployment/web", "-n", artNamespace, "tier=frontend")
+		testutil.Equal(t, reflect.DeepEqual(webBefore, e.captureInputs(ws, assets, web)), false) // a learner's label is an input
 		e.kubectl("", "set", "env", "deployment/web", "-n", artNamespace, "MARK=changed")
 		changed := e.captureInputs(ws, assets, web, kz("overlay", "overlay"))
 		testutil.Equal(t, reflect.DeepEqual(before, changed), false)
@@ -624,9 +645,28 @@ spec:
 	t.Run("NothingLeaksAndNothingForeignIsTouched", func(t *testing.T) {
 		e.t = t
 		all := strings.Join(e.evidence, "\n")
-		for _, secret := range []string{artSecret, artHelmSecret, base64.StdEncoding.EncodeToString([]byte(artSecret))} {
+		canaries := []string{artSecret, artHelmSecret, base64.StdEncoding.EncodeToString([]byte(artSecret)), base64.StdEncoding.EncodeToString([]byte(artHelmSecret))}
+		for _, secret := range canaries {
 			if strings.Contains(all, secret) {
 				t.Fatalf("a secret value reached the stored evidence: %q", secret)
+			}
+		}
+		// Nor does it reach what the grader prints or passes to other programs:
+		// the process's stdout and stderr (the tests' logging, client-go's klog,
+		// panics), the command lines of every tool invocation and their stderr.
+		printed := stopCapture()
+		if !strings.Contains(printed, "output-capture-marker") {
+			t.Fatalf("the output capture does not see process output (%d bytes)", len(printed))
+		}
+		// t.Log lines (the verdicts and reasons shown to a person) are scanned too.
+		printed += "\n" + strings.Join(e.logged, "\n")
+		argLines, toolStderr := tools.seen()
+		testutil.Equal(t, strings.Count(argLines, "\n") > 20, true) // the grader really ran many tools
+		for _, secret := range canaries {
+			for name, text := range map[string]string{"process stdout/stderr": printed, "tool command lines": argLines, "tool stderr": toolStderr} {
+				if strings.Contains(text, secret) {
+					t.Fatalf("a secret value reached the %s: %q", name, secret)
+				}
 			}
 		}
 		if !dockerHas(t, "container", foreignContainer) {
@@ -646,6 +686,88 @@ func evidenceJSON(t *testing.T, r model.CheckResult) string {
 	raw, err := json.Marshal(r)
 	testutil.NoError(t, err)
 	return string(raw)
+}
+
+// recordingTools wraps the grader's real ToolRunner and keeps every
+// invocation: the command lines (visible to any user via ps) and the tools'
+// stderr (it ends up in error messages). stdout of tools such as
+// `helm get values` is raw data the grader consumes in memory; what matters is
+// what the grader emits, which captureProcessOutput watches.
+type recordingTools struct {
+	inner grader.ToolRunner
+	mu    sync.Mutex
+	args  []string
+	errs  []string
+}
+
+func (r *recordingTools) Run(ctx context.Context, call grader.ToolCall) (grader.ToolResult, error) {
+	res, err := r.inner.Run(ctx, call)
+	r.mu.Lock()
+	r.args = append(r.args, call.Exe+" "+strings.Join(call.Args, " ")+" "+strings.Join(call.Env, " ")+" "+string(call.Stdin))
+	r.errs = append(r.errs, string(res.Stderr))
+	r.mu.Unlock()
+	return res, err
+}
+
+func (r *recordingTools) seen() (args, stderr string) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return strings.Join(r.args, "\n"), strings.Join(r.errs, "\n")
+}
+
+// captureProcessOutput tees this process's stdout and stderr (everything the
+// grader, client-go and the test print) into a buffer until the returned
+// function is called, which restores them and returns what was written.
+func captureProcessOutput(t *testing.T) func() string {
+	t.Helper()
+	var buf bytes.Buffer
+	var mu sync.Mutex
+	origOut, origErr := os.Stdout, os.Stderr
+	var readers sync.WaitGroup
+	var writers []*os.File
+	tee := func(orig *os.File) *os.File {
+		r, w, err := os.Pipe()
+		testutil.NoError(t, err)
+		writers = append(writers, w)
+		readers.Add(1)
+		go func() {
+			defer readers.Done()
+			chunk := make([]byte, 4096)
+			for {
+				n, err := r.Read(chunk)
+				if n > 0 {
+					mu.Lock()
+					buf.Write(chunk[:n])
+					mu.Unlock()
+					_, _ = orig.Write(chunk[:n])
+				}
+				if err != nil {
+					return
+				}
+			}
+		}()
+		return w
+	}
+	os.Stdout, os.Stderr = tee(origOut), tee(origErr)
+	stopped := false
+	stop := func() string {
+		if stopped {
+			mu.Lock()
+			defer mu.Unlock()
+			return buf.String()
+		}
+		stopped = true
+		os.Stdout, os.Stderr = origOut, origErr
+		for _, w := range writers {
+			_ = w.Close()
+		}
+		readers.Wait()
+		mu.Lock()
+		defer mu.Unlock()
+		return buf.String()
+	}
+	t.Cleanup(func() { stop() })
+	return stop
 }
 
 func evidenceOf(t *testing.T, r model.CheckResult) string {
