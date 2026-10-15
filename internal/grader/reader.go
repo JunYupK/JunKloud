@@ -9,7 +9,6 @@ import (
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/client-go/discovery"
 	"k8s.io/client-go/discovery/cached/memory"
@@ -21,12 +20,22 @@ import (
 	"github.com/JunYupK/JunKloud/internal/model"
 )
 
-// ObjectReader reads one Kubernetes object of any group/version/kind. Get
-// returns an error wrapping ErrNotFound when the object (or its resource
-// type) does not exist; any other error means the API could not answer and
-// is graded ERROR, never FAIL.
+// ListQuery selects objects of one kind. LabelSelector uses the Kubernetes
+// selector syntax ("app=web,tier in (a,b)"); empty selects all.
+type ListQuery struct {
+	APIVersion    string
+	Kind          string
+	Namespace     string
+	LabelSelector string
+}
+
+// ObjectReader reads Kubernetes objects of any group/version/kind as decoded
+// JSON objects. Get returns an error wrapping ErrNotFound when the object
+// (or its resource type) does not exist; any other error means the API could
+// not answer and is graded ERROR, never FAIL.
 type ObjectReader interface {
-	Get(ctx context.Context, ref model.ObjectRef) (*unstructured.Unstructured, error)
+	Get(ctx context.Context, ref model.ObjectRef) (map[string]any, error)
+	List(ctx context.Context, q ListQuery) ([]map[string]any, error)
 }
 
 // dynamicReader is ObjectReader on the client-go dynamic client.
@@ -35,18 +44,22 @@ type dynamicReader struct {
 	mapper meta.RESTMapper
 }
 
-// NewDynamicReader returns an ObjectReader over a dynamic client and a
-// RESTMapper. If the mapper is resettable (discovery backed), a kind it does
-// not know is retried once after a reset, so CRDs installed after startup
-// are found.
-func NewDynamicReader(client dynamic.Interface, mapper meta.RESTMapper) ObjectReader {
+// newDynamicReader is the seam unit tests use with a fake dynamic client. If
+// the mapper is resettable (discovery backed), a kind it does not know is
+// retried once after a reset, so CRDs installed after startup are found.
+func newDynamicReader(client dynamic.Interface, mapper meta.RESTMapper) ObjectReader {
 	return &dynamicReader{client: client, mapper: mapper}
 }
 
-// NewClusterReader builds an ObjectReader for a cluster from its rest config,
-// with a discovery-backed mapper. The caller derives cfg from the
-// environment's kubeconfig (see RESTConfig).
-func NewClusterReader(cfg *rest.Config) (ObjectReader, error) {
+// NewClusterReader builds an ObjectReader for the cluster that one explicit
+// kubeconfig file and context point at (typically the environment's
+// kubeconfig and Identity.Context). It never consults $KUBECONFIG or the
+// kubeconfig's current context.
+func NewClusterReader(kubeconfigPath, contextName string) (ObjectReader, error) {
+	cfg, err := restConfig(kubeconfigPath, contextName)
+	if err != nil {
+		return nil, err
+	}
 	dyn, err := dynamic.NewForConfig(cfg)
 	if err != nil {
 		return nil, fmt.Errorf("grader: dynamic client: %w", err)
@@ -56,12 +69,10 @@ func NewClusterReader(cfg *rest.Config) (ObjectReader, error) {
 		return nil, fmt.Errorf("grader: discovery client: %w", err)
 	}
 	mapper := restmapper.NewDeferredDiscoveryRESTMapper(memory.NewMemCacheClient(disc))
-	return NewDynamicReader(dyn, mapper), nil
+	return newDynamicReader(dyn, mapper), nil
 }
 
-// RESTConfig loads a rest.Config from exactly one kubeconfig file and one
-// explicit context; it never consults $KUBECONFIG or the current context.
-func RESTConfig(kubeconfigPath, contextName string) (*rest.Config, error) {
+func restConfig(kubeconfigPath, contextName string) (*rest.Config, error) {
 	if kubeconfigPath == "" || contextName == "" {
 		return nil, errors.New("grader: kubeconfig path and context are both required")
 	}
@@ -80,13 +91,14 @@ func RESTConfig(kubeconfigPath, contextName string) (*rest.Config, error) {
 	return cfg, nil
 }
 
-// Get implements ObjectReader.
-func (r *dynamicReader) Get(ctx context.Context, ref model.ObjectRef) (*unstructured.Unstructured, error) {
-	gv, err := schema.ParseGroupVersion(ref.APIVersion)
+// resolve maps a kind to its REST resource, retrying once after a discovery
+// reset. A kind the cluster does not serve is ErrNotFound.
+func (r *dynamicReader) resolve(apiVersion, kind string) (*meta.RESTMapping, error) {
+	gv, err := schema.ParseGroupVersion(apiVersion)
 	if err != nil || gv.Version == "" {
-		return nil, fmt.Errorf("%w: apiVersion %q", ErrInvalidCriterion, ref.APIVersion)
+		return nil, fmt.Errorf("%w: apiVersion %q", ErrInvalidCriterion, apiVersion)
 	}
-	gk := schema.GroupKind{Group: gv.Group, Kind: ref.Kind}
+	gk := schema.GroupKind{Group: gv.Group, Kind: kind}
 	mapping, err := r.mapper.RESTMapping(gk, gv.Version)
 	if meta.IsNoMatchError(err) {
 		if reset, ok := r.mapper.(meta.ResettableRESTMapper); ok {
@@ -95,17 +107,33 @@ func (r *dynamicReader) Get(ctx context.Context, ref model.ObjectRef) (*unstruct
 		}
 	}
 	if meta.IsNoMatchError(err) {
-		return nil, fmt.Errorf("%w: %s %s is not served by the cluster", ErrNotFound, ref.APIVersion, ref.Kind)
+		return nil, fmt.Errorf("%w: %s %s is not served by the cluster", ErrNotFound, apiVersion, kind)
 	}
 	if err != nil {
-		return nil, fmt.Errorf("map %s %s: %w", ref.APIVersion, ref.Kind, err)
+		return nil, fmt.Errorf("map %s %s: %w", apiVersion, kind, err)
 	}
-	var ri dynamic.ResourceInterface = r.client.Resource(mapping.Resource)
+	return mapping, nil
+}
+
+func (r *dynamicReader) resource(mapping *meta.RESTMapping, namespace, kind, name string) (dynamic.ResourceInterface, error) {
 	if mapping.Scope.Name() == meta.RESTScopeNameNamespace {
-		if ref.Namespace == "" {
-			return nil, fmt.Errorf("%w: %s %s is namespaced and needs a namespace", ErrInvalidCriterion, ref.Kind, ref.Name)
+		if namespace == "" {
+			return nil, fmt.Errorf("%w: %s %s is namespaced and needs a namespace", ErrInvalidCriterion, kind, name)
 		}
-		ri = r.client.Resource(mapping.Resource).Namespace(ref.Namespace)
+		return r.client.Resource(mapping.Resource).Namespace(namespace), nil
+	}
+	return r.client.Resource(mapping.Resource), nil
+}
+
+// Get implements ObjectReader.
+func (r *dynamicReader) Get(ctx context.Context, ref model.ObjectRef) (map[string]any, error) {
+	mapping, err := r.resolve(ref.APIVersion, ref.Kind)
+	if err != nil {
+		return nil, err
+	}
+	ri, err := r.resource(mapping, ref.Namespace, ref.Kind, ref.Name)
+	if err != nil {
+		return nil, err
 	}
 	obj, err := ri.Get(ctx, ref.Name, metav1.GetOptions{})
 	if apierrors.IsNotFound(err) {
@@ -114,5 +142,26 @@ func (r *dynamicReader) Get(ctx context.Context, ref model.ObjectRef) (*unstruct
 	if err != nil {
 		return nil, fmt.Errorf("get %s %s: %w", ref.Kind, ref.Name, err)
 	}
-	return obj, nil
+	return obj.Object, nil
+}
+
+// List implements ObjectReader.
+func (r *dynamicReader) List(ctx context.Context, q ListQuery) ([]map[string]any, error) {
+	mapping, err := r.resolve(q.APIVersion, q.Kind)
+	if err != nil {
+		return nil, err
+	}
+	ri, err := r.resource(mapping, q.Namespace, q.Kind, "")
+	if err != nil {
+		return nil, err
+	}
+	list, err := ri.List(ctx, metav1.ListOptions{LabelSelector: q.LabelSelector})
+	if err != nil {
+		return nil, fmt.Errorf("list %s: %w", q.Kind, err)
+	}
+	out := make([]map[string]any, 0, len(list.Items))
+	for i := range list.Items {
+		out = append(out, list.Items[i].Object)
+	}
+	return out, nil
 }

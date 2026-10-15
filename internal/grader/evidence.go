@@ -10,8 +10,6 @@ import (
 	"sync"
 	"time"
 
-	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
-
 	"github.com/JunYupK/JunKloud/internal/model"
 )
 
@@ -50,14 +48,15 @@ func (r *Redactor) Learn(values ...string) {
 	}
 }
 
-// LearnObject registers every data/stringData value of a Secret (plaintext
-// and its base64 form). Other kinds are ignored.
-func (r *Redactor) LearnObject(obj *unstructured.Unstructured) {
-	if !IsSecret(obj) {
+// LearnObject registers every data/stringData value of a Secret object (a
+// decoded JSON object: plaintext and its base64 form). Other kinds are
+// ignored.
+func (r *Redactor) LearnObject(obj map[string]any) {
+	if !isSecret(obj) {
 		return
 	}
 	for _, field := range []string{"data", "stringData"} {
-		m, _ := obj.Object[field].(map[string]any)
+		m, _ := obj[field].(map[string]any)
 		for _, v := range m {
 			s, ok := v.(string)
 			if !ok {
@@ -73,9 +72,9 @@ func (r *Redactor) LearnObject(obj *unstructured.Unstructured) {
 	}
 }
 
-// IsSecret reports whether obj is a core/v1 Secret.
-func IsSecret(obj *unstructured.Unstructured) bool {
-	return obj != nil && obj.GetAPIVersion() == "v1" && obj.GetKind() == "Secret"
+// isSecret reports whether obj is a core/v1 Secret.
+func isSecret(obj object) bool {
+	return obj != nil && obj["apiVersion"] == "v1" && obj["kind"] == "Secret"
 }
 
 // Scrub returns a copy of v with every learned secret replaced by Redacted.
@@ -144,19 +143,19 @@ func (r *Redactor) ScrubResult(res model.CheckResult) model.CheckResult {
 	return res
 }
 
-// InputHash identifies the part of an object a result depends on: its spec,
+// inputHash identifies the part of an object a result depends on: its spec,
 // or for kinds without one (ConfigMap, Secret, RBAC objects) every top-level
 // field except apiVersion, kind, metadata and status. The hash is over
 // canonical JSON, so map order does not matter.
-func InputHash(obj *unstructured.Unstructured) string {
+func inputHash(obj object) string {
 	if obj == nil {
 		return ""
 	}
 	subject := map[string]any{}
-	if spec, ok := obj.Object["spec"]; ok {
+	if spec, ok := obj["spec"]; ok {
 		subject["spec"] = spec
 	} else {
-		for k, v := range obj.Object {
+		for k, v := range obj {
 			switch k {
 			case "apiVersion", "kind", "metadata", "status":
 			default:
@@ -174,12 +173,12 @@ func InputHash(obj *unstructured.Unstructured) string {
 
 // baseEvidence fills the facts every observation has: when, which object
 // (UID, generation) and the hash of what was graded.
-func baseEvidence(now time.Time, start time.Time, obj *unstructured.Unstructured) model.Evidence {
+func baseEvidence(now time.Time, start time.Time, obj object) model.Evidence {
 	ev := model.Evidence{ObservedAt: now.UTC(), Duration: now.Sub(start)}
 	if obj != nil {
-		ev.UID = string(obj.GetUID())
-		ev.Generation = obj.GetGeneration()
-		ev.InputHash = InputHash(obj)
+		ev.UID = uidOf(obj)
+		ev.Generation = generationOf(obj)
+		ev.InputHash = inputHash(obj)
 	}
 	return ev
 }

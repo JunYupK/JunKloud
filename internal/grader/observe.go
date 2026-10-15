@@ -6,8 +6,6 @@ import (
 	"fmt"
 	"time"
 
-	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
-
 	"github.com/JunYupK/JunKloud/internal/model"
 )
 
@@ -19,9 +17,18 @@ const apiAttempts = 3
 type verdict struct {
 	ok       bool
 	terminal bool // waiting longer cannot change a not-ok verdict
-	reason   string
-	expected any
-	actual   any
+	// needsPods: a not-ok verdict is only a learner FAIL if the workload's
+	// pods show a learner-caused reason (ready checker); otherwise it is
+	// ERROR.
+	needsPods bool
+	// undecided: a not-ok verdict whose cause cannot be known from the
+	// object alone (for example a controller that never observed the spec).
+	undecided bool
+	// expectPods: with needsPods, the workload should own at least one pod.
+	expectPods bool
+	reason     string
+	expected   any
+	actual     any
 }
 
 type observeSpec struct {
@@ -35,11 +42,11 @@ type observeSpec struct {
 	// confirm re-reads the target after an ok verdict and requires the same
 	// object and a still-ok verdict before PASSing.
 	confirm bool
-	eval    func(*unstructured.Unstructured) verdict
+	eval    func(object) verdict
 }
 
 type observation struct {
-	obj   *unstructured.Unstructured // last observed object; nil if not found
+	obj   object // last observed object; nil if not found
 	found bool
 	v     verdict
 	start time.Time
@@ -56,10 +63,10 @@ type consistencyKey struct {
 	hash       string
 }
 
-func keyOf(obj *unstructured.Unstructured) consistencyKey {
-	k := consistencyKey{uid: string(obj.GetUID()), generation: obj.GetGeneration()}
-	if _, hasSpec := obj.Object["spec"]; !hasSpec {
-		k.hash = InputHash(obj)
+func keyOf(obj object) consistencyKey {
+	k := consistencyKey{uid: uidOf(obj), generation: generationOf(obj)}
+	if _, hasSpec := obj["spec"]; !hasSpec {
+		k.hash = inputHash(obj)
 	}
 	return k
 }
@@ -71,12 +78,12 @@ type observer struct {
 
 // get reads the target, retrying API failures. ErrNotFound and author errors
 // are returned at once.
-func (o observer) get(ctx context.Context, ref model.ObjectRef) (*unstructured.Unstructured, error) {
+func (o observer) get(ctx context.Context, ref model.ObjectRef) (object, error) {
 	var last error
 	for attempt := 0; attempt < apiAttempts; attempt++ {
 		obj, err := o.reader.Get(ctx, ref)
 		if err == nil {
-			o.set.redactor.LearnObject(obj)
+			redactorFor(ctx, o.set.redactor).LearnObject(obj)
 			return obj, nil
 		}
 		if errors.Is(err, ErrNotFound) || errors.Is(err, ErrInvalidCriterion) || ctx.Err() != nil {

@@ -8,8 +8,6 @@ import (
 	"fmt"
 	"strings"
 
-	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
-
 	"github.com/JunYupK/JunKloud/internal/model"
 )
 
@@ -40,10 +38,15 @@ type ResourceChecker struct{ observer }
 //	           unordered  lists of any kind match in any order
 //	compare: auto (default) | exact | quantity | image
 //	           auto       resource quantities (1 == 1000m) under requests,
-//	                      limits, hard and capacity; everything else exact
-//	           exact      no quantity or image interpretation
+//	                      limits, hard and capacity, and container images
+//	                      (containers, initContainers, ephemeralContainers;
+//	                      "nginx" == "docker.io/library/nginx:latest"), also
+//	                      inside a compared parent map such as a whole
+//	                      resources block or container; everything else exact
+//	           exact      the literal string/number, no quantity or image
+//	                      interpretation (for authors who require it)
 //	           quantity   always parse strings/numbers as Kubernetes quantities
-//	           image      treat "nginx" and "docker.io/library/nginx:latest" as equal
+//	           image      treat the value as an image reference everywhere
 //
 // Numbers compare by value (1, 1.0 and "1" JSON round trips are the same
 // number); a number never equals a string. For Secrets, "data" values are
@@ -96,7 +99,7 @@ func (c *ResourceChecker) Check(ctx context.Context, t Target, crit model.Criter
 	}
 	spec := observeSpec{
 		ref: ref, timeout: timeoutFor(crit, c.set), poll: a.Wait, waitForCreate: a.Wait,
-		eval: func(*unstructured.Unstructured) verdict { return verdict{ok: true} },
+		eval: func(object) verdict { return verdict{ok: true} },
 	}
 	obs, err := c.observe(ctx, spec)
 	if err != nil {
@@ -183,7 +186,9 @@ func compileFields(args map[string]any) (fieldArgs, []requirement, error) {
 		}
 		switch f.Compare {
 		case "", compareAuto:
+			r.cmp.auto = true
 			r.cmp.quantity = autoQuantity(segs)
+			r.cmp.image, r.cmp.container, r.cmp.containerList = autoContext(segs)
 		case compareExact:
 		case compareQuantity:
 			r.cmp.quantity = true
@@ -218,7 +223,7 @@ func (c *FieldChecker) Check(ctx context.Context, t Target, crit model.Criterion
 	secret := ref.APIVersion == "v1" && ref.Kind == "Secret"
 	spec := observeSpec{
 		ref: ref, timeout: timeoutFor(crit, c.set), poll: a.Wait, waitForCreate: a.Wait,
-		eval: func(obj *unstructured.Unstructured) verdict { return evalFields(obj, reqs) },
+		eval: func(obj object) verdict { return evalFields(obj, reqs) },
 	}
 	obs, err := c.observe(ctx, spec)
 	if err != nil {
@@ -260,12 +265,12 @@ func sensitivePath(segs []pathSeg) bool {
 
 // secretView is the object with Secret data decoded, so criteria are written
 // in plain text. It exists only inside evalFields; evidence never carries it.
-func secretView(obj *unstructured.Unstructured) map[string]any {
-	view := make(map[string]any, len(obj.Object))
-	for k, v := range obj.Object {
+func secretView(obj object) map[string]any {
+	view := make(map[string]any, len(obj))
+	for k, v := range obj {
 		view[k] = v
 	}
-	if data, ok := obj.Object["data"].(map[string]any); ok {
+	if data, ok := obj["data"].(map[string]any); ok {
 		dec := make(map[string]any, len(data))
 		for k, v := range data {
 			s, _ := v.(string)
@@ -280,9 +285,9 @@ func secretView(obj *unstructured.Unstructured) map[string]any {
 	return view
 }
 
-func evalFields(obj *unstructured.Unstructured, reqs []requirement) verdict {
-	secret := IsSecret(obj)
-	root := obj.Object
+func evalFields(obj object, reqs []requirement) verdict {
+	secret := isSecret(obj)
+	root := obj
 	if secret {
 		root = secretView(obj)
 	}

@@ -87,8 +87,33 @@ func TestFieldSemanticComparison(t *testing.T) {
 	}{
 		{"named container regardless of index", fieldEq("spec.template.spec.containers[name=web].image", "nginx:1.27.0"), "PASS"},
 		{"wrong image is exact", fieldEq("spec.template.spec.containers[name=web].image", "nginx:1.27"), "FAIL"},
-		{"image is not normalized by default", fieldEq("spec.template.spec.containers[name=web].image", "docker.io/library/nginx:1.27.0"), "FAIL"},
-		{"image normalization on request", fieldEq("spec.template.spec.containers[name=web].image", "docker.io/library/nginx:1.27.0", "compare", "image"), "PASS"},
+		// Spec 6.2: equivalent image spellings are the same image by default.
+		{"fully qualified image equals the short one", fieldEq("spec.template.spec.containers[name=web].image", "docker.io/library/nginx:1.27.0"), "PASS"},
+		{"short image equals the fully qualified live one", fieldEq("spec.template.spec.containers[name=sidecar].image", "docker.io/library/busybox:1.37.0"), "PASS"},
+		{"index.docker.io is docker.io", fieldEq("spec.template.spec.containers[name=sidecar].image", "index.docker.io/library/busybox:1.37.0"), "PASS"},
+		{"another tag is another image", fieldEq("spec.template.spec.containers[name=web].image", "docker.io/library/nginx:1.27.1"), "FAIL"},
+		{"implicit latest is not 1.37.0", fieldEq("spec.template.spec.containers[name=sidecar].image", "busybox"), "FAIL"},
+		{"another registry is another image", fieldEq("spec.template.spec.containers[name=web].image", "ghcr.io/library/nginx:1.27.0"), "FAIL"},
+		{"index addressing finds the image too", fieldEq("spec.template.spec.containers[1].image", "docker.io/library/nginx:1.27.0"), "PASS"},
+		{"exact keeps the literal string", fieldEq("spec.template.spec.containers[name=web].image", "docker.io/library/nginx:1.27.0", "compare", "exact"), "FAIL"},
+		{"exact accepts the literal string", fieldEq("spec.template.spec.containers[name=web].image", "nginx:1.27.0", "compare", "exact"), "PASS"},
+		{"a non-image field is never normalized", fieldEq("spec.template.spec.containers[name=web].imagePullPolicy", "ifnotpresent"), "FAIL"},
+		{"image inside a whole container", fieldEq("spec.template.spec.containers[name=web]", map[string]any{"name": "web", "image": "docker.io/library/nginx:1.27.0"}, "match", "subset"), "PASS"},
+		{"image inside the container list", fieldEq("spec.template.spec.containers", []any{map[string]any{"name": "sidecar", "image": "docker.io/library/busybox:1.37.0"}}, "match", "subset"), "PASS"},
+		{"wrong image inside the container list", fieldEq("spec.template.spec.containers", []any{map[string]any{"name": "sidecar", "image": "busybox:1.36.0"}}, "match", "subset"), "FAIL"},
+		// Quantities nested inside a compared parent map (auto mode).
+		{"quantities inside a whole resources block", fieldEq("spec.template.spec.containers[name=web].resources", map[string]any{
+			"limits": map[string]any{"cpu": "1000m", "memory": 134217728}, "requests": map[string]any{"cpu": 0.5, "memory": "64Mi"}}), "PASS"},
+		{"wrong quantity inside a whole resources block", fieldEq("spec.template.spec.containers[name=web].resources", map[string]any{
+			"limits": map[string]any{"cpu": "2", "memory": "128Mi"}, "requests": map[string]any{"cpu": "500m", "memory": "64Mi"}}), "FAIL"},
+		{"quantities inside a whole container", fieldEq("spec.template.spec.containers[name=web]", map[string]any{
+			"name": "web", "resources": map[string]any{"limits": map[string]any{"cpu": "1000m"}}}, "match", "subset"), "PASS"},
+		{"quantities inside the container list", fieldEq("spec.template.spec.containers", []any{map[string]any{
+			"name": "web", "resources": map[string]any{"limits": map[string]any{"cpu": "1000m"}}}}, "match", "subset"), "PASS"},
+		{"exact mode keeps quantity strings literal in a parent map", fieldEq("spec.template.spec.containers[name=web].resources", map[string]any{
+			"limits": map[string]any{"cpu": "1000m", "memory": "128Mi"}, "requests": map[string]any{"cpu": "500m", "memory": "64Mi"}}, "compare", "exact"), "FAIL"},
+		{"non-quantity strings stay exact next to quantities", fieldEq("spec.template.spec.containers[name=web]", map[string]any{
+			"name": "web", "imagePullPolicy": "ifnotpresent", "resources": map[string]any{"limits": map[string]any{"cpu": "1000m"}}}, "match", "subset"), "FAIL"},
 		{"missing named container", fieldEq("spec.template.spec.containers[name=db].image", "x"), "FAIL"},
 		{"index addressing", fieldEq("spec.template.spec.containers[1].name", "web"), "PASS"},
 		{"integer from JSON float", fieldEq("spec.replicas", 3.0), "PASS"},

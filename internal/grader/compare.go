@@ -180,6 +180,41 @@ func autoQuantity(segs []pathSeg) bool {
 	return false
 }
 
+// containerListKeys are the pod-spec lists whose elements have an image.
+var containerListKeys = map[string]bool{"containers": true, "initContainers": true, "ephemeralContainers": true}
+
+// autoContext derives, from the compared path, where in a pod spec the
+// compared value sits so that auto mode can apply image semantics:
+// image (the value is a container image), container (the value is one
+// container object) and containerList (the value is a container list).
+func autoContext(segs []pathSeg) (image, container, containerList bool) {
+	n := len(segs)
+	keyAt := func(i int) (string, bool) {
+		if i < 0 || segs[i].kind != segKey {
+			return "", false
+		}
+		return segs[i].key, true
+	}
+	if n > 0 {
+		if k, ok := keyAt(n - 1); ok && containerListKeys[k] {
+			return false, false, true
+		}
+	}
+	if n > 1 && segs[n-1].kind != segKey {
+		if k, ok := keyAt(n - 2); ok && containerListKeys[k] {
+			return false, true, false
+		}
+	}
+	if n > 2 {
+		if k, ok := keyAt(n - 1); ok && k == "image" && segs[n-2].kind != segKey {
+			if lk, ok := keyAt(n - 3); ok && containerListKeys[lk] {
+				return true, false, false
+			}
+		}
+	}
+	return false, false, false
+}
+
 // Comparison options.
 const (
 	matchEqual     = "equal"
@@ -192,10 +227,21 @@ const (
 	compareImage    = "image"
 )
 
+// comparer compares an expected value with a live one. In auto mode it
+// switches to quantity semantics below requests/limits/hard/capacity maps and
+// to image semantics for container images, wherever they are reached from
+// the compared value (so a whole resources map or a whole container object
+// compares like its fields would).
 type comparer struct {
 	match    string
 	quantity bool
 	image    bool
+	auto     bool
+	// container: the map being compared is a container; containerList: the
+	// list being compared is a containers/initContainers/ephemeralContainers
+	// list. Only meaningful in auto mode.
+	container     bool
+	containerList bool
 }
 
 // diff returns "" when got satisfies want, otherwise a short description of
@@ -213,7 +259,18 @@ func (c comparer) diff(path string, want, got any) string {
 			if !ok {
 				return fmt.Sprintf("%s.%s: missing, expected %s", path, k, show(w[k]))
 			}
-			if d := c.diff(path+"."+k, w[k], gv); d != "" {
+			child := c
+			child.container, child.containerList = false, false
+			if c.auto {
+				if quantityKeys[k] {
+					child.quantity = true
+				}
+				if c.container && k == "image" {
+					child.image = true
+				}
+				child.containerList = containerListKeys[k]
+			}
+			if d := child.diff(path+"."+k, w[k], gv); d != "" {
 				return d
 			}
 		}
@@ -309,6 +366,8 @@ func namedElements(l []any) (map[string]any, bool) {
 }
 
 func (c comparer) diffList(path string, want, got []any) string {
+	// Elements of a container list are containers.
+	c.container, c.containerList = c.containerList, false
 	// Named objects (containers, env vars, ports, volumes) match by name,
 	// never by position.
 	if wn, ok := namedElements(want); ok {

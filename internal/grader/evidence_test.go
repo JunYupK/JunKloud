@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/JunYupK/JunKloud/internal/grader"
 	"github.com/JunYupK/JunKloud/internal/model"
@@ -94,7 +95,7 @@ func TestEvidenceRedactionOfLearnedValues(t *testing.T) {
 
 func TestRedactorLearnsSecretObjects(t *testing.T) {
 	red := grader.NewRedactor()
-	red.LearnObject(u(secretDoc(t)))
+	red.LearnObject(secretDoc(t))
 	out := red.Scrub(map[string]any{"a": "x " + canary, "b": []any{"another-private-thing"}, "n": 7})
 	testutil.Equal(t, out, map[string]any{"a": "x [REDACTED]", "b": []any{"[REDACTED]"}, "n": 7})
 	// Short values are not scrubbed by substring: it would mangle everything.
@@ -117,4 +118,48 @@ func TestEvidenceIsBounded(t *testing.T) {
 func mustJSON(t testing.TB, v any) string {
 	t.Helper()
 	return encode(t, v)
+}
+
+// delayedReader holds Get until release is closed plus a grace period, so
+// that a criterion which does not read the Secret has fully finished first.
+type delayedReader struct {
+	*fakeReader
+	release <-chan struct{}
+}
+
+func (d delayedReader) Get(ctx context.Context, ref model.ObjectRef) (map[string]any, error) {
+	select {
+	case <-d.release:
+	case <-time.After(5 * time.Second):
+	}
+	time.Sleep(50 * time.Millisecond)
+	return d.fakeReader.Get(ctx, ref)
+}
+
+func TestEvidenceRedactionIsOrderIndependent(t *testing.T) {
+	// Criterion "leak" finishes and puts the secret into its evidence BEFORE
+	// criterion "token" reads the Secret and the value becomes known. The
+	// result must still be clean, and no option wires the two together: the
+	// engine owns the Redactor.
+	leaked := make(chan struct{})
+	leaky := checkerFunc(func(_ context.Context, _ grader.Target, c model.Criterion) (model.CheckResult, error) {
+		defer close(leaked)
+		return model.CheckResult{Status: model.StatusFail, Reason: "output was " + canary,
+			Evidence: model.Evidence{Actual: map[string]any{"line": canary}}}, nil
+	})
+	reader := delayedReader{newReader().put(secretRef, secretDoc(t)), leaked}
+	e := grader.NewEngine(map[string]grader.Checker{
+		model.CriterionLogs:  leaky,
+		model.CriterionField: grader.NewFieldChecker(reader), // built without any shared option
+	})
+	token := crit("token", model.CriterionField, 1, secretRef, map[string]any{"fields": []any{
+		map[string]any{"path": "data.token", "equals": canary}}})
+	ev, err := e.Evaluate(context.Background(), target(crit("leak", model.CriterionLogs, 1, deployRef, nil), token))
+	testutil.NoError(t, err)
+	testutil.Equal(t, resultFor(t, ev, "token").Status, "PASS")
+	encodedEvidence := encode(t, ev)
+	testutil.Equal(t, strings.Contains(encodedEvidence, canary), false)
+	if !strings.Contains(resultFor(t, ev, "leak").Reason, "[REDACTED]") {
+		t.Fatalf("leak reason: %q", resultFor(t, ev, "leak").Reason)
+	}
 }

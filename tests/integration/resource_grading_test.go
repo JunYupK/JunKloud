@@ -5,9 +5,12 @@ package integration
 import (
 	"context"
 	"encoding/json"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
+
+	"k8s.io/client-go/tools/clientcmd"
 
 	"github.com/JunYupK/JunKloud/internal/environment"
 	"github.com/JunYupK/JunKloud/internal/grader"
@@ -92,10 +95,10 @@ func TestResourceGrading(t *testing.T) {
 	testutil.NoError(t, m.PreloadImages(ctx, id, environment.ProbeImage))
 
 	redactor := grader.NewRedactor()
-	opts := []grader.Option{grader.WithRedactor(redactor)}
-	cfg, err := grader.RESTConfig(m.KubeconfigPath(), id.Context)
-	testutil.NoError(t, err)
-	reader, err := grader.NewClusterReader(cfg)
+	// The environment itself provides the probe image (preloaded above); a
+	// pull failure of any other image is the learner's wrong image.
+	opts := []grader.Option{grader.WithRedactor(redactor), grader.WithPreloadedImages(environment.ProbeImage.Name)}
+	reader, err := grader.NewClusterReader(m.KubeconfigPath(), id.Context)
 	testutil.NoError(t, err)
 	engine := grader.NewEngine(grader.DefaultCheckers(reader, opts...), opts...)
 
@@ -153,10 +156,14 @@ func TestResourceGrading(t *testing.T) {
 		testutil.Equal(t, r.ObservedAt.Location(), time.UTC)
 	})
 
+	// A reference that cannot exist anywhere, so the outcome does not depend
+	// on whether this host can reach a registry.
+	const wrongImage = "docker.io/library/busybox:jk-does-not-exist"
+
 	t.Run("WrongImageIsFail", func(t *testing.T) {
-		// A real wrong image: not preloaded and not pullable, so the pod
-		// never becomes ready. A short explicit limit keeps the test fast.
-		apply(gradeDeployment("wrong", "docker.io/library/busybox:1.36.1", nil, 1))
+		// The pod never becomes ready because of the learner's image. A
+		// short explicit limit keeps the test fast.
+		apply(gradeDeployment("wrong", wrongImage, nil, 1))
 		start := time.Now()
 		ev := grade(gradeCriteria("wrong", 8*time.Second))
 		elapsed := time.Since(start)
@@ -166,17 +173,56 @@ func TestResourceGrading(t *testing.T) {
 		for _, r := range ev.Results {
 			switch r.CriterionID {
 			case "ready":
-				if !strings.Contains(r.Reason, "8s") || !strings.Contains(r.Reason, "availableReplicas") {
-					t.Errorf("ready reason does not explain the miss: %q", r.Reason)
+				for _, want := range []string{"8s", "availableReplicas", "cause", wrongImage, "cannot be pulled"} {
+					if !strings.Contains(r.Reason, want) {
+						t.Errorf("ready reason lacks %q: %q", want, r.Reason)
+					}
+				}
+				if !strings.Contains(r.Reason, "ErrImagePull") && !strings.Contains(r.Reason, "ImagePullBackOff") {
+					t.Errorf("ready reason does not name the image-pull cause: %q", r.Reason)
+				}
+				act, _ := r.Evidence.Actual.(map[string]any)
+				if pods, _ := act["pods"].([]any); len(pods) == 0 {
+					t.Errorf("evidence lacks the failing pod: %v", r.Evidence.Actual)
 				}
 			case "image":
-				if !strings.Contains(r.Reason, "busybox:1.36.1") {
+				if !strings.Contains(r.Reason, "jk-does-not-exist") {
 					t.Errorf("image reason does not show the actual image: %q", r.Reason)
 				}
 			}
 		}
 		if elapsed < 8*time.Second || elapsed > 40*time.Second {
 			t.Errorf("grading took %v, want about the 8s limit", elapsed)
+		}
+	})
+
+	t.Run("PullFailureOfProvidedImageIsError", func(t *testing.T) {
+		// The same stuck pod is an environment fault, not the learner's, when
+		// the image is one the environment promised to provide.
+		provided := []grader.Option{grader.WithRedactor(redactor), grader.WithPreloadedImages(environment.ProbeImage.Name, wrongImage)}
+		e := grader.NewEngine(grader.DefaultCheckers(reader, provided...), provided...)
+		crits := gradeCriteria("wrong", 8*time.Second)
+		ev, err := e.Evaluate(ctx, gradeTarget(id, []model.Criterion{crits[0], crits[4]}))
+		testutil.NoError(t, err)
+		testutil.Equal(t, statuses(ev), map[string]string{"exists": "PASS", "ready": "ERROR"})
+		testutil.Equal(t, ev.Score, (*int)(nil))
+		testutil.Equal(t, ev.Complete, false)
+		if !strings.Contains(ev.Results[1].Reason, "image preparation failed") {
+			t.Errorf("reason: %q", ev.Results[1].Reason)
+		}
+	})
+
+	t.Run("UnschedulableIsError", func(t *testing.T) {
+		// A Deployment that asks for more CPU than the node has: the pods
+		// stay Pending for capacity, which the grader must not call wrong.
+		apply(gradeDeployment("huge", environment.ProbeImage.Name, nil, 64))
+		crits := gradeCriteria("huge", 6*time.Second)
+		ev := grade([]model.Criterion{crits[0], crits[4]})
+		testutil.Equal(t, statuses(ev), map[string]string{"exists": "PASS", "ready": "ERROR"})
+		testutil.Equal(t, ev.Score, (*int)(nil))
+		testutil.Equal(t, ev.Complete, false)
+		if !strings.Contains(ev.Results[1].Reason, "Insufficient cpu") {
+			t.Errorf("reason: %q", ev.Results[1].Reason)
 		}
 	})
 
@@ -231,9 +277,15 @@ func TestResourceGrading(t *testing.T) {
 	})
 
 	t.Run("UnreachableAPIIsErrorNotFail", func(t *testing.T) {
-		broken := *cfg
-		broken.Host = "https://127.0.0.1:1"
-		brokenReader, err := grader.NewClusterReader(&broken)
+		// Same kubeconfig, but the server points at a closed port.
+		kc, err := clientcmd.LoadFromFile(m.KubeconfigPath())
+		testutil.NoError(t, err)
+		for _, cluster := range kc.Clusters {
+			cluster.Server = "https://127.0.0.1:1"
+		}
+		brokenPath := filepath.Join(t.TempDir(), "kubeconfig")
+		testutil.NoError(t, clientcmd.WriteToFile(*kc, brokenPath))
+		brokenReader, err := grader.NewClusterReader(brokenPath, id.Context)
 		testutil.NoError(t, err)
 		fast := []grader.Option{grader.WithPollInterval(50 * time.Millisecond)}
 		e := grader.NewEngine(grader.DefaultCheckers(brokenReader, fast...), fast...)

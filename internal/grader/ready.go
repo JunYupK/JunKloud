@@ -5,8 +5,6 @@ import (
 	"fmt"
 	"strings"
 
-	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
-
 	"github.com/JunYupK/JunKloud/internal/model"
 )
 
@@ -17,6 +15,15 @@ import (
 //     seen the current spec; counters of an older generation prove nothing)
 //   - the desired replicas are updated, ready and available, and no
 //     surplus old replicas remain
+//
+// If the rollout is not complete when the time is up, the workload's pods
+// decide whose fault that is (spec 8.1): a wrong or unpullable image the
+// learner chose, an invalid image name, a crash loop, a config error, a
+// failing readiness probe or constraints only the pod itself imposes are
+// FAIL (the reason names the cause); cluster capacity, node trouble, a pull
+// failure of an image the environment provides (WithPreloadedImages), a
+// controller that never observed the spec, no pods at all, or any cause the
+// pods do not show are ERROR (ErrInsufficientEvidence).
 //
 // Supported targets: Deployment, StatefulSet, DaemonSet, ReplicaSet and Pod
 // (Running and Ready). Any other kind is an author error.
@@ -89,7 +96,7 @@ func (c *ReadyChecker) Check(ctx context.Context, t Target, crit model.Criterion
 	}
 	spec := observeSpec{
 		ref: ref, timeout: timeoutFor(crit, c.set), poll: true, confirm: true,
-		eval: func(obj *unstructured.Unstructured) verdict { return evalReady(kind, obj, a) },
+		eval: func(obj object) verdict { return evalReady(kind, obj, a) },
 	}
 	obs, err := c.observe(ctx, spec)
 	if err != nil {
@@ -99,6 +106,29 @@ func (c *ReadyChecker) Check(ctx context.Context, t Target, crit model.Criterion
 	if !obs.found {
 		res.Evidence.Expected = map[string]any{"rolledOut": true}
 		res.Evidence.Actual = map[string]any{"exists": false}
+		return res, nil
+	}
+	if obs.v.ok {
+		return res, nil
+	}
+	if obs.v.undecided {
+		return model.CheckResult{}, fmt.Errorf("%w: %s", ErrInsufficientEvidence, obs.v.reason)
+	}
+	if !obs.v.needsPods {
+		return res, nil // the object itself proves the learner's fault
+	}
+	// The rollout did not complete: find out whose fault that is.
+	pods, err := ownedPods(ctx, c.reader, kind, obs.obj)
+	if err != nil {
+		return model.CheckResult{}, err
+	}
+	cause := classifyRollout(pods, obs.v.expectPods, c.set.preloaded)
+	if cause.class != faultLearner {
+		return model.CheckResult{}, fmt.Errorf("%w: %s; %s", ErrInsufficientEvidence, obs.v.reason, cause.text)
+	}
+	res.Reason += "; cause: " + cause.text
+	if act, ok := res.Evidence.Actual.(map[string]any); ok {
+		act["pods"] = cause.summary()
 	}
 	return res, nil
 }
@@ -129,12 +159,12 @@ func intOr(obj map[string]any, def int64, path ...string) int64 {
 }
 
 // evalReady judges one observation of a workload.
-func evalReady(kind string, obj *unstructured.Unstructured, a readyArgs) verdict {
-	o := obj.Object
+func evalReady(kind string, obj object, a readyArgs) verdict {
+	o := obj
 	if kind == "Pod" {
 		return evalPod(o)
 	}
-	generation := obj.GetGeneration()
+	generation := generationOf(obj)
 	observed := intOr(o, 0, "status", "observedGeneration")
 	actual := map[string]any{"generation": generation, "observedGeneration": observed}
 	expected := map[string]any{"observedGeneration": fmt.Sprintf(">= %d", generation)}
@@ -142,6 +172,7 @@ func evalReady(kind string, obj *unstructured.Unstructured, a readyArgs) verdict
 
 	if observed < generation {
 		v.reason = fmt.Sprintf("status.observedGeneration %d is behind metadata.generation %d: the controller has not seen the current spec", observed, generation)
+		v.undecided = true // cluster trouble, not the learner's doing
 		return v
 	}
 
@@ -160,6 +191,7 @@ func evalReady(kind string, obj *unstructured.Unstructured, a readyArgs) verdict
 		actual["desiredNumberScheduled"] = desired
 		if desired == 0 {
 			v.reason = "no node is scheduled to run the DaemonSet yet"
+			v.needsPods, v.expectPods = true, true
 			return v
 		}
 		need("updatedNumberScheduled", intOr(o, 0, "status", "updatedNumberScheduled"), desired)
@@ -185,7 +217,7 @@ func evalReady(kind string, obj *unstructured.Unstructured, a readyArgs) verdict
 				return v
 			}
 			if progressDeadlineExceeded(o) {
-				v.terminal = true
+				v.terminal, v.needsPods, v.expectPods = true, true, want > 0
 				actual["progressing"] = "ProgressDeadlineExceeded"
 				v.reason = "the Deployment exceeded its progress deadline (Progressing=False, ProgressDeadlineExceeded)"
 				return v
@@ -200,6 +232,8 @@ func evalReady(kind string, obj *unstructured.Unstructured, a readyArgs) verdict
 	}
 	if len(problems) > 0 {
 		v.reason = "rollout incomplete: " + strings.Join(problems, ", ")
+		v.needsPods = true
+		v.expectPods = kind == "DaemonSet" || intOr(o, 1, "spec", "replicas") > 0
 		return v
 	}
 	v.ok = true
@@ -234,13 +268,16 @@ func evalPod(o map[string]any) verdict {
 		actual:   map[string]any{"phase": phase, "ready": ready},
 	}
 	switch {
+	case phase == "Succeeded":
+		v.terminal = true
+		v.reason = "pod ran to completion (phase Succeeded) instead of staying up"
 	case phase != "Running":
 		v.reason = fmt.Sprintf("pod phase is %q, not Running", phase)
-		if phase == "Succeeded" || phase == "Failed" {
-			v.terminal = true
-		}
+		v.needsPods, v.expectPods = true, true
+		v.terminal = phase == "Failed"
 	case !ready:
 		v.reason = "pod is Running but its Ready condition is not True"
+		v.needsPods, v.expectPods = true, true
 	default:
 		v.ok = true
 	}

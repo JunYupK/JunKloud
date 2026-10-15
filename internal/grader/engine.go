@@ -37,6 +37,10 @@ var (
 	// whole resource type) does not exist. It is the only reader error that
 	// means "the learner did not create it".
 	ErrNotFound = errors.New("object not found")
+	// ErrInsufficientEvidence: the check ran but the evidence does not prove
+	// whose fault the outcome is (for example a rollout that stalled for a
+	// cluster reason). Spec 8.1: never guess FAIL; the criterion is ERROR.
+	ErrInsufficientEvidence = errors.New("insufficient evidence")
 	// ErrTargetChanged: the target's UID or spec changed, or it vanished,
 	// while it was being graded. No consistent result exists, so the
 	// criterion is ERROR (spec 8.3).
@@ -134,6 +138,7 @@ type settings struct {
 	parallelism    int
 	pollInterval   time.Duration
 	redactor       *Redactor
+	preloaded      []string
 }
 
 // WithClock injects the clock (default SystemClock).
@@ -163,8 +168,36 @@ func WithPollInterval(d time.Duration) Option {
 	}
 }
 
-// WithRedactor shares a Redactor between the engine and the checkers.
+// WithRedactor sets the Redactor an engine uses. The engine hands it to every
+// checker through the context, so checkers need no matching option; a checker
+// used without an engine falls back to its own option or a private Redactor.
 func WithRedactor(r *Redactor) Option { return func(s *settings) { s.redactor = r } }
+
+// WithPreloadedImages lists the image references the environment provides
+// itself (the pinned, preloaded set). A pod that cannot start because one of
+// them failed to pull is an environment fault (ERROR); a pull failure of any
+// other image is the learner's wrong image (FAIL). References are compared
+// after Docker defaulting, so "busybox:1.37.0" equals
+// "docker.io/library/busybox:1.37.0".
+func WithPreloadedImages(images ...string) Option {
+	return func(s *settings) { s.preloaded = append(s.preloaded, images...) }
+}
+
+type redactorKey struct{}
+
+// withRedactor returns ctx carrying the engine's Redactor.
+func withRedactor(ctx context.Context, r *Redactor) context.Context {
+	return context.WithValue(ctx, redactorKey{}, r)
+}
+
+// redactorFor is the Redactor a checker must learn Secrets into: the
+// engine's when the check runs under an engine, otherwise fallback.
+func redactorFor(ctx context.Context, fallback *Redactor) *Redactor {
+	if r, ok := ctx.Value(redactorKey{}).(*Redactor); ok && r != nil {
+		return r
+	}
+	return fallback
+}
 
 func newSettings(opts []Option) settings {
 	s := settings{
@@ -239,6 +272,7 @@ func (e *Engine) Evaluate(ctx context.Context, t Target) (model.Evaluation, erro
 	if err := ctx.Err(); err != nil {
 		return model.Evaluation{}, err
 	}
+	ctx = withRedactor(ctx, e.set.redactor)
 
 	results := make([]model.CheckResult, len(crits))
 	done := make([]chan struct{}, len(crits))
@@ -276,6 +310,12 @@ func (e *Engine) Evaluate(ctx context.Context, t Target) (model.Evaluation, erro
 	wg.Wait()
 	if err := ctx.Err(); err != nil {
 		return model.Evaluation{}, err
+	}
+
+	// Scrub only now: every Secret any criterion read is known, whatever
+	// order the criteria finished in.
+	for i := range results {
+		results[i] = e.set.redactor.ScrubResult(results[i])
 	}
 
 	ev := model.Evaluation{Results: results, Complete: true}
@@ -363,7 +403,7 @@ func (e *Engine) run(ctx context.Context, t Target, c model.Criterion, gate *syn
 	if res.Evidence.Duration == 0 {
 		res.Evidence.Duration = e.set.clock.Now().Sub(start)
 	}
-	return e.set.redactor.ScrubResult(res)
+	return res
 }
 
 func safeCheck(ctx context.Context, ck Checker, t Target, c model.Criterion) (res model.CheckResult, err error) {
@@ -377,7 +417,7 @@ func safeCheck(ctx context.Context, ck Checker, t Target, c model.Criterion) (re
 
 func errorReason(err error) string {
 	switch {
-	case errors.Is(err, ErrInvalidCriterion), errors.Is(err, ErrTargetChanged):
+	case errors.Is(err, ErrInvalidCriterion), errors.Is(err, ErrTargetChanged), errors.Is(err, ErrInsufficientEvidence):
 		return err.Error()
 	default:
 		return "grading error: " + err.Error()

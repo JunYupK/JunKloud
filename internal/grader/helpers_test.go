@@ -8,8 +8,6 @@ import (
 	"testing"
 	"time"
 
-	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
-
 	"github.com/JunYupK/JunKloud/internal/grader"
 	"github.com/JunYupK/JunKloud/internal/model"
 )
@@ -56,13 +54,34 @@ func (c *fakeClock) slept() time.Duration {
 // served in order (the last one repeats); an entry may be an error or nil
 // (not found) instead of an object.
 type fakeReader struct {
-	mu    sync.Mutex
-	steps map[string][]any
-	calls map[string]int
+	mu        sync.Mutex
+	steps     map[string][]any
+	calls     map[string]int
+	lists     map[string][]map[string]any // "Kind/namespace" -> objects
+	listQuery []grader.ListQuery
+	listErr   error
 }
 
 func newReader() *fakeReader {
-	return &fakeReader{steps: map[string][]any{}, calls: map[string]int{}}
+	return &fakeReader{steps: map[string][]any{}, calls: map[string]int{}, lists: map[string][]map[string]any{}}
+}
+
+// putList serves objs for List queries of a kind in a namespace.
+func (r *fakeReader) putList(kind, ns string, objs ...map[string]any) *fakeReader {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.lists[kind+"/"+ns] = objs
+	return r
+}
+
+func (r *fakeReader) List(_ context.Context, q grader.ListQuery) ([]map[string]any, error) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.listQuery = append(r.listQuery, q)
+	if r.listErr != nil {
+		return nil, r.listErr
+	}
+	return r.lists[q.Kind+"/"+q.Namespace], nil
 }
 
 func key(ref model.ObjectRef) string {
@@ -83,7 +102,7 @@ func (r *fakeReader) callsFor(ref model.ObjectRef) int {
 	return r.calls[key(ref)]
 }
 
-func (r *fakeReader) Get(_ context.Context, ref model.ObjectRef) (*unstructured.Unstructured, error) {
+func (r *fakeReader) Get(_ context.Context, ref model.ObjectRef) (map[string]any, error) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	k := key(ref)
@@ -102,7 +121,7 @@ func (r *fakeReader) Get(_ context.Context, ref model.ObjectRef) (*unstructured.
 	case error:
 		return nil, v
 	case map[string]any:
-		return &unstructured.Unstructured{Object: v}, nil
+		return v, nil
 	default:
 		panic(fmt.Sprintf("bad step %T", v))
 	}
