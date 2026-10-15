@@ -31,13 +31,15 @@ const (
 	dockerTimeout = time.Minute
 )
 
-// HostCompat selects host-compatibility patches for the kind configuration.
-// They work around host limitations and are never product defaults: target
-// hosts (Docker Desktop, cgroup v2) need none.
+// HostCompat selects host-compatibility workarounds: a set of modes,
+// written as a sorted, comma-separated list ("" is none). They work around
+// limitations of particular hosts and are never product defaults: target
+// hosts (Docker Desktop, cgroup v2, IPv6-capable kernel) need none. Test
+// with Has, not ==, since several modes can be combined.
 type HostCompat string
 
 const (
-	// HostCompatNone applies no patches (the default).
+	// HostCompatNone applies no workaround (the default).
 	HostCompatNone HostCompat = ""
 	// HostCompatCgroupV1 is for Linux hosts still on cgroup v1 that also
 	// forbid lowering oom_score_adj (such as the CI sandbox): the kubelet is
@@ -45,29 +47,62 @@ const (
 	// false) and containerd keeps oom_score_adj restricted
 	// (restrict_oom_score_adj = true).
 	HostCompatCgroupV1 HostCompat = "cgroupv1"
+	// HostCompatNoIPv6 is for engines whose kernel has IPv6 disabled
+	// entirely (booted with ipv6.disable=1, such as the CI sandbox).
+	// cloud-provider-kind passes net.ipv6.* sysctls to every load-balancer
+	// container it starts, which such a kernel rejects, so no Ingress or
+	// LoadBalancer can come up. In this mode cloud-provider-kind runs with a
+	// docker CLI wrapper that drops exactly those sysctl flags.
+	HostCompatNoIPv6 HostCompat = "no-ipv6"
 )
 
-// ParseHostCompat parses a host-compat mode name ("" or "cgroupv1").
+var hostCompatModes = []HostCompat{HostCompatCgroupV1, HostCompatNoIPv6}
+
+// ParseHostCompat parses a comma-separated list of host-compat modes
+// ("", "cgroupv1", "no-ipv6", "cgroupv1,no-ipv6"); order and repeats do
+// not matter.
 func ParseHostCompat(s string) (HostCompat, error) {
-	switch HostCompat(s) {
-	case HostCompatNone, HostCompatCgroupV1:
-		return HostCompat(s), nil
+	var modes []string
+	for _, f := range strings.Split(s, ",") {
+		f = strings.TrimSpace(f)
+		if f == "" {
+			continue
+		}
+		if !slices.Contains(hostCompatModes, HostCompat(f)) {
+			return HostCompatNone, fmt.Errorf("environment: unknown host compat mode %q (want a comma-separated list of %q and %q)", f, HostCompatCgroupV1, HostCompatNoIPv6)
+		}
+		if !slices.Contains(modes, f) {
+			modes = append(modes, f)
+		}
 	}
-	return HostCompatNone, fmt.Errorf("environment: unknown host compat mode %q (want \"\" or %q)", s, HostCompatCgroupV1)
+	slices.Sort(modes)
+	return HostCompat(strings.Join(modes, ",")), nil
+}
+
+// Has reports whether mode is one of c's modes.
+func (c HostCompat) Has(mode HostCompat) bool {
+	return mode != HostCompatNone && slices.Contains(strings.Split(string(c), ","), string(mode))
 }
 
 // kindConfig renders the kind cluster configuration: one control-plane node
 // labeled with the environment ID, plus the selected host-compat patches.
+//
+// Kubelets always use serverTLSBootstrap: their serving certificate is
+// requested through a kubernetes.io/kubelet-serving CSR and signed by the
+// cluster CA (JunKloud approves only its own nodes' requests, see
+// EnsurePlatform), so metrics-server and the API server can verify kubelet
+// TLS instead of skipping verification.
 func kindConfig(envID string, compat HostCompat) []byte {
 	var b strings.Builder
 	b.WriteString("kind: Cluster\napiVersion: kind.x-k8s.io/v1alpha4\n")
-	if compat == HostCompatCgroupV1 {
+	if compat.Has(HostCompatCgroupV1) {
 		b.WriteString("containerdConfigPatches:\n- |-\n  [plugins.\"io.containerd.grpc.v1.cri\"]\n    restrict_oom_score_adj = true\n")
 	}
 	b.WriteString("nodes:\n- role: control-plane\n  labels:\n")
 	fmt.Fprintf(&b, "    %s: %q\n", LabelEnvironmentID, envID)
-	if compat == HostCompatCgroupV1 {
-		b.WriteString("  kubeadmConfigPatches:\n  - |\n    kind: KubeletConfiguration\n    failCgroupV1: false\n")
+	b.WriteString("  kubeadmConfigPatches:\n  - |\n    kind: KubeletConfiguration\n    serverTLSBootstrap: true\n")
+	if compat.Has(HostCompatCgroupV1) {
+		b.WriteString("    failCgroupV1: false\n")
 	}
 	return []byte(b.String())
 }

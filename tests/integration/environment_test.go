@@ -6,7 +6,8 @@
 //
 // On a cgroup v1 host that forbids lowering oom_score_adj (the CI sandbox),
 // set JUNKLOUD_TEST_HOST_COMPAT=cgroupv1 so clusters get the explicit
-// environment.WithHostCompat option.
+// environment.WithHostCompat option; on an engine whose kernel has IPv6
+// disabled add no-ipv6 (JUNKLOUD_TEST_HOST_COMPAT=cgroupv1,no-ipv6).
 package integration
 
 import (
@@ -43,7 +44,8 @@ import (
 )
 
 // hostCompatOptions returns the environment options selected by
-// JUNKLOUD_TEST_HOST_COMPAT ("" or "cgroupv1").
+// JUNKLOUD_TEST_HOST_COMPAT (a comma-separated list of host-compat modes,
+// see environment.ParseHostCompat).
 func hostCompatOptions(t *testing.T) []environment.Option {
 	t.Helper()
 	compat, err := environment.ParseHostCompat(os.Getenv("JUNKLOUD_TEST_HOST_COMPAT"))
@@ -195,7 +197,9 @@ func startForeignCluster(t *testing.T) func() foreignCluster {
 	name := "jk-foreign-" + randomHex(t, 4)
 	kubeconfig := filepath.Join(dir, "kubeconfig")
 	cfg := "kind: Cluster\napiVersion: kind.x-k8s.io/v1alpha4\nnodes:\n- role: control-plane\n"
-	if os.Getenv("JUNKLOUD_TEST_HOST_COMPAT") == string(environment.HostCompatCgroupV1) {
+	compat, err := environment.ParseHostCompat(os.Getenv("JUNKLOUD_TEST_HOST_COMPAT"))
+	testutil.NoError(t, err)
+	if compat.Has(environment.HostCompatCgroupV1) {
 		cfg = "kind: Cluster\napiVersion: kind.x-k8s.io/v1alpha4\ncontainerdConfigPatches:\n- |-\n  [plugins.\"io.containerd.grpc.v1.cri\"]\n    restrict_oom_score_adj = true\nnodes:\n- role: control-plane\n  kubeadmConfigPatches:\n  - |\n    kind: KubeletConfiguration\n    failCgroupV1: false\n"
 	}
 	cfgPath := filepath.Join(dir, "kind.yaml")

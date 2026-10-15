@@ -47,7 +47,7 @@ var (
 )
 
 // reservedNamespaces are never a problem's namespace.
-var reservedNamespaces = []string{"default", "kube-system", "kube-public", "kube-node-lease", "local-path-storage", MarkerNamespace}
+var reservedNamespaces = []string{"default", "kube-system", "kube-public", "kube-node-lease", "local-path-storage", MarkerNamespace, PlatformNamespace}
 
 // Owner is who Apply works for and where it may write.
 //
