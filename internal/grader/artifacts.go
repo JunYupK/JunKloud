@@ -282,7 +282,10 @@ func NewClusterArtifactChecker(kubeconfigPath, contextName string, probes ProbeR
 	if err != nil {
 		return nil, err
 	}
-	tools := NewToolRunner()
+	tools := ToolRunner(NewToolRunner())
+	if set := newSettings(opts); set.tools != nil {
+		tools = set.tools
+	}
 	cfg := ArtifactConfig{Reader: reader, Tools: tools, Pods: k, KubeconfigPath: kubeconfigPath, Context: contextName}
 	if newSettings(opts).controlNamespace != "" {
 		runner, err := newClusterImageRunner(tools, kubePods{k.cs}, k, probes, opts...)

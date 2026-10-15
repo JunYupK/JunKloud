@@ -11,6 +11,7 @@ import (
 	"os"
 	"path"
 	"sort"
+	"strings"
 
 	"github.com/JunYupK/JunKloud/internal/model"
 	"github.com/JunYupK/JunKloud/internal/problem"
@@ -24,32 +25,53 @@ type InputCapturer interface {
 }
 
 // CaptureInputs fingerprints the submission's inputs named by the problem's
-// criteria and nothing else:
+// criteria, and what those criteria are really about, and nothing else:
 //
 //	object:<apiVersion>/<Kind>/<ns>/<name>   every API object a criterion
-//	    targets (and, for authorization, the RoleBindings/ClusterRoleBindings
-//	    granting the ServiceAccount with the Roles they reference; for
-//	    network-policy the namespace's NetworkPolicies). Value:
-//	    "uid=<uid>;gen=<generation>;input=<sha256 of the spec>" or "absent".
-//	    Only the object's spec (or, for kinds without one, its payload fields)
-//	    is hashed: status, resourceVersion, managedFields, annotations the
-//	    controllers write and a Pod's spec.nodeName are not. A Secret's
-//	    payload is covered only through a keyed hash (below), else omitted.
+//	    targets, plus the objects behind it: for a Service (http, tcp,
+//	    network-policy) the workloads whose pod template its selector selects
+//	    (also at zero replicas) and bare pods it selects; for an Ingress its
+//	    backend Services and their workloads; for any captured workload or pod
+//	    the ConfigMaps, Secrets and ServiceAccount its pod spec references; for
+//	    http/tcp/network-policy the NetworkPolicies of the target's and every
+//	    source namespace; for authorization the RoleBindings/ClusterRoleBindings
+//	    granting the ServiceAccount with the Roles they reference and the
+//	    runs_as workload; for kustomize the live expected objects.
+//	    Value: "uid=<uid>;gen=<generation>;input=sha256:<hash>" or "absent".
+//	    The hash covers the spec (or, for kinds without one, the payload
+//	    fields) AND metadata.labels and metadata.annotations, because a
+//	    learner's label or annotation can be the answer. Fields that
+//	    controllers, kubectl and the system write are excluded: status,
+//	    resourceVersion, managedFields, a Pod's spec.nodeName, a PVC's
+//	    spec.volumeName; annotations deployment.kubernetes.io/*,
+//	    kubectl.kubernetes.io/last-applied-configuration (a copy of the last
+//	    apply, which changes only when the spec does), autoscaling.alpha.*,
+//	    endpoints.kubernetes.io/*, pv.kubernetes.io/*, volume.*kubernetes.io/*,
+//	    batch.kubernetes.io/*, cronjob.kubernetes.io/*,
+//	    control-plane.alpha.kubernetes.io/*; labels pod-template-hash,
+//	    controller-revision-hash, controller-uid, job-name,
+//	    statefulset.kubernetes.io/pod-name, apps.kubernetes.io/pod-index,
+//	    batch.kubernetes.io/*, kubernetes.io/metadata.name.
+//	    A Secret's payload is covered through a keyed hash (below); without a
+//	    key its uid and resourceVersion are the change signal instead (R22):
+//	    a Secret is never silently ignored.
 //	file:<path>      workspace file content ("absent", "outside-workspace",
 //	                 or a digest); archive:<path> likewise
 //	image:<ref>      "id=<image ID>" from the Docker engine ("absent" if none)
 //	helm:<ns>/<release>   "revision=<n>;chart=<name-version>[;values=<mac>]"
-//	                 or "absent"; the release status is not an input
+//	                 or "absent"; the release status is not an input. Without a
+//	                 key the revision (every upgrade or rollback increments it)
+//	                 is the change signal for the values.
 //	kustomize:<dir>, kustomize-base:<dir>   keyed digest of the directory tree
 //
 // Digests of anything that may carry secrets (files, trees, Helm values,
-// Secret payloads) are HMAC-SHA256 values keyed with ArtifactConfig.InputKey,
-// prefixed "mac:". A plain unkeyed hash of a low-entropy Secret would be a
-// dictionary lookup, so without a key Secret payloads and Helm values are
-// omitted, and file/tree digests are plain "sha256:" digests (compose with a
-// key in production). The result is deterministic for identical inputs.
-// Missing objects and files are recorded, not errors; an API or tool failure
-// is an error.
+// Secret payloads) are HMAC-SHA256 values keyed with ArtifactConfig.InputKey
+// (prefixed "mac:"). A plain unkeyed hash of a low-entropy Secret would be a
+// dictionary lookup, so without a key Secret payloads and Helm values are not
+// hashed at all (their signals above are used) and file/tree digests are
+// plain "sha256:" digests (compose with a key in production). The result is
+// deterministic for identical inputs. Missing objects and files are
+// recorded, not errors; an API or tool failure is an error.
 func (c *ArtifactChecker) CaptureInputs(ctx context.Context, t Target) (map[string]string, error) {
 	out := map[string]string{}
 	for _, crit := range t.Problem.Definition.Criteria {
@@ -65,12 +87,18 @@ func (c *ArtifactChecker) captureCriterion(ctx context.Context, t Target, crit m
 	case model.CriterionResource, model.CriterionField, model.CriterionReady, model.CriterionHTTP, model.CriterionTCP,
 		model.CriterionLogs, model.CriterionJob, model.CriterionCronJobTemplate, model.CriterionCronJobSchedule,
 		model.CriterionSecurityContext:
-		return c.captureTarget(ctx, t, crit, out)
+		if err := c.captureTarget(ctx, t, crit, out); err != nil {
+			return err
+		}
+		if crit.Kind == model.CriterionHTTP || crit.Kind == model.CriterionTCP {
+			return c.captureNetworkPolicies(ctx, t, crit, out)
+		}
+		return nil
 	case model.CriterionNetworkPolicy:
 		if err := c.captureTarget(ctx, t, crit, out); err != nil {
 			return err
 		}
-		return c.capturePolicies(ctx, problemNamespaceOf(t, crit), out)
+		return c.captureNetworkPolicies(ctx, t, crit, out)
 	case model.CriterionAuthorization:
 		return c.captureAuthorization(ctx, t, crit, out)
 	case model.CriterionFile:
@@ -106,71 +134,326 @@ func (c *ArtifactChecker) captureTarget(ctx context.Context, t Target, crit mode
 	if err != nil {
 		return err
 	}
-	return c.captureObject(ctx, ref, out)
+	return c.captureDeep(ctx, ref, out, 0)
 }
 
-// captureObject records one object's fingerprint (once).
-func (c *ArtifactChecker) captureObject(ctx context.Context, ref model.ObjectRef, out map[string]string) error {
-	key := objectKey(ref)
-	if _, done := out[key]; done {
+const maxInputDepth = 4
+
+// captureDeep fingerprints ref and what the answer behind it consists of.
+func (c *ArtifactChecker) captureDeep(ctx context.Context, ref model.ObjectRef, out map[string]string, depth int) error {
+	obj, err := c.captureObject(ctx, ref, out)
+	if err != nil || obj == nil {
+		return err
+	}
+	return c.follow(ctx, ref, obj, out, depth)
+}
+
+// follow captures what an already recorded object leads to.
+func (c *ArtifactChecker) follow(ctx context.Context, ref model.ObjectRef, obj object, out map[string]string, depth int) error {
+	if depth > maxInputDepth {
 		return nil
 	}
+	switch {
+	case ref.APIVersion == "v1" && ref.Kind == "Service":
+		return c.captureServiceBackends(ctx, obj, out, depth)
+	case ref.APIVersion == "networking.k8s.io/v1" && ref.Kind == "Ingress":
+		return c.captureIngressBackends(ctx, obj, out, depth)
+	}
+	if _, ok := podSpecPath[ref.Kind]; ok {
+		return c.captureReferenced(ctx, ref, obj, out, depth)
+	}
+	return nil
+}
+
+// captureObject records one object's fingerprint (once) and returns the
+// object (nil when absent or already recorded).
+func (c *ArtifactChecker) captureObject(ctx context.Context, ref model.ObjectRef, out map[string]string) (object, error) {
+	key := objectKey(ref)
+	if _, done := out[key]; done {
+		return nil, nil
+	}
 	if c.cfg.Reader == nil {
-		return notConfigured("input fingerprints need an object reader")
+		return nil, notConfigured("input fingerprints need an object reader")
 	}
 	obj, err := c.obs.get(ctx, ref)
 	if errors.Is(err, ErrNotFound) {
 		out[key] = "absent"
-		return nil
+		return nil, nil
 	}
 	if err != nil {
-		return err
+		return nil, err
 	}
 	out[key] = c.fingerprint(obj)
+	return obj, nil
+}
+
+// listOptional lists a kind; a kind the cluster does not serve is no objects.
+func (c *ArtifactChecker) listOptional(ctx context.Context, q ListQuery) ([]object, error) {
+	list, err := c.cfg.Reader.List(ctx, q)
+	if errors.Is(err, ErrNotFound) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, fmt.Errorf("list %ss: %w", q.Kind, err)
+	}
+	return list, nil
+}
+
+var backingKinds = []struct{ apiVersion, kind string }{
+	{"apps/v1", "Deployment"}, {"apps/v1", "StatefulSet"}, {"apps/v1", "DaemonSet"}, {"apps/v1", "ReplicaSet"},
+	{"batch/v1", "Job"}, {"v1", "Pod"},
+}
+
+// captureServiceBackends fingerprints the workloads a Service selects: those
+// whose pod template labels carry the whole selector (so a Deployment scaled
+// to zero is still found), and bare pods. Objects owned by another
+// controller (ReplicaSets of a Deployment, pods of a workload) are skipped:
+// their owner is the learner's object.
+func (c *ArtifactChecker) captureServiceBackends(ctx context.Context, svc object, out map[string]string, depth int) error {
+	selector := mapAt(svc, "spec", "selector")
+	if len(selector) == 0 {
+		return nil
+	}
+	ns := stringAt(svc, "metadata", "namespace")
+	for _, k := range backingKinds {
+		list, err := c.listOptional(ctx, ListQuery{APIVersion: k.apiVersion, Kind: k.kind, Namespace: ns})
+		if err != nil {
+			return err
+		}
+		sort.Slice(list, func(i, j int) bool { return nameOf(list[i]) < nameOf(list[j]) })
+		for _, w := range list {
+			if controllerUID(w) != "" {
+				continue
+			}
+			labels := mapAt(w, "metadata", "labels")
+			if k.kind != "Pod" {
+				path := append([]string{}, podSpecPath[k.kind][:len(podSpecPath[k.kind])-1]...)
+				labels = mapAt(w, append(path, "metadata", "labels")...)
+			}
+			if !labelsContain(labels, selector) {
+				continue
+			}
+			ref := model.ObjectRef{APIVersion: k.apiVersion, Kind: k.kind, Namespace: ns, Name: nameOf(w)}
+			key := objectKey(ref)
+			if _, done := out[key]; done {
+				continue
+			}
+			out[key] = c.fingerprint(w) // already read by the list
+			if err := c.follow(ctx, ref, w, out, depth+1); err != nil {
+				return err
+			}
+		}
+	}
 	return nil
 }
 
-// fingerprint is "uid=..;gen=..;input=.." over the submitted part of obj.
+func labelsContain(labels, selector map[string]any) bool {
+	for k, v := range selector {
+		if labels[k] != v {
+			return false
+		}
+	}
+	return true
+}
+
+// captureIngressBackends follows an Ingress to its backend Services.
+func (c *ArtifactChecker) captureIngressBackends(ctx context.Context, ing object, out map[string]string, depth int) error {
+	ns := stringAt(ing, "metadata", "namespace")
+	names := map[string]bool{}
+	if n := stringAt(ing, "spec", "defaultBackend", "service", "name"); n != "" {
+		names[n] = true
+	}
+	for _, r := range listAt(ing, "spec", "rules") {
+		for _, p := range listAt(asMap(asMap(r)["http"]), "paths") {
+			if n, _ := asMap(asMap(asMap(p)["backend"])["service"])["name"].(string); n != "" {
+				names[n] = true
+			}
+		}
+	}
+	for _, n := range sortedKeys(names) {
+		if err := c.captureDeep(ctx, model.ObjectRef{APIVersion: "v1", Kind: "Service", Namespace: ns, Name: n}, out, depth+1); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+const maxReferenced = 30
+
+// captureReferenced fingerprints the ConfigMaps, Secrets and ServiceAccount
+// that a workload's pod spec refers to: part of what the learner submitted.
+func (c *ArtifactChecker) captureReferenced(ctx context.Context, ref model.ObjectRef, obj object, out map[string]string, depth int) error {
+	spec := mapAt(obj, podSpecPath[ref.Kind]...)
+	refs := map[model.ObjectRef]bool{}
+	add := func(kind, name string) {
+		if name != "" && len(refs) < maxReferenced {
+			refs[model.ObjectRef{APIVersion: "v1", Kind: kind, Namespace: ref.Namespace, Name: name}] = true
+		}
+	}
+	name := func(v any, key string) string { s, _ := asMap(v)[key].(string); return s }
+	for _, v := range listAt(spec, "volumes") {
+		vm := asMap(v)
+		add("ConfigMap", name(vm["configMap"], "name"))
+		add("Secret", name(vm["secret"], "secretName"))
+		for _, src := range listAt(asMap(vm["projected"]), "sources") {
+			add("ConfigMap", name(asMap(src)["configMap"], "name"))
+			add("Secret", name(asMap(src)["secret"], "name"))
+		}
+	}
+	for _, group := range []string{"containers", "initContainers"} {
+		for _, cv := range listAt(spec, group) {
+			cm := asMap(cv)
+			for _, e := range listAt(cm, "env") {
+				vf := asMap(asMap(e)["valueFrom"])
+				add("ConfigMap", name(vf["configMapKeyRef"], "name"))
+				add("Secret", name(vf["secretKeyRef"], "name"))
+			}
+			for _, e := range listAt(cm, "envFrom") {
+				add("ConfigMap", name(asMap(e)["configMapRef"], "name"))
+				add("Secret", name(asMap(e)["secretRef"], "name"))
+			}
+		}
+	}
+	if sa, _ := spec["serviceAccountName"].(string); sa != "" {
+		add("ServiceAccount", sa)
+	}
+	list := make([]model.ObjectRef, 0, len(refs))
+	for r := range refs {
+		list = append(list, r)
+	}
+	sort.Slice(list, func(i, j int) bool { return objectKey(list[i]) < objectKey(list[j]) })
+	for _, r := range list {
+		if _, err := c.captureObject(ctx, r, out); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// captureNetworkPolicies fingerprints the NetworkPolicies of the namespaces a
+// network criterion involves: the target's and every probe source namespace.
+func (c *ArtifactChecker) captureNetworkPolicies(ctx context.Context, t Target, crit model.Criterion, out map[string]string) error {
+	if c.cfg.Reader == nil {
+		return notConfigured("input fingerprints need an object reader")
+	}
+	namespaces := map[string]bool{problemNamespaceOf(t, crit): true}
+	addSource := func(v any) {
+		ns, _ := asMap(asMap(v)["source"])["namespace"].(string)
+		if ns == "" {
+			ns = problemNamespace(t)
+		}
+		namespaces[ns] = true
+	}
+	addSource(map[string]any(crit.Args))
+	if l, ok := crit.Args["expectations"].([]any); ok {
+		for _, e := range l {
+			addSource(e)
+		}
+	}
+	for _, ns := range sortedKeys(namespaces) {
+		if ns == "" {
+			continue
+		}
+		list, err := c.listOptional(ctx, ListQuery{APIVersion: "networking.k8s.io/v1", Kind: "NetworkPolicy", Namespace: ns})
+		if err != nil {
+			return err
+		}
+		for _, p := range list {
+			out[objectKey(model.ObjectRef{APIVersion: "networking.k8s.io/v1", Kind: "NetworkPolicy", Namespace: ns, Name: nameOf(p)})] = c.fingerprint(p)
+		}
+	}
+	return nil
+}
+
+// fingerprint is "uid=..;gen=..;input=.." over what the learner submitted of
+// obj: its payload plus its labels and annotations, without the fields
+// controllers and the system write.
 func (c *ArtifactChecker) fingerprint(obj object) string {
 	head := fmt.Sprintf("uid=%s;gen=%d", uidOf(obj), generationOf(obj))
+	meta := hashOf(submittedMetadata(obj))
 	if isSecret(obj) {
+		head += ";meta=" + meta
 		if mac := c.mac("secret", canonicalJSON(map[string]any{"data": obj["data"], "stringData": obj["stringData"], "type": obj["type"]})); mac != "" {
 			return head + ";data=" + mac
 		}
-		return head
+		// No key: the payload is not hashed (a plain hash of a weak secret is
+		// a dictionary lookup); uid + resourceVersion signal a change (R22).
+		return head + ";rv=" + stringAt(obj, "metadata", "resourceVersion")
 	}
-	return head + ";input=" + inputHash(submittedView(obj))
+	return head + ";input=" + hashOf(map[string]any{"payload": submittedPayload(obj), "metadata": submittedMetadata(obj)})
 }
 
-// submittedView drops the fields controllers fill in after the learner
-// applied the object, so they do not count as the learner's input.
-func submittedView(obj object) object {
-	kind, _ := obj["kind"].(string)
-	var drop string
-	switch kind {
-	case "Pod":
-		drop = "nodeName"
-	case "PersistentVolumeClaim":
-		drop = "volumeName"
-	default:
-		return obj
+func hashOf(v any) string {
+	sum := sha256.Sum256(canonicalJSON(v))
+	return "sha256:" + hex.EncodeToString(sum[:])
+}
+
+// submittedPayload is the spec, or for kinds without one every top-level
+// field except apiVersion, kind, metadata and status; minus the fields a
+// controller fills in after the learner applied the object.
+func submittedPayload(obj object) any {
+	if spec, ok := obj["spec"].(map[string]any); ok {
+		drop := ""
+		switch obj["kind"] {
+		case "Pod":
+			drop = "nodeName"
+		case "PersistentVolumeClaim":
+			drop = "volumeName"
+		}
+		cp := make(map[string]any, len(spec))
+		for k, v := range spec {
+			if k != drop {
+				cp[k] = v
+			}
+		}
+		return cp
 	}
-	spec, ok := obj["spec"].(map[string]any)
-	if !ok {
-		return obj
-	}
-	cp := make(map[string]any, len(spec))
-	for k, v := range spec {
-		if k != drop {
-			cp[k] = v
+	payload := map[string]any{}
+	for k, v := range obj {
+		switch k {
+		case "apiVersion", "kind", "metadata", "status":
+		default:
+			payload[k] = v
 		}
 	}
-	view := make(map[string]any, len(obj))
-	for k, v := range obj {
-		view[k] = v
+	return payload
+}
+
+var (
+	systemAnnotationPrefixes = []string{
+		"deployment.kubernetes.io/", "autoscaling.alpha.kubernetes.io/", "endpoints.kubernetes.io/", "pv.kubernetes.io/",
+		"volume.kubernetes.io/", "volume.beta.kubernetes.io/", "batch.kubernetes.io/", "cronjob.kubernetes.io/",
+		"control-plane.alpha.kubernetes.io/",
 	}
-	view["spec"] = cp
-	return view
+	systemAnnotations = map[string]bool{"kubectl.kubernetes.io/last-applied-configuration": true}
+	systemLabelKeys   = map[string]bool{
+		"pod-template-hash": true, "controller-revision-hash": true, "controller-uid": true, "job-name": true,
+		"statefulset.kubernetes.io/pod-name": true, "apps.kubernetes.io/pod-index": true, "kubernetes.io/metadata.name": true,
+	}
+)
+
+// submittedMetadata is the learner-settable part of metadata.
+func submittedMetadata(obj object) map[string]any {
+	meta := metaOf(obj)
+	labels, annotations := map[string]any{}, map[string]any{}
+	for k, v := range asMap(meta["labels"]) {
+		if !systemLabelKeys[k] && !strings.HasPrefix(k, "batch.kubernetes.io/") {
+			labels[k] = v
+		}
+	}
+next:
+	for k, v := range asMap(meta["annotations"]) {
+		if systemAnnotations[k] {
+			continue
+		}
+		for _, p := range systemAnnotationPrefixes {
+			if strings.HasPrefix(k, p) {
+				continue next
+			}
+		}
+		annotations[k] = v
+	}
+	return map[string]any{"labels": labels, "annotations": annotations}
 }
 
 func canonicalJSON(v any) []byte {
@@ -311,23 +594,9 @@ func (c *ArtifactChecker) captureKustomize(ctx context.Context, t Target, crit m
 		if ns == "" {
 			ns = problemNamespace(t)
 		}
-		if err := c.captureObject(ctx, model.ObjectRef{APIVersion: e.APIVersion, Kind: e.Kind, Namespace: ns, Name: e.Name}, out); err != nil {
+		if err := c.captureDeep(ctx, model.ObjectRef{APIVersion: e.APIVersion, Kind: e.Kind, Namespace: ns, Name: e.Name}, out, 0); err != nil {
 			return err
 		}
-	}
-	return nil
-}
-
-func (c *ArtifactChecker) capturePolicies(ctx context.Context, ns string, out map[string]string) error {
-	if c.cfg.Reader == nil {
-		return notConfigured("input fingerprints need an object reader")
-	}
-	list, err := c.cfg.Reader.List(ctx, ListQuery{APIVersion: "networking.k8s.io/v1", Kind: "NetworkPolicy", Namespace: ns})
-	if err != nil {
-		return fmt.Errorf("list NetworkPolicies: %w", err)
-	}
-	for _, p := range list {
-		out[objectKey(model.ObjectRef{APIVersion: "networking.k8s.io/v1", Kind: "NetworkPolicy", Namespace: ns, Name: nameOf(p)})] = c.fingerprint(p)
 	}
 	return nil
 }
@@ -343,7 +612,7 @@ func (c *ArtifactChecker) captureAuthorization(ctx context.Context, t Target, cr
 	if err != nil {
 		return err
 	}
-	if err := c.captureObject(ctx, ref, out); err != nil {
+	if _, err := c.captureObject(ctx, ref, out); err != nil {
 		return err
 	}
 	if r := a.RunsAs; r != nil {
@@ -351,7 +620,7 @@ func (c *ArtifactChecker) captureAuthorization(ctx context.Context, t Target, cr
 		if ns == "" {
 			ns = ref.Namespace
 		}
-		if err := c.captureObject(ctx, model.ObjectRef{APIVersion: r.APIVersion, Kind: r.Kind, Namespace: ns, Name: r.Name}, out); err != nil {
+		if err := c.captureDeep(ctx, model.ObjectRef{APIVersion: r.APIVersion, Kind: r.Kind, Namespace: ns, Name: r.Name}, out, 0); err != nil {
 			return err
 		}
 	}
@@ -382,7 +651,7 @@ func (c *ArtifactChecker) captureAuthorization(ctx context.Context, t Target, cr
 			if role.Kind != "Role" && role.Kind != "ClusterRole" {
 				continue
 			}
-			if err := c.captureObject(ctx, role, out); err != nil {
+			if _, err := c.captureObject(ctx, role, out); err != nil {
 				return err
 			}
 		}

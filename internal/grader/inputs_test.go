@@ -175,9 +175,10 @@ func TestInputsOfFiles(t *testing.T) {
 func TestInputsKeepSecretsOut(t *testing.T) {
 	ref := refOf("v1", "Secret", "jk-p1", "db")
 	c := model.Criterion{ID: "s", Kind: model.CriterionField, Points: 1, Target: ref, Args: map[string]any{"fields": []any{map[string]any{"path": "data.password", "exists": true}}}}
+	// resourceVersion follows the payload here, as it does for a Secret nobody but the learner writes.
 	secret := func(pw string) map[string]any {
-		return obj(t, fmt.Sprintf(`{"apiVersion":"v1","kind":"Secret","metadata":{"name":"db","namespace":"jk-p1","uid":"sec-1"},"data":{"password":%q}}`,
-			base64.StdEncoding.EncodeToString([]byte(pw))))
+		return obj(t, fmt.Sprintf(`{"apiVersion":"v1","kind":"Secret","metadata":{"name":"db","namespace":"jk-p1","uid":"sec-1","resourceVersion":"rv-%d"},"data":{"password":%q}}`,
+			len(pw)*1000+int(pw[0]), base64.StdEncoding.EncodeToString([]byte(pw))))
 	}
 	leaks := func(m map[string]string, pw string) bool {
 		plainSum := sha256.Sum256([]byte(pw))
@@ -203,7 +204,10 @@ func TestInputsKeepSecretsOut(t *testing.T) {
 	}
 	x, y := noKey(pwA), noKey(pwB)
 	testutil.Equal(t, leaks(x, pwA), false)
-	testutil.Equal(t, reflect.DeepEqual(x, y), true) // the value is omitted, identity (uid) is kept
+	// Controller ruling R22: no key never means "ignore the Secret". The value
+	// is not hashed, but uid + resourceVersion still signal a change.
+	testutil.Equal(t, reflect.DeepEqual(x, y), false)
+	testutil.Equal(t, reflect.DeepEqual(x, noKey(pwA)), true)
 	if !strings.Contains(x["object:v1/Secret/jk-p1/db"], "uid=sec-1") {
 		t.Errorf("secret identity missing: %v", x)
 	}
@@ -283,4 +287,139 @@ func TestInputsOfHelmKustomizeAndRBAC(t *testing.T) {
 			}
 		}
 	})
+}
+
+func metaOf2(o map[string]any) map[string]any { return o["metadata"].(map[string]any) }
+
+// Labels and annotations the learner sets are part of the answer; the ones
+// controllers and kubectl write are not.
+func TestInputChangeSeesMetadataButNotControllerNoise(t *testing.T) {
+	c := model.Criterion{ID: "r", Kind: model.CriterionResource, Points: 1, Target: deployRef}
+	fp := func(mut func(meta map[string]any)) map[string]string {
+		d := deployInput(t, 2, "nginx:1.27.0")
+		mut(metaOf2(d))
+		return capture(t, grader.ArtifactConfig{Reader: newReader().put(deployRef, d), InputKey: inputKey}, "", c)
+	}
+	base := fp(func(map[string]any) {})
+	labeled := fp(func(m map[string]any) { m["labels"] = map[string]any{"tier": "frontend"} })
+	relabeled := fp(func(m map[string]any) { m["labels"] = map[string]any{"tier": "backend"} })
+	annotated := fp(func(m map[string]any) { m["annotations"] = map[string]any{"example.com/owner": "me"} })
+	testutil.Equal(t, reflect.DeepEqual(base, labeled), false)
+	testutil.Equal(t, reflect.DeepEqual(labeled, relabeled), false)
+	testutil.Equal(t, reflect.DeepEqual(base, annotated), false)
+	noise := fp(func(m map[string]any) {
+		m["annotations"] = map[string]any{
+			"deployment.kubernetes.io/revision":                "9",
+			"kubectl.kubernetes.io/last-applied-configuration": "{...}",
+			"autoscaling.alpha.kubernetes.io/conditions":       "[]",
+			"endpoints.kubernetes.io/last-change-trigger-time": "2026-10-15T00:00:00Z",
+			"pv.kubernetes.io/bind-completed":                  "yes",
+		}
+		m["labels"] = map[string]any{"pod-template-hash": "abc", "controller-uid": "u", "batch.kubernetes.io/job-name": "j", "kubernetes.io/metadata.name": "jk-p1"}
+		m["resourceVersion"] = "424242"
+		m["managedFields"] = []any{map[string]any{"manager": "x"}}
+	})
+	testutil.Equal(t, reflect.DeepEqual(base, noise), true)
+}
+
+func serviceFor(t testing.TB, selector string) map[string]any {
+	return obj(t, fmt.Sprintf(`{"apiVersion":"v1","kind":"Service","metadata":{"name":"web","namespace":"jk-p1","uid":"svc-1"},"spec":{"selector":%s,"ports":[{"port":80}],"clusterIP":"10.0.0.1"}}`, selector))
+}
+
+func workload(t testing.TB, kind, name, image string, labels string, podExtra string) map[string]any {
+	api := "apps/v1"
+	return obj(t, fmt.Sprintf(`{"apiVersion":%q,"kind":%q,"metadata":{"name":%q,"namespace":"jk-p1","uid":"uid-%s","generation":1},
+	 "spec":{"replicas":0,"selector":{"matchLabels":%s},"template":{"metadata":{"labels":%s},"spec":{"containers":[{"name":"c","image":%q}]%s}}},"status":{"readyReplicas":0}}`, api, kind, name, name, labels, labels, image, podExtra))
+}
+
+// TestInputChangeSeesTheBackingWorkloads: an http, tcp or network-policy
+// criterion names a Service, but the learner's answer is the Deployment
+// behind it (spec 9.1: a changed answer must not pass as a retry).
+func TestInputChangeSeesTheBackingWorkloads(t *testing.T) {
+	svcRef := refOf("v1", "Service", "jk-p1", "web")
+	tcp := model.Criterion{ID: "t", Kind: model.CriterionTCP, Points: 1, Target: svcRef, Args: map[string]any{"port": 80,
+		"source": map[string]any{"labels": map[string]any{"role": "x"}}}}
+	mk := func(image string, pods ...map[string]any) map[string]string {
+		r := newReader().put(svcRef, serviceFor(t, `{"app":"web"}`)).
+			putList("Deployment", "jk-p1", workload(t, "Deployment", "web", image, `{"app":"web"}`, ""),
+				workload(t, "Deployment", "other", "other:1", `{"app":"other"}`, "")).
+			putList("StatefulSet", "jk-p1").putList("DaemonSet", "jk-p1").putList("ReplicaSet", "jk-p1").putList("Job", "jk-p1").putList("Pod", "jk-p1", pods...).
+			putList("NetworkPolicy", "jk-p1")
+		return capture(t, grader.ArtifactConfig{Reader: r, InputKey: inputKey}, "", tcp)
+	}
+	a := mk("nginx:1.27.0")
+	testutil.Equal(t, reflect.DeepEqual(a, mk("nginx:1.27.0")), true)
+	testutil.Equal(t, reflect.DeepEqual(a, mk("nginx:1.28.0")), false)
+	if _, ok := a["object:apps/v1/Deployment/jk-p1/web"]; !ok {
+		t.Fatalf("the Deployment behind the Service is not fingerprinted: %v", a)
+	}
+	if _, ok := a["object:apps/v1/Deployment/jk-p1/other"]; ok {
+		t.Fatalf("a Deployment the Service does not select was fingerprinted: %v", a)
+	}
+	// Scaled to zero replicas it is still found (no pods needed).
+	for k, v := range a {
+		if strings.HasPrefix(k, "object:apps/v1/Deployment/jk-p1/web") && v == "absent" {
+			t.Fatalf("%s absent", k)
+		}
+	}
+	// A bare pod behind the service counts too, but its controller-written labels do not.
+	pod := func(hash string) map[string]any {
+		return obj(t, fmt.Sprintf(`{"apiVersion":"v1","kind":"Pod","metadata":{"name":"solo","namespace":"jk-p1","uid":"p","labels":{"app":"web","pod-template-hash":%q}},"spec":{"containers":[{"name":"c","image":"i"}]}}`, hash))
+	}
+	b1, b2 := mk("nginx:1.27.0", pod("h1")), mk("nginx:1.27.0", pod("h2"))
+	testutil.Equal(t, reflect.DeepEqual(b1, b2), true)
+	if _, ok := b1["object:v1/Pod/jk-p1/solo"]; !ok {
+		t.Fatalf("the bare pod behind the Service is not fingerprinted: %v", b1)
+	}
+	testutil.Equal(t, reflect.DeepEqual(a, b1), false)
+}
+
+func TestInputChangeFollowsIngressAndReferencedConfig(t *testing.T) {
+	ingRef := refOf("networking.k8s.io/v1", "Ingress", "jk-p1", "site")
+	ing := obj(t, `{"apiVersion":"networking.k8s.io/v1","kind":"Ingress","metadata":{"name":"site","namespace":"jk-p1","uid":"ing-1"},
+	 "spec":{"rules":[{"host":"a.example","http":{"paths":[{"path":"/","pathType":"Prefix","backend":{"service":{"name":"web","port":{"number":80}}}}]}}]}}`)
+	crit := model.Criterion{ID: "h", Kind: model.CriterionHTTP, Points: 1, Target: ingRef, Args: map[string]any{"body_marker": "x", "source": map[string]any{}}}
+	cmRef := refOf("v1", "ConfigMap", "jk-p1", "app-config")
+	mk := func(image, cmValue string) map[string]string {
+		dep := workload(t, "Deployment", "web", image, `{"app":"web"}`,
+			`,"volumes":[{"name":"v","configMap":{"name":"app-config"}}]`)
+		dep["spec"].(map[string]any)["template"].(map[string]any)["spec"].(map[string]any)["containers"].([]any)[0].(map[string]any)["envFrom"] =
+			[]any{map[string]any{"secretRef": map[string]any{"name": "db"}}}
+		r := newReader().put(ingRef, ing).put(refOf("v1", "Service", "jk-p1", "web"), serviceFor(t, `{"app":"web"}`)).
+			put(cmRef, obj(t, fmt.Sprintf(`{"apiVersion":"v1","kind":"ConfigMap","metadata":{"name":"app-config","namespace":"jk-p1","uid":"cm-1"},"data":{"k":%q}}`, cmValue))).
+			put(refOf("v1", "Secret", "jk-p1", "db"), obj(t, `{"apiVersion":"v1","kind":"Secret","metadata":{"name":"db","namespace":"jk-p1","uid":"s","resourceVersion":"1"},"data":{"p":"cA=="}}`)).
+			putList("Deployment", "jk-p1", dep).
+			putList("StatefulSet", "jk-p1").putList("DaemonSet", "jk-p1").putList("ReplicaSet", "jk-p1").putList("Job", "jk-p1").putList("Pod", "jk-p1").putList("NetworkPolicy", "jk-p1")
+		return capture(t, grader.ArtifactConfig{Reader: r, InputKey: inputKey}, "", crit)
+	}
+	a := mk("nginx:1", "one")
+	for _, want := range []string{"object:networking.k8s.io/v1/Ingress/jk-p1/site", "object:v1/Service/jk-p1/web", "object:apps/v1/Deployment/jk-p1/web",
+		"object:v1/ConfigMap/jk-p1/app-config", "object:v1/Secret/jk-p1/db"} {
+		if _, ok := a[want]; !ok {
+			t.Errorf("%s is not fingerprinted: %v", want, a)
+		}
+	}
+	testutil.Equal(t, reflect.DeepEqual(a, mk("nginx:1", "one")), true)
+	testutil.Equal(t, reflect.DeepEqual(a, mk("nginx:2", "one")), false) // the backing Deployment
+	testutil.Equal(t, reflect.DeepEqual(a, mk("nginx:1", "two")), false) // the ConfigMap it mounts
+}
+
+func TestInputChangeSeesNetworkPoliciesOfTheInvolvedNamespaces(t *testing.T) {
+	svcRef := refOf("v1", "Service", "jk-p1", "web")
+	crit := model.Criterion{ID: "n", Kind: model.CriterionNetworkPolicy, Points: 1, Target: svcRef, Args: map[string]any{"expectations": []any{
+		map[string]any{"expect": "allow", "port": 80, "source": map[string]any{"namespace": "jk-other"}},
+		map[string]any{"expect": "deny", "port": 80, "source": map[string]any{"namespace": "jk-third"}}}}}
+	policy := func(ns, name, from string) map[string]any {
+		return obj(t, fmt.Sprintf(`{"apiVersion":"networking.k8s.io/v1","kind":"NetworkPolicy","metadata":{"name":%q,"namespace":%q,"uid":"np-%s"},"spec":{"podSelector":{},"ingress":[{"from":[{"podSelector":{"matchLabels":{"role":%q}}}]}]}}`, name, ns, name, from))
+	}
+	mk := func(p1, p2 map[string]any) map[string]string {
+		r := newReader().put(svcRef, serviceFor(t, `{"app":"web"}`)).
+			putList("Deployment", "jk-p1").putList("StatefulSet", "jk-p1").putList("DaemonSet", "jk-p1").putList("ReplicaSet", "jk-p1").putList("Job", "jk-p1").putList("Pod", "jk-p1").
+			putList("NetworkPolicy", "jk-p1", p1).putList("NetworkPolicy", "jk-other", p2).putList("NetworkPolicy", "jk-third")
+		return capture(t, grader.ArtifactConfig{Reader: r, InputKey: inputKey}, "", crit)
+	}
+	a := mk(policy("jk-p1", "web-in", "frontend"), policy("jk-other", "egress", "x"))
+	testutil.Equal(t, reflect.DeepEqual(a, mk(policy("jk-p1", "web-in", "frontend"), policy("jk-other", "egress", "x"))), true)
+	testutil.Equal(t, reflect.DeepEqual(a, mk(policy("jk-p1", "web-in", "intruder"), policy("jk-other", "egress", "x"))), false)
+	testutil.Equal(t, reflect.DeepEqual(a, mk(policy("jk-p1", "web-in", "frontend"), policy("jk-other", "egress", "y"))), false)
 }

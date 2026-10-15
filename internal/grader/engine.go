@@ -143,6 +143,7 @@ type settings struct {
 	probeImage       string
 	controlNamespace string
 	inputKey         []byte
+	tools            ToolRunner
 }
 
 // WithClock injects the clock (default SystemClock).
@@ -200,6 +201,10 @@ func WithPreloadedImages(images ...string) Option {
 func WithInputKey(key []byte) Option {
 	return func(s *settings) { s.inputKey = append([]byte(nil), key...) }
 }
+
+// WithToolRunner replaces the ToolRunner NewClusterArtifactChecker builds
+// (NewToolRunner), for example to observe every external invocation in a test.
+func WithToolRunner(r ToolRunner) Option { return func(s *settings) { s.tools = r } }
 
 type redactorKey struct{}
 
