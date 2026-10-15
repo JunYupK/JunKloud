@@ -148,33 +148,41 @@ func compileFields(args map[string]any) (fieldArgs, []requirement, error) {
 	if len(a.Fields) == 0 {
 		return a, nil, fmt.Errorf("%w: args.fields needs at least one requirement", ErrInvalidCriterion)
 	}
-	reqs := make([]requirement, 0, len(a.Fields))
-	for i, f := range a.Fields {
+	reqs, err := compileRequirements("args.fields", a.Fields)
+	return a, reqs, err
+}
+
+// compileRequirements compiles field requirements (the shape of args.fields)
+// for any checker that compares declared fields with an object. what names
+// the argument in error messages.
+func compileRequirements(what string, fields []fieldInput) ([]requirement, error) {
+	reqs := make([]requirement, 0, len(fields))
+	for i, f := range fields {
 		bad := func(format string, v ...any) error {
-			return fmt.Errorf("%w: args.fields[%d]: %s", ErrInvalidCriterion, i, fmt.Sprintf(format, v...))
+			return fmt.Errorf("%w: %s[%d]: %s", ErrInvalidCriterion, what, i, fmt.Sprintf(format, v...))
 		}
 		segs, err := parsePath(f.Path)
 		if err != nil {
-			return a, nil, bad("%v", err)
+			return nil, bad("%v", err)
 		}
 		r := requirement{path: f.Path, segs: segs}
 		switch {
 		case len(f.Equals) > 0 && f.Exists != nil:
-			return a, nil, bad("%q: give equals or exists, not both", f.Path)
+			return nil, bad("%q: give equals or exists, not both", f.Path)
 		case len(f.Equals) > 0:
 			dec := json.NewDecoder(bytes.NewReader(f.Equals))
 			dec.UseNumber()
 			if err := dec.Decode(&r.equals); err != nil {
-				return a, nil, bad("%q: equals: %v", f.Path, err)
+				return nil, bad("%q: equals: %v", f.Path, err)
 			}
 			if r.equals == nil {
-				return a, nil, bad("%q: equals cannot be null; use exists: false", f.Path)
+				return nil, bad("%q: equals cannot be null; use exists: false", f.Path)
 			}
 			r.hasEquals = true
 		case f.Exists != nil:
 			r.exists = *f.Exists
 		default:
-			return a, nil, bad("%q: needs equals or exists", f.Path)
+			return nil, bad("%q: needs equals or exists", f.Path)
 		}
 		switch f.Match {
 		case "", matchEqual:
@@ -182,7 +190,7 @@ func compileFields(args map[string]any) (fieldArgs, []requirement, error) {
 		case matchSubset, matchUnordered:
 			r.cmp.match = f.Match
 		default:
-			return a, nil, bad("%q: match %q is not equal, subset or unordered", f.Path, f.Match)
+			return nil, bad("%q: match %q is not equal, subset or unordered", f.Path, f.Match)
 		}
 		switch f.Compare {
 		case "", compareAuto:
@@ -195,11 +203,11 @@ func compileFields(args map[string]any) (fieldArgs, []requirement, error) {
 		case compareImage:
 			r.cmp.image = true
 		default:
-			return a, nil, bad("%q: compare %q is not auto, exact, quantity or image", f.Path, f.Compare)
+			return nil, bad("%q: compare %q is not auto, exact, quantity or image", f.Path, f.Compare)
 		}
 		reqs = append(reqs, r)
 	}
-	return a, reqs, nil
+	return reqs, nil
 }
 
 // ValidateCriterion implements ArgsValidator.
