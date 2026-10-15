@@ -165,15 +165,26 @@ type ProbeRunner interface {
 // A network-policy criterion holds only if EVERY expectation holds together.
 // It needs at least one allow and one deny, and every deny port needs an
 // allow on the same port: that allowed request is the control that the
-// destination is healthy. A deny expectation passes only when
+// destination is healthy. kube-proxy picks a backend per connection, so a
+// deny expectation is never judged through the Service name: it is checked
+// against EVERY ready pod (EndpointSlice address and target port, which is
+// where NetworkPolicy applies). It passes only when, for every pod,
 //
-//  1. the destination has ready endpoints and an allowed source reached the
-//     same port in this run (a dead or hung server blocks everybody),
+//  1. an allowed source connected to that same pod and port in this run (the
+//     pod is alive and listening; a hung or dead pod blocks everybody),
 //  2. the denied source resolved the destination name (a DNS failure is never
 //     a deny), and
-//  3. the denied path timed out or was refused while the allow connected.
+//  3. the denied source's connection TIMED OUT (a drop). A refusal is no
+//     proof: a pod where nothing listens refuses by itself.
 //
-// A deny expectation is checked at connection level (TCP).
+// An allow expectation is probed through the Service name (routing and DNS).
+// Failures that are neither refusal nor timeout (network-error) prove nothing
+// about whose fault they are and are ERROR on both paths.
+//
+// Time: every probe must end before the criterion's timeout
+// (ProbeRequest.Deadline); ValidateCriterion rejects timeouts below
+// MinNetworkTimeout (45 s, 60 s for an Ingress), so network criteria always
+// declare one. The checker and the engine must share the default timeout.
 //
 // Probes may not run in parallel with any other criterion (Mutates): they
 // create pods in the problem's namespaces.

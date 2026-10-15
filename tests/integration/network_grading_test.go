@@ -27,6 +27,8 @@ const (
 	netOtherNamespace = "jk-net-other"
 	netWebMarker      = "JK-NET-WEB"
 	netOtherMarker    = "JK-NET-OTHER"
+	// network criteria declare a timeout of at least grader.MinNetworkTimeout.
+	netTimeout = 60 * time.Second
 )
 
 // netFixture loads the objects of tests/fixtures/network/<name>.
@@ -60,15 +62,15 @@ func netSource(role string) map[string]any {
 func netCriteria() (policy, httpC, tcpC model.Criterion) {
 	svc := netRef("Service", "web")
 	intruder := map[string]any{"namespace": netOtherNamespace, "labels": map[string]any{"role": "intruder"}}
-	policy = model.Criterion{ID: "policy", Kind: model.CriterionNetworkPolicy, Target: svc, Points: 5, Timeout: 40 * time.Second,
+	policy = model.Criterion{ID: "policy", Kind: model.CriterionNetworkPolicy, Target: svc, Points: 5, Timeout: netTimeout,
 		Args: map[string]any{"expectations": []any{
 			map[string]any{"name": "frontend-allowed", "expect": "allow", "port": 80, "source": netSource("frontend"),
 				"http": map[string]any{"body_marker": netWebMarker}},
 			map[string]any{"name": "intruder-denied", "expect": "deny", "port": 80, "source": intruder},
 		}}}
-	httpC = model.Criterion{ID: "http", Kind: model.CriterionHTTP, Target: svc, Points: 3, Timeout: 40 * time.Second,
+	httpC = model.Criterion{ID: "http", Kind: model.CriterionHTTP, Target: svc, Points: 3, Timeout: netTimeout,
 		Args: map[string]any{"source": netSource("frontend"), "port": 80, "body_marker": netWebMarker}}
-	tcpC = model.Criterion{ID: "tcp", Kind: model.CriterionTCP, Target: svc, Points: 2, Timeout: 40 * time.Second,
+	tcpC = model.Criterion{ID: "tcp", Kind: model.CriterionTCP, Target: svc, Points: 2, Timeout: netTimeout,
 		Args: map[string]any{"source": netSource("frontend"), "port": 80}}
 	return
 }
@@ -241,6 +243,23 @@ func TestNetworkGrading(t *testing.T) {
 		waitWebReady(t)
 		res = grade(t, engine, httpC)
 		testutil.Equal(t, res["http"].Status, "PASS")
+	})
+
+	t.Run("EveryEndpointIsProbed", func(t *testing.T) {
+		// kube-proxy picks a backend per connection, so the deny check must
+		// not go through the Service name: with two ready pods and no policy
+		// the intruder is reported connected on EACH pod address.
+		two := netFixture(t, "web.yaml")[0]
+		two["spec"].(map[string]any)["replicas"] = 2
+		apply(t, two)
+		waitUntil(t, "two ready endpoints", 90*time.Second, func() bool { return readyEndpoints(t, cs, netNamespace, "web") == 2 })
+		res := grade(t, engine, policy)
+		testutil.Equal(t, res["policy"].Status, "FAIL")
+		if n := strings.Count(res["policy"].Reason, "connected although this source must be denied"); n != 2 {
+			t.Fatalf("want the intruder reported on both pods, got %d in %q", n, res["policy"].Reason)
+		}
+		apply(t, netFixture(t, "web.yaml")[0])
+		waitWebReady(t)
 	})
 
 	t.Run("CorrectPolicy", func(t *testing.T) {
