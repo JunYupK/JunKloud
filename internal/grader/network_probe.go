@@ -37,9 +37,12 @@ const (
 const (
 	// podWait bounds how long the grader waits for one probe pod; the pod's
 	// own activeDeadlineSeconds is the same bound on the cluster side.
-	podWait         = 40 * time.Second
-	podDeadlineSecs = 40
-	probePoll       = 300 * time.Millisecond
+	podWait         = 30 * time.Second
+	podDeadlineSecs = 30
+	// probeFloor is the least time budget in which a probe is started at
+	// all: pod start plus one attempt.
+	probeFloor = 8 * time.Second
+	probePoll  = 300 * time.Millisecond
 	// unschedulableGrace is how long a pod may stay unschedulable before it
 	// is called an environment fault (the scheduler retries on its own).
 	unschedulableGrace = 15 * time.Second
@@ -121,6 +124,9 @@ func validateProbe(req ProbeRequest) error {
 	if req.Namespace == "" {
 		return errors.New("probe has no namespace")
 	}
+	if strings.ContainsAny(req.ResolveName, " \t\r\n") {
+		return fmt.Errorf("bad name to resolve %q", req.ResolveName)
+	}
 	if req.Host == "" || strings.ContainsAny(req.Host, " \t\r\n") {
 		return fmt.Errorf("bad probe host %q", req.Host)
 	}
@@ -158,7 +164,15 @@ func (r *podProbeRunner) Probe(ctx context.Context, req ProbeRequest) (res Probe
 	if err != nil {
 		return ProbeResult{}, probeFailed("random id: %v", err)
 	}
-	pod := r.buildPod("jk-probe-"+id, id, req)
+	limit := podWait
+	if !req.Deadline.IsZero() {
+		remaining := req.Deadline.Sub(r.set.clock.Now())
+		if remaining < probeFloor {
+			return ProbeResult{}, probeFailed("not enough of the criterion's time budget is left to run a probe (%s)", remaining.Round(time.Second))
+		}
+		limit = min(limit, remaining)
+	}
+	pod := r.buildPod("jk-probe-"+id, id, req, limit)
 	defer func() {
 		// The pod may exist even if Create failed or was cancelled in
 		// flight, so removal is always attempted, and with a context that
@@ -179,11 +193,11 @@ func (r *podProbeRunner) Probe(ctx context.Context, req ProbeRequest) (res Probe
 			return ProbeResult{}, probeFailed("create probe pod in %s: %v", req.Namespace, err)
 		}
 	}
-	return r.await(ctx, req, pod.Name)
+	return r.await(ctx, req, pod.Name, limit)
 }
 
 // await polls the pod until it reports or an environment fault is clear.
-func (r *podProbeRunner) await(ctx context.Context, req ProbeRequest, name string) (ProbeResult, error) {
+func (r *podProbeRunner) await(ctx context.Context, req ProbeRequest, name string, limit time.Duration) (ProbeResult, error) {
 	clock := r.set.clock
 	start := clock.Now()
 	apiErrors := 0
@@ -211,7 +225,10 @@ func (r *podProbeRunner) await(ctx context.Context, req ProbeRequest, name strin
 				return ProbeResult{}, probeFailed("cannot read probe pod %s/%s: %v", req.Namespace, name, err)
 			}
 		}
-		if clock.Now().Sub(start) >= podWait {
+		if clock.Now().Sub(start) >= limit {
+			if limit < podWait {
+				return ProbeResult{}, probeFailed("probe pod %s/%s did not finish within the criterion's time budget", req.Namespace, name)
+			}
 			return ProbeResult{}, probeFailed("probe pod %s/%s did not finish within %s", req.Namespace, name, podWait)
 		}
 		if err := clock.Sleep(ctx, probePoll); err != nil {
@@ -296,7 +313,7 @@ func randomID() (string, error) {
 	return hex.EncodeToString(b), nil
 }
 
-func (r *podProbeRunner) buildPod(name, run string, req ProbeRequest) *corev1.Pod {
+func (r *podProbeRunner) buildPod(name, run string, req ProbeRequest, limit time.Duration) *corev1.Pod {
 	labels := map[string]string{}
 	for k, v := range req.Labels {
 		labels[k] = v
@@ -319,6 +336,9 @@ func (r *podProbeRunner) buildPod(name, run string, req ProbeRequest) *corev1.Po
 		{Name: "JK_ATTEMPTS", Value: strconv.Itoa(req.Attempts)},
 		{Name: "JK_TIMEOUT", Value: strconv.Itoa(int(req.Timeout / time.Second))},
 	}
+	if req.ResolveName != "" {
+		env = append(env, corev1.EnvVar{Name: "JK_RESOLVE", Value: req.ResolveName})
+	}
 	if req.Protocol != ProbeDNS {
 		env = append(env, corev1.EnvVar{Name: "JK_PORT", Value: strconv.Itoa(req.Port)})
 	}
@@ -333,7 +353,8 @@ func (r *podProbeRunner) buildPod(name, run string, req ProbeRequest) *corev1.Po
 	no, yes := false, true
 	user := int64(65534)
 	grace := int64(1)
-	deadline := int64(podDeadlineSecs)
+	// The pod never outlives the grader's patience by much.
+	deadline := min(int64(podDeadlineSecs), max(int64(10), int64(limit/time.Second)+2))
 	return &corev1.Pod{
 		ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: req.Namespace, Labels: labels},
 		Spec: corev1.PodSpec{

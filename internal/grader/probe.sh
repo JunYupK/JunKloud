@@ -5,6 +5,7 @@
 #
 #   JK_PROTO     http | tcp | dns
 #   JK_HOST      name or IP to dial
+#   JK_RESOLVE   a name to resolve first (when JK_HOST is an IP); default JK_HOST
 #   JK_PORT      destination port (not used by dns)
 #   JK_HTTP_HOST Host header (http)
 #   JK_PATH      request path (http)
@@ -42,14 +43,15 @@ finish() {
 clean() { tr -cd 'a-zA-Z0-9 .:()_/,-' | head -c 160; }
 
 # 1. Name resolution from this very pod (it carries the source identity).
-case "$JK_HOST" in
+RES=${JK_RESOLVE:-$JK_HOST}
+case "$RES" in
   *:*) ;;                  # IPv6 literal
   *[!0-9.]*)
     dns=fail
     i=0
     while [ "$i" -lt "$N" ]; do
       i=$((i + 1))
-      if timeout -s KILL $((T + 1)) nslookup "$JK_HOST" >"$dir/dns" 2>&1; then
+      if timeout -s KILL $((T + 1)) nslookup "$RES" >"$dir/dns" 2>&1; then
         dns=ok
         break
       fi

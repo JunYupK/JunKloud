@@ -5,7 +5,6 @@ import (
 	"errors"
 	"fmt"
 	"strings"
-	"sync"
 	"time"
 
 	"k8s.io/apimachinery/pkg/util/validation"
@@ -53,14 +52,13 @@ const (
 )
 
 const (
-	clusterDomain       = "svc.cluster.local"
-	maxExpectations     = 8
-	maxMarkerLen        = 256
-	maxConcurrentProbes = 4
-	reservedLabelNS     = "junkloud.io/"
-	ingressClassOwn     = "cloud-provider-kind"
-	endpointSliceAPI    = "discovery.k8s.io/v1"
-	serviceNameLabel    = "kubernetes.io/service-name"
+	clusterDomain    = "svc.cluster.local"
+	maxExpectations  = 8
+	maxMarkerLen     = 256
+	reservedLabelNS  = "junkloud.io/"
+	ingressClassOwn  = "cloud-provider-kind"
+	endpointSliceAPI = "discovery.k8s.io/v1"
+	serviceNameLabel = "kubernetes.io/service-name"
 )
 
 // ErrProbeFailed marks a probe that could not run or report (the probe pod
@@ -85,9 +83,41 @@ type ProbeRequest struct {
 	// Bounds. Attempts <= ProbeAttempts, Timeout <= ProbeAttemptTimeout.
 	Attempts int
 	Timeout  time.Duration
+	// ResolveName, when set, is a name the probe must also resolve from its
+	// pod before dialing Host (an IP): the DNS evidence for probes that dial a
+	// pod address directly. A failure is reported as FailureDNS.
+	ResolveName string
+	// Deadline (checker clock) is the end of the criterion's time budget; the
+	// runner never waits for the pod beyond it. Zero means only the runner's
+	// own bound.
+	Deadline time.Time
 	// Ownership labels of the probe pod.
 	EnvironmentID string
 	ProblemID     string
+}
+
+// Time budget of a network criterion. Every probe of a criterion must end
+// before start+timeout (ProbeRequest.Deadline), so the criterion's declared
+// timeout has to cover the work: probeWave is the planning figure for one
+// wave of concurrent probe pods (pod start plus three 3 s attempts with their
+// pauses), the neutral DNS control may need a second wave, and an Ingress
+// address is awaited up to ingressWait first.
+const (
+	probeWave    = 20 * time.Second
+	networkSlack = 5 * time.Second
+	ingressWait  = 15 * time.Second
+)
+
+// MinNetworkTimeout is the smallest criterion timeout a network criterion
+// may declare: a probe wave, a neutral DNS control wave and slack (45 s),
+// plus the wait for an Ingress address (60 s). Network criteria therefore
+// always declare an explicit timeout; ValidateCriterion rejects less.
+func MinNetworkTimeout(ingress bool) time.Duration {
+	d := 2*probeWave + networkSlack
+	if ingress {
+		d += ingressWait
+	}
+	return d
 }
 
 // ProbeResult is what one probe observed. Connected means a connection (and
@@ -371,6 +401,13 @@ func (c *NetworkChecker) plan(crit model.Criterion) (netPlan, error) {
 			return p, err
 		}
 	}
+	eff := crit.Timeout
+	if eff <= 0 {
+		eff = c.set.defaultTimeout
+	}
+	if min := MinNetworkTimeout(p.ingress); eff < min {
+		return p, invalid("timeout %s is below the %s minimum of a %s criterion (set the criterion's timeout; probes must finish within it)", eff, min, crit.Kind)
+	}
 	return p, nil
 }
 
@@ -433,443 +470,6 @@ func (c *NetworkChecker) ValidateCriterion(crit model.Criterion) error {
 }
 
 // ------------------------------------------------------------------- checking
-
-type outcomeState int
-
-const (
-	stateHolds outcomeState = iota
-	stateFails
-	stateUnknown
-)
-
-// netOutcome is the judgement of one expectation.
-type netOutcome struct {
-	exp    netExpect
-	state  outcomeState
-	text   string
-	result ProbeResult
-	ran    bool
-	err    error
-}
-
-func (o netOutcome) evidence() map[string]any {
-	m := map[string]any{"expectation": o.exp.name, "expect": map[bool]string{true: "allow", false: "deny"}[o.exp.allow],
-		"port": o.exp.port, "state": [...]string{"holds", "fails", "unknown"}[o.state]}
-	if o.ran {
-		m["connected"] = o.result.Connected
-		if o.result.HTTPStatus != 0 {
-			m["http_status"] = o.result.HTTPStatus
-		}
-		if o.result.FailureClass != "" {
-			m["failure_class"] = o.result.FailureClass
-		}
-	}
-	if o.text != "" {
-		m["note"] = o.text
-	}
-	return m
-}
-
-// Check implements Checker.
-func (c *NetworkChecker) Check(ctx context.Context, t Target, crit model.Criterion) (model.CheckResult, error) {
-	plan, err := c.plan(crit)
-	if err != nil {
-		return model.CheckResult{}, err
-	}
-	ref, err := resolveTarget(t, crit)
-	if err != nil {
-		return model.CheckResult{}, err
-	}
-	start := c.set.clock.Now()
-	dst, obj, fail, err := c.destination(ctx, t, crit, ref, plan)
-	if err != nil {
-		return model.CheckResult{}, err
-	}
-	if fail != "" {
-		res := model.CheckResult{Status: model.StatusFail, Reason: fail, Evidence: baseEvidence(c.set.clock.Now(), start, obj)}
-		res.Evidence.Expected = describePlan(plan, ref)
-		return res, nil
-	}
-
-	outcomes := c.probeAll(ctx, t, plan, dst)
-	if err := ctx.Err(); err != nil {
-		return model.CheckResult{}, err
-	}
-	c.judge(ctx, t, plan, dst, outcomes)
-	if err := ctx.Err(); err != nil {
-		return model.CheckResult{}, err
-	}
-
-	// The destination must still be the object we probed (spec 8.3).
-	if again, err := c.get(ctx, ref); err != nil {
-		if errors.Is(err, ErrNotFound) {
-			return model.CheckResult{}, fmt.Errorf("%w: %s %s no longer exists", ErrTargetChanged, ref.Kind, ref.Name)
-		}
-		return model.CheckResult{}, err
-	} else if keyOf(again) != keyOf(obj) {
-		return model.CheckResult{}, fmt.Errorf("%w: %s %s was replaced during the probes", ErrTargetChanged, ref.Kind, ref.Name)
-	}
-
-	res := model.CheckResult{Evidence: baseEvidence(c.set.clock.Now(), start, obj)}
-	res.Evidence.Expected = describePlan(plan, ref)
-	probes := make([]any, 0, len(outcomes))
-	var fails, unknowns []string
-	for _, o := range outcomes {
-		probes = append(probes, o.evidence())
-		switch o.state {
-		case stateFails:
-			fails = append(fails, fmt.Sprintf("%s: %s", o.exp.name, o.text))
-		case stateUnknown:
-			unknowns = append(unknowns, fmt.Sprintf("%s: %s", o.exp.name, o.text))
-		}
-	}
-	res.Evidence.Actual = map[string]any{"destination": dst.dial, "ready_endpoints": dst.ready, "probes": probes}
-	switch {
-	case len(fails) > 0:
-		res.Status = model.StatusFail
-		res.Reason = fmt.Sprintf("%d of %d expectations not met: %s", len(fails), len(outcomes), strings.Join(fails, "; "))
-		if len(unknowns) > 0 {
-			res.Reason += "; undecided: " + strings.Join(unknowns, "; ")
-		}
-	case len(unknowns) > 0:
-		cause := ErrInsufficientEvidence
-		for _, o := range outcomes {
-			if o.state == stateUnknown && o.err != nil && errors.Is(o.err, ErrProbeFailed) {
-				cause = ErrProbeFailed
-			}
-		}
-		return model.CheckResult{}, fmt.Errorf("%w: %s", cause, strings.Join(unknowns, "; "))
-	default:
-		res.Status = model.StatusPass
-	}
-	return res, nil
-}
-
-func describePlan(p netPlan, ref model.ObjectRef) map[string]any {
-	exps := make([]any, 0, len(p.expects))
-	for _, e := range p.expects {
-		exps = append(exps, map[string]any{"name": e.name, "allow": e.allow, "port": e.port})
-	}
-	return map[string]any{"destination": describeRef(ref), "expectations": exps}
-}
-
-// destination is what the probes dial.
-type destination struct {
-	dial     string // name or IP
-	httpHost string // default Host header
-	ready    int    // ready endpoints (Service)
-}
-
-// destination reads the target. fail is a learner-visible reason for a FAIL
-// that needs no probe.
-func (c *NetworkChecker) destination(ctx context.Context, t Target, crit model.Criterion, ref model.ObjectRef, p netPlan) (destination, object, string, error) {
-	if p.ingress {
-		return c.ingressDestination(ctx, crit, ref)
-	}
-	obj, err := c.get(ctx, ref)
-	if errors.Is(err, ErrNotFound) {
-		return destination{}, nil, fmt.Sprintf("%s: Service %s/%s not found", ReasonPrerequisite, ref.Namespace, ref.Name), nil
-	}
-	if err != nil {
-		return destination{}, nil, "", err
-	}
-	d := destination{dial: fmt.Sprintf("%s.%s.%s", ref.Name, ref.Namespace, clusterDomain)}
-	d.httpHost = d.dial
-	have := map[int]bool{}
-	for _, raw := range listAt(obj, "spec", "ports") {
-		pm, _ := raw.(map[string]any)
-		if n, ok := ratOf(pm["port"]); ok && n.IsInt() {
-			have[int(n.Num().Int64())] = true
-		}
-	}
-	for _, e := range p.expects {
-		if !have[e.port] {
-			return d, obj, fmt.Sprintf("Service %s/%s does not expose port %d", ref.Namespace, ref.Name, e.port), nil
-		}
-	}
-	slices, err := c.listSlices(ctx, ref)
-	if err != nil {
-		return d, obj, "", err
-	}
-	for _, s := range slices {
-		if stringAt(s, "metadata", "labels", serviceNameLabel) != ref.Name {
-			continue
-		}
-		for _, raw := range listAt(s, "endpoints") {
-			ep, _ := raw.(map[string]any)
-			if r, set := mapAt(ep, "conditions")["ready"]; !set || r != false {
-				d.ready++
-			}
-		}
-	}
-	if d.ready == 0 {
-		return d, obj, fmt.Sprintf("Service %s/%s has no ready endpoints: its selector matches no ready pod, so nothing can be reached or blocked meaningfully", ref.Namespace, ref.Name), nil
-	}
-	return d, obj, "", nil
-}
-
-func (c *NetworkChecker) listSlices(ctx context.Context, ref model.ObjectRef) ([]map[string]any, error) {
-	var last error
-	for attempt := 0; attempt < apiAttempts; attempt++ {
-		out, err := c.reader.List(ctx, ListQuery{APIVersion: endpointSliceAPI, Kind: "EndpointSlice", Namespace: ref.Namespace,
-			LabelSelector: serviceNameLabel + "=" + ref.Name})
-		if err == nil {
-			return out, nil
-		}
-		if ctx.Err() != nil {
-			return nil, ctx.Err()
-		}
-		last = err
-		if attempt < apiAttempts-1 {
-			if err := c.set.clock.Sleep(ctx, c.set.pollInterval); err != nil {
-				return nil, err
-			}
-		}
-	}
-	return nil, last
-}
-
-func (c *NetworkChecker) ingressDestination(ctx context.Context, crit model.Criterion, ref model.ObjectRef) (destination, object, string, error) {
-	spec := observeSpec{
-		ref: ref, timeout: timeoutFor(crit, c.set) / 2, poll: true, waitForCreate: false,
-		eval: func(o object) verdict {
-			if ingressAddress(o) != "" {
-				return verdict{ok: true}
-			}
-			return verdict{reason: "no load balancer address yet"}
-		},
-	}
-	obs, err := c.observe(ctx, spec)
-	if err != nil {
-		return destination{}, nil, "", err
-	}
-	if !obs.found {
-		return destination{}, nil, fmt.Sprintf("%s: Ingress %s/%s not found", ReasonPrerequisite, ref.Namespace, ref.Name), nil
-	}
-	if obs.v.ok {
-		d := destination{dial: ingressAddress(obs.obj)}
-		if rules := listAt(obs.obj, "spec", "rules"); len(rules) > 0 {
-			if r, ok := rules[0].(map[string]any); ok {
-				d.httpHost, _ = r["host"].(string)
-			}
-		}
-		if d.httpHost == "" {
-			d.httpHost = d.dial
-		}
-		return d, obs.obj, "", nil
-	}
-	if class := stringAt(obs.obj, "spec", "ingressClassName"); class != "" && class != ingressClassOwn {
-		return destination{}, obs.obj, fmt.Sprintf("Ingress %s/%s names ingress class %q, which no controller of this environment serves", ref.Namespace, ref.Name, class), nil
-	}
-	return destination{}, nil, "", fmt.Errorf("%w: Ingress %s/%s has no load balancer address; the environment's ingress controller did not assign one", ErrInsufficientEvidence, ref.Namespace, ref.Name)
-}
-
-func ingressAddress(o object) string {
-	for _, raw := range listAt(o, "status", "loadBalancer", "ingress") {
-		m, _ := raw.(map[string]any)
-		if ip, _ := m["ip"].(string); ip != "" {
-			return ip
-		}
-		if h, _ := m["hostname"].(string); h != "" {
-			return h
-		}
-	}
-	return ""
-}
-
-func (c *NetworkChecker) request(t Target, e netExpect, d destination) ProbeRequest {
-	ns := e.source.Namespace
-	if ns == "" {
-		ns = t.Problem.Namespace
-		if ns == "" {
-			ns = t.Problem.Definition.Namespace
-		}
-	}
-	req := ProbeRequest{
-		Protocol: ProbeTCP, Namespace: ns, Labels: e.source.Labels, Host: d.dial, Port: e.port,
-		Attempts: ProbeAttempts, Timeout: ProbeAttemptTimeout,
-		EnvironmentID: t.Identity.ID, ProblemID: t.Problem.Definition.ID,
-	}
-	if e.http != nil {
-		req.Protocol = ProbeHTTP
-		req.HTTPHost = e.http.host
-		if req.HTTPHost == "" {
-			req.HTTPHost = d.httpHost
-		}
-		req.Path, req.ExpectStatus, req.BodyMarker = e.http.path, e.http.status, e.http.marker
-	}
-	return req
-}
-
-// probeAll runs every expectation's probe, a few at a time.
-func (c *NetworkChecker) probeAll(ctx context.Context, t Target, p netPlan, d destination) []netOutcome {
-	outs := make([]netOutcome, len(p.expects))
-	sem := make(chan struct{}, maxConcurrentProbes)
-	var wg sync.WaitGroup
-	for i, e := range p.expects {
-		outs[i].exp = e
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
-			defer func() {
-				if r := recover(); r != nil {
-					outs[i].err = fmt.Errorf("%w: probe panic: %v", ErrProbeFailed, r)
-				}
-			}()
-			select {
-			case sem <- struct{}{}:
-				defer func() { <-sem }()
-			case <-ctx.Done():
-				outs[i].err = ctx.Err()
-				return
-			}
-			outs[i].result, outs[i].err = c.runner.Probe(ctx, c.request(t, e, d))
-			outs[i].ran = outs[i].err == nil
-		}()
-	}
-	wg.Wait()
-	return outs
-}
-
-// judge decides every outcome: allow expectations first, then deny
-// expectations against the allow controls and DNS evidence.
-func (c *NetworkChecker) judge(ctx context.Context, t Target, p netPlan, d destination, outs []netOutcome) {
-	neutral := &neutralDNS{c: c, ctx: ctx, t: t, d: d}
-	for i := range outs {
-		o := &outs[i]
-		switch {
-		case o.err != nil:
-			o.state, o.text = stateUnknown, strings.TrimPrefix(o.err.Error(), ErrProbeFailed.Error()+": ")
-		case o.result.FailureClass == FailureProbeError:
-			o.state, o.text = stateUnknown, "the probe could not run or report"
-			o.err = ErrProbeFailed
-		case o.result.FailureClass == FailureDNS:
-			c.judgeDNS(o, outs, neutral, d)
-		case o.exp.allow:
-			judgeAllow(o)
-		}
-	}
-	for i := range outs {
-		o := &outs[i]
-		if o.exp.allow || o.err != nil || o.state != stateHolds || !o.ran || o.result.FailureClass == FailureDNS {
-			continue
-		}
-		judgeDeny(o, outs)
-	}
-}
-
-func judgeAllow(o *netOutcome) {
-	r, h := o.result, o.exp.http
-	switch {
-	case !r.Connected:
-		o.state, o.text = stateFails, fmt.Sprintf("the allowed path did not connect (%s)", classOrUnknown(r.FailureClass))
-	case h == nil:
-	case r.HTTPStatus != h.status:
-		o.state = stateFails
-		if r.HTTPStatus == 0 {
-			o.text = "connected, but the server sent no HTTP answer (http-mismatch)"
-		} else {
-			o.text = fmt.Sprintf("answered HTTP %d, expected %d (http-mismatch)", r.HTTPStatus, h.status)
-		}
-	case r.BodyMarker != h.marker:
-		o.state, o.text = stateFails, fmt.Sprintf("answered HTTP %d but the body lacks the expected application marker: a different backend answered (http-mismatch)", r.HTTPStatus)
-	}
-}
-
-func classOrUnknown(class string) string {
-	if class == "" {
-		return "no reason reported"
-	}
-	return class
-}
-
-func judgeDeny(o *netOutcome, all []netOutcome) {
-	r := o.result
-	switch {
-	case r.Connected:
-		o.state, o.text = stateFails, "connected although this source must be denied"
-		return
-	case r.FailureClass != FailureTimeout && r.FailureClass != FailureRefused:
-		o.state, o.text = stateUnknown, fmt.Sprintf("the connection failed (%s), which does not show a block", classOrUnknown(r.FailureClass))
-		return
-	}
-	// The block counts only beside a healthy server: an allowed source
-	// reached the same port in this run.
-	var controls []*netOutcome
-	for i := range all {
-		if a := &all[i]; a.exp.allow && a.exp.port == o.exp.port {
-			controls = append(controls, a)
-		}
-	}
-	for _, a := range controls {
-		if a.state == stateHolds {
-			return // healthy: the block is real
-		}
-	}
-	for _, a := range controls {
-		if a.state == stateUnknown {
-			o.state, o.text = stateUnknown, "the allowed control could not be decided, so the block proves nothing yet"
-			return
-		}
-	}
-	o.state, o.text = stateFails, fmt.Sprintf("a %s was observed, but no allowed source reached port %d in this run, so the destination is not shown to be healthy and the block proves nothing", r.FailureClass, o.exp.port)
-}
-
-// judgeDNS decides an expectation whose probe could not resolve the name.
-// A DNS failure is never an allow and never a deny; whose fault it is
-// depends on whether anyone else can resolve the name.
-func (c *NetworkChecker) judgeDNS(o *netOutcome, all []netOutcome, n *neutralDNS, d destination) {
-	for i := range all {
-		a := &all[i]
-		if a != o && a.ran && a.result.FailureClass != FailureDNS && a.result.FailureClass != FailureProbeError {
-			o.state, o.text = stateFails, fmt.Sprintf("this source could not resolve %s although another source could (egress or DNS settings of the source)", d.dial)
-			return
-		}
-	}
-	switch ok, err := n.resolves(); {
-	case err != nil:
-		o.state, o.text = stateUnknown, "cluster DNS could not be verified: "+err.Error()
-	case ok:
-		o.state, o.text = stateFails, fmt.Sprintf("this source could not resolve %s although a neutral pod can", d.dial)
-	default:
-		o.state, o.text = stateUnknown, fmt.Sprintf("%s does not resolve from any pod; cluster DNS looks unhealthy", d.dial)
-	}
-}
-
-// neutralDNS resolves the destination from a pod without any source labels,
-// once, only when a source failed to resolve.
-type neutralDNS struct {
-	c    *NetworkChecker
-	ctx  context.Context
-	t    Target
-	d    destination
-	once sync.Once
-	ok   bool
-	err  error
-}
-
-func (n *neutralDNS) resolves() (bool, error) {
-	n.once.Do(func() {
-		ns := n.c.set.controlNamespace
-		if ns == "" {
-			n.err = errors.New("no control namespace is configured")
-			return
-		}
-		res, err := n.c.runner.Probe(n.ctx, ProbeRequest{
-			Protocol: ProbeDNS, Namespace: ns, Host: n.d.dial, Attempts: ProbeAttempts, Timeout: ProbeAttemptTimeout,
-			EnvironmentID: n.t.Identity.ID, ProblemID: n.t.Problem.Definition.ID,
-		})
-		switch {
-		case err != nil:
-			n.err = err
-		case res.FailureClass == FailureProbeError:
-			n.err = fmt.Errorf("%w: the control probe could not run", ErrProbeFailed)
-		default:
-			n.ok = res.FailureClass != FailureDNS && res.Connected
-		}
-	})
-	return n.ok, n.err
-}
 
 // WithProbeControlNamespace names the namespace where neutral control probes
 // (a pod without any source labels, only resolving the destination name) run.

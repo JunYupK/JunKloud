@@ -211,6 +211,62 @@ func TestProbePodSpec(t *testing.T) {
 	testutil.Equal(t, f.remaining(), 0)
 }
 
+func TestProbeResolveNameAndBudget(t *testing.T) {
+	clk := &stepClock{now: time.Date(2026, 10, 15, 9, 0, 0, 0, time.UTC)}
+	newRunner := func(f *fakePods) *podProbeRunner {
+		r, err := newPodProbeRunner(f, WithProbeImage(testProbeImage), WithClock(clk))
+		testutil.NoError(t, err)
+		return r
+	}
+	t.Run("the name to resolve is passed to the pod", func(t *testing.T) {
+		f := newFakePods()
+		f.onCreate = terminated(okMessage, 0)
+		q := httpRequest()
+		q.Protocol, q.Host, q.ResolveName = ProbeTCP, "10.0.0.5", "web.jk-net.svc.cluster.local"
+		_, err := newRunner(f).Probe(context.Background(), q)
+		testutil.NoError(t, err)
+		env := map[string]string{}
+		for _, e := range f.created[0].Spec.Containers[0].Env {
+			env[e.Name] = e.Value
+		}
+		testutil.Equal(t, env["JK_RESOLVE"], "web.jk-net.svc.cluster.local")
+		testutil.Equal(t, env["JK_HOST"], "10.0.0.5")
+	})
+	t.Run("the pod deadline and the wait follow the remaining budget", func(t *testing.T) {
+		f := newFakePods() // never finishes
+		q := httpRequest()
+		start := clk.Now()
+		q.Deadline = start.Add(12 * time.Second)
+		_, err := newRunner(f).Probe(context.Background(), q)
+		if !errors.Is(err, ErrProbeFailed) || !strings.Contains(err.Error(), "time budget") {
+			t.Fatalf("Probe = %v", err)
+		}
+		waited := clk.Now().Sub(start)
+		testutil.Equal(t, waited >= 12*time.Second && waited < 14*time.Second, true)
+		testutil.Equal(t, *f.created[0].Spec.ActiveDeadlineSeconds <= 14, true)
+		testutil.Equal(t, f.remaining(), 0)
+	})
+	t.Run("no budget left means no pod", func(t *testing.T) {
+		f := newFakePods()
+		q := httpRequest()
+		q.Deadline = clk.Now().Add(time.Second)
+		_, err := newRunner(f).Probe(context.Background(), q)
+		if !errors.Is(err, ErrProbeFailed) || !strings.Contains(err.Error(), "time budget") {
+			t.Fatalf("Probe = %v", err)
+		}
+		testutil.Equal(t, len(f.created), 0)
+	})
+	t.Run("without a deadline the runner's own bound applies", func(t *testing.T) {
+		f := newFakePods()
+		start := clk.Now()
+		_, err := newRunner(f).Probe(context.Background(), httpRequest())
+		if !errors.Is(err, ErrProbeFailed) {
+			t.Fatalf("Probe = %v", err)
+		}
+		testutil.Equal(t, clk.Now().Sub(start) >= podWait, true)
+	})
+}
+
 func TestProbeRunnerBoundsAndImage(t *testing.T) {
 	_, err := newPodProbeRunner(newFakePods())
 	if err == nil || !strings.Contains(err.Error(), "probe image") {
