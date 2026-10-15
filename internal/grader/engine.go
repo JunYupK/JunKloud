@@ -142,6 +142,7 @@ type settings struct {
 	preloadedSet     bool // WithPreloadedImages was given, even if empty
 	probeImage       string
 	controlNamespace string
+	inputKey         []byte
 }
 
 // WithClock injects the clock (default SystemClock).
@@ -193,6 +194,10 @@ func WithPreloadedImages(images ...string) Option {
 		s.preloadedSet = true
 	}
 }
+
+// WithInputKey sets the secret key that keys the input fingerprints of
+// ArtifactChecker.CaptureInputs (same as ArtifactConfig.InputKey).
+func WithInputKey(key []byte) Option { return func(s *settings) { s.inputKey = append([]byte(nil), key...) } }
 
 type redactorKey struct{}
 

@@ -67,12 +67,19 @@ type ArtifactConfig struct {
 	DockerBin  string
 	HelmBin    string
 	KubectlBin string
+	// InputKey keys the hashes CaptureInputs makes of anything that may hold
+	// secrets (see CaptureInputs). It should be random, per installation and
+	// stable across runs.
+	InputKey []byte
 }
 
 // NewArtifactChecker returns the checker. Pass the same options as to the
 // engine (clock, redactor, default timeout, poll interval).
 func NewArtifactChecker(cfg ArtifactConfig, opts ...Option) *ArtifactChecker {
 	set := newSettings(opts)
+	if len(cfg.InputKey) == 0 {
+		cfg.InputKey = set.inputKey
+	}
 	if cfg.DockerBin == "" {
 		cfg.DockerBin = "docker"
 	}
