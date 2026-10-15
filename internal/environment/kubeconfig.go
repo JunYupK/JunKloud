@@ -133,6 +133,10 @@ func restConfig(a access, endpoint string) *rest.Config {
 		},
 		Timeout:   apiTimeout,
 		UserAgent: "junkloud",
+		// The doctor probes capabilities in parallel; client-go's default
+		// (5 QPS, burst 10) would throttle it.
+		QPS:   20,
+		Burst: 40,
 	}
 }
 

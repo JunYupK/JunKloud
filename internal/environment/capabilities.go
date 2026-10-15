@@ -350,10 +350,12 @@ func (m *Manager) EnsurePlatform(ctx context.Context, id model.Identity) error {
 	if err := m.installMetricsServer(ctx, cl, id.ID, record); err != nil {
 		errs = append(errs, err)
 	}
+	// A container that started but is not ready yet is still recorded.
 	cid, err := m.ensureCloudProvider(ctx, cl, id)
 	if err != nil {
 		errs = append(errs, err)
-	} else if !slices.Contains(inv.DockerIDs, cid) {
+	}
+	if cid != "" && !slices.Equal(inv.DockerIDs, []string{cid}) {
 		inv.DockerIDs = []string{cid}
 		if err := m.store.PutInventory(ctx, inv); err != nil {
 			return err
@@ -874,9 +876,12 @@ func cloudProviderRunArgs(envID string, compat HostCompat) []string {
 // hostContainer is the part of `docker container inspect` the platform uses.
 type hostContainer struct {
 	ID      string
+	Name    string
 	Image   string
 	Labels  map[string]string
 	Running bool
+	// Error is Docker's last start error (State.Error), if any.
+	Error string
 }
 
 // inspectHostContainer inspects one container by name or ID; found is false
@@ -893,19 +898,21 @@ func (m *Manager) inspectHostContainer(ctx context.Context, ref string) (hostCon
 	}
 	var out []struct {
 		ID     string `json:"Id"`
+		Name   string `json:"Name"`
 		Config struct {
 			Image  string            `json:"Image"`
 			Labels map[string]string `json:"Labels"`
 		} `json:"Config"`
 		State struct {
-			Running bool `json:"Running"`
+			Running bool   `json:"Running"`
+			Error   string `json:"Error"`
 		} `json:"State"`
 	}
 	if err := json.Unmarshal(res.Stdout, &out); err != nil || len(out) != 1 {
 		return hostContainer{}, false, fmt.Errorf("environment: decode docker inspect %s: %v", ref, err)
 	}
 	c := out[0]
-	return hostContainer{ID: c.ID, Image: c.Config.Image, Labels: c.Config.Labels, Running: c.State.Running}, true, nil
+	return hostContainer{ID: c.ID, Name: strings.TrimPrefix(c.Name, "/"), Image: c.Config.Image, Labels: c.Config.Labels, Running: c.State.Running, Error: c.State.Error}, true, nil
 }
 
 // ensureCloudProvider makes this environment's cloud-provider-kind container

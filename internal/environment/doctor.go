@@ -504,9 +504,32 @@ func (p *prober) checkIngress(ctx context.Context) error {
 		return false, nil
 	})
 	if err != nil {
-		return fmt.Errorf("Ingress got no address within %s", probeConverge)
+		return fmt.Errorf("Ingress got no address within %s%s", probeConverge, p.loadBalancerDiagnosis(ctx))
 	}
 	return checkIngressRouting(ctx, probeHTTPClient(), addr, host, "/probe/", p.token, probeConverge)
+}
+
+// loadBalancerDiagnosis names the load-balancer containers
+// cloud-provider-kind made for this cluster that are not running, with
+// Docker's start error (for example a sysctl the engine's kernel rejects).
+func (p *prober) loadBalancerDiagnosis(ctx context.Context) string {
+	out, err := p.m.output(ctx, dockerTimeout, "docker", "ps", "--all", "--quiet", "--no-trunc", "--filter", "label="+cloudProviderLBLabel+"="+p.id.ClusterName)
+	if err != nil {
+		return ""
+	}
+	var notes []string
+	for _, cid := range parseIDs(out) {
+		if !containerIDPattern.MatchString(cid) {
+			continue
+		}
+		if c, ok, err := p.m.inspectHostContainer(ctx, cid); err == nil && ok && !c.Running {
+			notes = append(notes, fmt.Sprintf("load balancer container %s is not running: %s", c.Name, tail(c.Error)))
+		}
+	}
+	if len(notes) == 0 {
+		return ""
+	}
+	return " (" + strings.Join(notes, "; ") + ")"
 }
 
 // probeHTTPClient makes single, bounded HTTP requests directly (never

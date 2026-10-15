@@ -136,11 +136,15 @@ platform:
   metrics_server:
     # Manifest vendored byte-for-byte at runtime/platform/metrics-server/
     # components.yaml from the release asset below; its container args equal
-    # manifests/base/deployment.yaml at tag v0.9.0 (checked 2026-10-15). It
-    # is applied unmodified apart from JunKloud ownership labels: kubelet TLS
-    # stays verified (no --kubelet-insecure-tls) because kubelets get serving
-    # certificates through serverTLSBootstrap and JunKloud approves only its
-    # own nodes' kubelet-serving CSRs.
+    # manifests/base/deployment.yaml at tag v0.9.0 (checked 2026-10-15). The
+    # file stays unmodified; when applying it JunKloud adds ownership labels
+    # and keeps TLS verified on both hops: kubelet TLS (no
+    # --kubelet-insecure-tls; kubelets get CA-signed serving certificates
+    # through serverTLSBootstrap and JunKloud approves only its own nodes'
+    # kubelet-serving CSRs), and API server -> metrics-server TLS (the
+    # upstream APIService's insecureSkipTLSVerify is replaced by a caBundle;
+    # metrics-server serves a certificate from a JunKloud-generated CA,
+    # stored in kube-system/junkloud-metrics-server-tls).
     version: "v0.9.0"
     manifest: "runtime/platform/metrics-server/components.yaml"
     manifest_source: "https://github.com/kubernetes-sigs/metrics-server/releases/download/v0.9.0/components.yaml"

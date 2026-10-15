@@ -180,16 +180,16 @@ Task 2에서 `internal/model`에 아래 타입을 정의한다. 패키지 간에
 
 **Interfaces:** Consumes Manager.Check/Apply. Produces `Manager.Doctor(ctx,id Identity) (DoctorReport,error)`; `DoctorReport{EnvironmentID string; Checks []CapabilityCheck; Versions map[string]string}`, `CapabilityCheck{Name,Status,Reason string}`. capability 이름은 `dns,service,network-policy,ingress,storage,metrics,image-build`.
 
-- [ ] **실패 테스트 작성:** `TestPlatformCapabilities`, `TestDoctorDoesNotReadAnswers`. DNS와 Service 양성 연결, NetworkPolicy 음성·양성, Ingress host/path, PVC 쓰기·읽기, metrics API, image build를 실제로 검사한다.
+- [x] **실패 테스트 작성:** `TestPlatformCapabilities`, `TestDoctorDoesNotReadAnswers`. DNS와 Service 양성 연결, NetworkPolicy 음성·양성, Ingress host/path, PVC 쓰기·읽기, metrics API, image build를 실제로 검사한다.
   ```go
   report, err := manager.Doctor(ctx, id); testutil.NoError(t, err)
   for _, check := range report.Checks { testutil.Equal(t, check.Status, "PASS") }
   testutil.Equal(t, answerNamespaceReadCount, 0)
   ```
-- [ ] **실패 확인:** 부가 기능 미설치 상태에서 integration 명령이 해당 capability 실패를 보고하는지 확인한다.
-- [ ] **최소 구현:** cloud-provider-kind의 독립 프로세스 수명 주기·재시작·종료 처리, 필요한 metrics/storage 구성과 사전 이미지 준비를 고정한다. doctor는 전용 platform probe만 사용하고 시험 namespace를 읽지 않는다. 기능 실패를 capability 비활성 상태로 보고해 해당 문제 출제를 막는다.
+- [x] **실패 확인:** 부가 기능 미설치 상태에서 integration 명령이 해당 capability 실패를 보고하는지 확인한다.
+- [x] **최소 구현:** cloud-provider-kind의 독립 프로세스 수명 주기·재시작·종료 처리, 필요한 metrics/storage 구성과 사전 이미지 준비를 고정한다. doctor는 전용 platform probe만 사용하고 시험 namespace를 읽지 않는다. 기능 실패를 capability 비활성 상태로 보고해 해당 문제 출제를 막는다.
 - [ ] **통과 확인:** `go test -tags=integration ./tests/integration -run 'TestPlatform|TestDoctor' -count=1 -v` PASS. M2 4GiB에서 기능 구성 자체가 성립하는지 조기 확인하고 불가하면 나머지 제품 구현 전 설계로 되돌린다.
-- [ ] **커밋:** `feat: verify required Kubernetes capabilities`.
+- [x] **커밋:** `feat: verify required Kubernetes capabilities`.
 
 ### Task 6: 공통 채점 엔진과 설정·상태 판정
 

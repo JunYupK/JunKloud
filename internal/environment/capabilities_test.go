@@ -28,6 +28,7 @@ import (
 	"sigs.k8s.io/yaml"
 
 	"github.com/JunYupK/JunKloud/internal/executil"
+	"github.com/JunYupK/JunKloud/internal/model"
 	"github.com/JunYupK/JunKloud/internal/testutil"
 	"github.com/JunYupK/JunKloud/runtime/platform"
 )
@@ -371,4 +372,47 @@ func TestDoctorReportUnavailable(t *testing.T) {
 	testutil.Equal(t, r.Unavailable([]string{CapabilityDNS}), []string(nil))
 	testutil.Equal(t, r.Unavailable([]string{CapabilityIngress, CapabilityDNS, CapabilityMetrics}), []string{CapabilityIngress, CapabilityMetrics})
 	testutil.Equal(t, Capabilities, []string{"dns", "service", "network-policy", "ingress", "storage", "metrics", "image-build"})
+}
+
+// StopPlatform stops only this environment's cloud-provider-kind container
+// and load balancers labeled for this environment's cluster; a container of
+// the same name owned by someone else, or a foreign identity, stops nothing.
+func TestStopPlatformOwnership(t *testing.T) {
+	m, recorded, _, _ := newLiveManager(t, func(model.Identity, *liveSetup) {})
+	cpk := strings.Repeat("c", 64)
+	lb := strings.Repeat("d", 64)
+	inspect := func(env string) []byte {
+		return []byte(`[{"Id":"` + cpk + `","Config":{"Image":"x","Labels":{"` + LabelEnvironmentID + `":"` + env +
+			`","` + LabelComponent + `":"` + ComponentCloudProvider + `","` + LabelManagedBy + `":"` + ManagedByValue + `"}},"State":{"Running":true}}]`)
+	}
+	owner := recorded.ID
+	fake := &fakeRunner{respond: func(exe string, args []string) (executil.Result, error) {
+		switch {
+		case args[0] == "container" && args[1] == "inspect":
+			return executil.Result{Stdout: inspect(owner)}, nil
+		case args[0] == "ps":
+			return executil.Result{Stdout: []byte(lb + "\n")}, nil
+		}
+		return executil.Result{}, nil
+	}}
+	m.runner = fake
+	testutil.NoError(t, m.StopPlatform(bg, recorded))
+	testutil.Equal(t, fake.Calls(), []string{
+		"docker container inspect -- " + CloudProviderContainerName(recorded.ID),
+		"docker stop --time 30 " + cpk,
+		"docker rm " + cpk,
+		"docker ps --all --quiet --no-trunc --filter label=" + cloudProviderLBLabel + "=" + recorded.ClusterName,
+		"docker rm --force " + lb,
+	})
+
+	owner = "someone-else"
+	fake.calls = nil
+	testutil.ErrorIs(t, m.StopPlatform(bg, recorded), ErrNotOwned)
+	testutil.Equal(t, fake.Calls(), []string{"docker container inspect -- " + CloudProviderContainerName(recorded.ID)})
+
+	other := recorded
+	other.ID = "someone-else"
+	fake.calls = nil
+	testutil.ErrorIs(t, m.StopPlatform(bg, other), ErrIdentityMismatch)
+	testutil.Equal(t, len(fake.Calls()), 0)
 }

@@ -316,7 +316,8 @@ func enableAudit(t *testing.T, m *environment.Manager, id model.Identity) {
 
 	deadline := time.Now().Add(4 * time.Minute)
 	for {
-		if len(auditEvents(t, id)) > 0 && m.Check(ctx, id) == nil {
+		// Check issues admin requests, so a working audit log has events.
+		if m.Check(ctx, id) == nil && len(auditEvents(t, id)) > 0 {
 			return
 		}
 		if time.Now().After(deadline) {
@@ -367,6 +368,7 @@ func TestDoctorDoesNotReadAnswers(t *testing.T) {
 
 	// An exam problem with its hidden answer, set up the way problems are.
 	answerNS := "jk-exam-" + randomHex(t, 3)
+	applyStart := time.Now()
 	_, err := m.Apply(ctx, id, environment.Owner{
 		Inventory:        model.Inventory{EnvironmentID: id.ID, SessionID: "s-audit", ProblemID: "p-answer"},
 		Namespace:        answerNS,
@@ -375,6 +377,7 @@ func TestDoctorDoesNotReadAnswers(t *testing.T) {
 		{"apiVersion": "v1", "kind": "Secret", "metadata": map[string]any{"name": "answer"}, "stringData": map[string]any{"expected": "hidden"}},
 		cm("", "grading-notes"),
 	}}})
+	applyEnd := time.Now()
 	testutil.NoError(t, err)
 	testutil.NoError(t, m.EnsurePlatform(ctx, id))
 
@@ -399,11 +402,6 @@ func TestDoctorDoesNotReadAnswers(t *testing.T) {
 			}
 		}
 	}
-
-	allowed := []string{environment.PlatformNamespace, environment.MarkerNamespace, "kube-system"}
-	answerNamespaceReadCount := 0
-	doctorRequests, platformRequests := 0, 0
-	touched := map[string]bool{}
 	// The audit log can trail the response slightly; wait until it has
 	// caught up with the end of the doctor run.
 	var events []auditEvent
@@ -413,11 +411,52 @@ func TestDoctorDoesNotReadAnswers(t *testing.T) {
 			break
 		}
 	}
+
+	// Sensitivity control: the same classification over the Apply that set
+	// up the answer (same client identity and user agent as the doctor)
+	// does count answer-namespace reads, so a zero below means something.
+	setup := summarizeAudit(t, events, applyStart, applyEnd, answerNS, namespaced)
+	if setup.answerReads == 0 {
+		t.Fatalf("audit classification found no answer-namespace reads during setup; it would not detect the doctor reading answers")
+	}
+
+	doctor := summarizeAudit(t, events, start, end, answerNS, namespaced)
+	t.Logf("audit: setup made %d answer-namespace requests; doctor made %d requests, %d in %s, namespaces %v",
+		setup.answerReads, doctor.requests, doctor.platformRequests, environment.PlatformNamespace, doctor.touched)
+	// The audit log really captured the doctor's traffic.
+	if doctor.platformRequests == 0 {
+		t.Fatal("audit log captured no doctor requests in the platform namespace")
+	}
+	answerNamespaceReadCount := doctor.answerReads
+	testutil.Equal(t, answerNamespaceReadCount, 0)
+	allowed := []string{environment.PlatformNamespace, environment.MarkerNamespace, "kube-system"}
+	for ns := range doctor.touched {
+		if !slices.Contains(allowed, ns) {
+			t.Errorf("doctor touched namespace %q", ns)
+		}
+	}
+}
+
+// auditSummary classifies JunKloud's (user agent "junkloud") API requests
+// in a time window.
+type auditSummary struct {
+	requests         int
+	platformRequests int
+	// answerReads counts requests that could read the answer namespace:
+	// any request in it, any request for it (or a list of namespaces), and
+	// any cluster-wide request for a namespaced resource.
+	answerReads int
+	touched     map[string]bool
+}
+
+func summarizeAudit(t *testing.T, events []auditEvent, from, to time.Time, answerNS string, namespaced map[schema.GroupResource]bool) auditSummary {
+	t.Helper()
+	s := auditSummary{touched: map[string]bool{}}
 	for _, ev := range events {
-		if ev.UserAgent != "junkloud" || ev.RequestReceivedTimestamp.Before(start.Add(-time.Second)) || ev.RequestReceivedTimestamp.After(end.Add(time.Second)) {
+		if ev.UserAgent != "junkloud" || ev.RequestReceivedTimestamp.Before(from.Add(-time.Second)) || ev.RequestReceivedTimestamp.After(to.Add(time.Second)) {
 			continue
 		}
-		doctorRequests++
+		s.requests++
 		if ev.ObjectRef == nil {
 			continue // non-resource request (discovery, /version)
 		}
@@ -425,30 +464,19 @@ func TestDoctorDoesNotReadAnswers(t *testing.T) {
 		gr := schema.GroupResource{Group: ref.APIGroup, Resource: ref.Resource}
 		switch {
 		case ref.Namespace == answerNS:
-			answerNamespaceReadCount++
+			s.answerReads++
 		case ref.Resource == "namespaces" && ref.APIGroup == "" && (ref.Name == answerNS || ref.Name == ""):
-			answerNamespaceReadCount++ // reading or listing the answer namespace itself
+			s.answerReads++ // reading or listing the answer namespace itself
 		case ref.Namespace == "" && namespaced[gr]:
-			answerNamespaceReadCount++ // cluster-wide read across every namespace
+			s.answerReads++ // cluster-wide request across every namespace
 			t.Logf("cluster-wide request: %s %s", ev.Verb, ev.RequestURI)
 		}
 		if ref.Namespace != "" {
-			touched[ref.Namespace] = true
+			s.touched[ref.Namespace] = true
 		}
 		if ref.Namespace == environment.PlatformNamespace {
-			platformRequests++
+			s.platformRequests++
 		}
 	}
-	t.Logf("audit: %d doctor requests, %d in %s, namespaces %v", doctorRequests, platformRequests, environment.PlatformNamespace, touched)
-	// The audit log really captured the doctor's traffic, so zero below is
-	// not vacuous.
-	if platformRequests == 0 {
-		t.Fatal("audit log captured no doctor requests in the platform namespace")
-	}
-	testutil.Equal(t, answerNamespaceReadCount, 0)
-	for ns := range touched {
-		if !slices.Contains(allowed, ns) {
-			t.Errorf("doctor touched namespace %q", ns)
-		}
-	}
+	return s
 }
