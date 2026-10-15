@@ -26,6 +26,14 @@ tools:
     version: "v0.33.0"
     # kind v0.33.0 defaults its node image to this Kubernetes release.
     kubernetes_node_version: "v1.37.0"
+    # Node image pinned by digest (multi-arch index). Provenance, checked on
+    # 2026-10-15: identical to kind v0.33.0's built-in default
+    # (pkg/apis/config/defaults/image.go at tag v0.33.0, and the string
+    # embedded in the checksum-verified kind binary above), and to the
+    # RepoDigest of the image pulled on the dev host. JunKloud always passes
+    # this exact reference to `kind create cluster --image`;
+    # internal/environment.DefaultNodeImage must equal it (unit-tested).
+    node_image: "kindest/node:v1.37.0@sha256:a1ed56cfb0e7b93589bdf97c8cd566405a265939e3620fc4f5de89adff580ae5"
     source: "https://github.com/kubernetes-sigs/kind/releases/download/v0.33.0/kind-linux-{arch}"
     checksums:
       linux/amd64: "aee6151561422756b764a4ae28e7f44cda5af5a9eead3cc9985112b1de8d8e0d"

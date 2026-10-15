@@ -163,16 +163,16 @@ Task 2에서 `internal/model`에 아래 타입을 정의한다. 패키지 간에
 
 **Interfaces:** Consumes Task 2 Identity/Inventory/Operation과 Task 3 Store. Produces `executil.Run(ctx context.Context, exe string,args []string,stdin io.Reader) (Result,error)` with `Result{Stdout,Stderr []byte; ExitCode int}`; `environment.New(stateDir string,s *store.Store) *Manager`; methods `Ensure(ctx) (Identity,error)`, `Check(ctx,id Identity) error`, `Apply(ctx,id Identity,owner Inventory,actions []Action) (Inventory,error)`.
 
-- [ ] **실패 테스트 작성:** `TestRejectForeignIdentity`, `TestIgnoreAmbientKubeconfig`, `TestRecoverCreateIntent`, `TestExecCancellation`. 이름이 같아도 CA/marker UID/container ID가 다른 환경을 거부한다.
+- [x] **실패 테스트 작성:** `TestRejectForeignIdentity`, `TestIgnoreAmbientKubeconfig`, `TestRecoverCreateIntent`, `TestExecCancellation`. 이름이 같아도 CA/marker UID/container ID가 다른 환경을 거부한다.
   ```go
   err := manager.Check(ctx, foreignIdentity)
   testutil.ErrorIs(t, err, environment.ErrIdentityMismatch)
   testutil.Equal(t, foreignClusterMutationCount, 0)
   ```
-- [ ] **실패 확인:** `go test ./internal/executil ./internal/environment -v`에서 소유권 거부 동작 실패 확인.
-- [ ] **최소 구현:** create intent를 먼저 저장하고 환경 ID가 포함된 namespace·label·Docker metadata를 적용한다. 내부 endpoint와 정당한 CA 검증을 갖춘 별도 kubeconfig를 만든다. host KUBECONFIG와 current-context를 읽지 않는다. 외부 명령은 인자 배열·bounded output·context 취소로 실행한다. 작업 실패를 자동 글로벌 삭제로 복구하지 않는다.
-- [ ] **통과 확인:** unit PASS; `go test -tags=integration ./tests/integration -run TestEnvironment -count=1 -v` PASS. create 직후 중단을 주입해 기록된 intent로 소유 대상을 재확인한다. 다른 cluster sentinel이 그대로임을 확인한다.
-- [ ] **커밋:** `feat: manage an explicitly owned kind environment`.
+- [x] **실패 확인:** `go test ./internal/executil ./internal/environment -v`에서 소유권 거부 동작 실패 확인.
+- [x] **최소 구현:** create intent를 먼저 저장하고 환경 ID가 포함된 namespace·label·Docker metadata를 적용한다. 내부 endpoint와 정당한 CA 검증을 갖춘 별도 kubeconfig를 만든다. host KUBECONFIG와 current-context를 읽지 않는다. 외부 명령은 인자 배열·bounded output·context 취소로 실행한다. 작업 실패를 자동 글로벌 삭제로 복구하지 않는다.
+- [x] **통과 확인:** unit PASS; `go test -tags=integration ./tests/integration -run TestEnvironment -count=1 -v` PASS. create 직후 중단을 주입해 기록된 intent로 소유 대상을 재확인한다. 다른 cluster sentinel이 그대로임을 확인한다.
+- [x] **커밋:** `feat: manage an explicitly owned kind environment`.
 
 ### Task 5: 플랫폼 capability와 doctor
 
