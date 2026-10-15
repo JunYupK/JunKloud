@@ -13,6 +13,8 @@ import (
 	"testing"
 	"time"
 
+	corev1 "k8s.io/api/core/v1"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/client-go/kubernetes"
@@ -134,6 +136,27 @@ func inspectContainer(t *testing.T, name string) (containerState, bool) {
 	return c, true
 }
 
+func containerStartedAt(t *testing.T, name string) time.Time {
+	t.Helper()
+	res, err := toolEnv.Run(context.Background(), "docker", []string{"container", "inspect", "--format", "{{.State.StartedAt}}", name}, nil)
+	testutil.NoError(t, err)
+	at, err := time.Parse(time.RFC3339Nano, strings.TrimSpace(string(res.Stdout)))
+	testutil.NoError(t, err)
+	return at
+}
+
+func hasAPIGroup(t *testing.T, cs kubernetes.Interface, group string) bool {
+	t.Helper()
+	groups, err := cs.Discovery().ServerGroups()
+	testutil.NoError(t, err)
+	for _, g := range groups.Groups {
+		if g.Name == group {
+			return true
+		}
+	}
+	return false
+}
+
 // assertNoProbeLeftovers: a finished doctor run leaves none of its probe
 // objects in the platform namespace and none of its build images behind.
 func assertNoProbeLeftovers(t *testing.T, cs kubernetes.Interface, id model.Identity) {
@@ -189,6 +212,10 @@ func TestPlatformCapabilities(t *testing.T) {
 	requireTools(t, "docker", "kind")
 	ctx := context.Background()
 	unsupported := unsupportedCapabilities(t)
+	// A kind cluster JunKloud does not own, on the same engine. Started
+	// first so that its cleanup runs after the platform is stopped.
+	waitForeign := startForeignCluster(t)
+	var foreign foreignCluster // set once by AllCapabilities
 	m, id := bootEnvironment(t)
 	cs := kubeClient(t, m, id)
 
@@ -203,6 +230,16 @@ func TestPlatformCapabilities(t *testing.T) {
 	})
 
 	t.Run("AllCapabilities", func(t *testing.T) {
+		// The foreign cluster exists before cloud-provider-kind starts and
+		// has a LoadBalancer Service an unscoped cloud-provider-kind would
+		// serve.
+		foreign = waitForeign()
+		_, err := foreign.client.CoreV1().Services("foreign-app").Create(ctx, &corev1.Service{
+			ObjectMeta: metav1.ObjectMeta{Name: "foreign-lb"},
+			Spec: corev1.ServiceSpec{Type: corev1.ServiceTypeLoadBalancer, Selector: map[string]string{"app": "none"},
+				Ports: []corev1.ServicePort{{Port: 80}}},
+		}, metav1.CreateOptions{})
+		testutil.NoError(t, err)
 		testutil.NoError(t, m.EnsurePlatform(ctx, id))
 		report, err := m.Doctor(ctx, id)
 		testutil.NoError(t, err)
@@ -217,6 +254,35 @@ func TestPlatformCapabilities(t *testing.T) {
 		assertNoProbeLeftovers(t, cs, id)
 		// A capability failure disables exactly the problems that need it.
 		testutil.Equal(t, len(report.Unavailable([]string{environment.CapabilityDNS, environment.CapabilityStorage})), 0)
+	})
+
+	t.Run("LeavesForeignClusterAlone", func(t *testing.T) {
+		if foreign.client == nil {
+			t.Fatal("foreign cluster was not set up")
+		}
+		// cloud-provider-kind discovers clusters at start and every 30s:
+		// give it more than one scan with the foreign cluster present.
+		started := containerStartedAt(t, environment.CloudProviderContainerName(id.ID))
+		if wait := 40*time.Second - time.Since(started); wait > 0 {
+			time.Sleep(wait)
+		}
+		// Positive control: in the owned cluster cloud-provider-kind did
+		// install exactly what is checked for below.
+		testutil.Equal(t, hasAPIGroup(t, cs, "gateway.networking.k8s.io"), true)
+		_, err := cs.NetworkingV1().IngressClasses().Get(ctx, "cloud-provider-kind", metav1.GetOptions{})
+		testutil.NoError(t, err)
+
+		testutil.Equal(t, hasAPIGroup(t, foreign.client, "gateway.networking.k8s.io"), false)
+		_, err = foreign.client.NetworkingV1().IngressClasses().Get(ctx, "cloud-provider-kind", metav1.GetOptions{})
+		if !apierrors.IsNotFound(err) {
+			t.Errorf("foreign cluster has IngressClass cloud-provider-kind (err %v)", err)
+		}
+		svc, err := foreign.client.CoreV1().Services("foreign-app").Get(ctx, "foreign-lb", metav1.GetOptions{})
+		testutil.NoError(t, err)
+		testutil.Equal(t, len(svc.Status.LoadBalancer.Ingress), 0)
+		res, err := toolEnv.Run(ctx, "docker", []string{"ps", "--all", "--quiet", "--filter", "label=io.x-k8s.cloud-provider-kind.cluster=" + foreign.name}, nil)
+		testutil.NoError(t, err)
+		testutil.Equal(t, strings.TrimSpace(string(res.Stdout)), "")
 	})
 
 	t.Run("CloudProviderKindLifecycle", func(t *testing.T) {

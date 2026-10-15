@@ -506,7 +506,9 @@ func (p *prober) checkIngress(ctx context.Context) error {
 	if err != nil {
 		return fmt.Errorf("Ingress got no address within %s%s", probeConverge, p.loadBalancerDiagnosis(ctx))
 	}
-	return checkIngressRouting(ctx, probeHTTPClient(), addr, host, "/probe/", p.token, probeConverge)
+	// The probe server also serves the token at "/", which the rule (prefix
+	// /probe) does not cover: the wrong-path request.
+	return checkIngressRouting(ctx, probeHTTPClient(), addr, host, "/probe/", "/", p.token, probeConverge)
 }
 
 // loadBalancerDiagnosis names the load-balancer containers
@@ -564,9 +566,12 @@ func ingressRequest(ctx context.Context, c *http.Client, addr, host, path string
 }
 
 // checkIngressRouting requires host+path to reach the backend serving token
-// within wait, and then requests for another host and for another path to
-// get an HTTP answer that is not the backend's.
-func checkIngressRouting(ctx context.Context, c *http.Client, addr, host, path, token string, wait time.Duration) error {
+// within wait, and then requests for another host and for wrongPath (a path
+// outside the Ingress rule) to get an HTTP answer that is not the
+// backend's. The backend must itself answer wrongPath with the token, so a
+// router that ignores the path is caught rather than masked by a backend
+// 404.
+func checkIngressRouting(ctx context.Context, c *http.Client, addr, host, path, wrongPath, token string, wait time.Duration) error {
 	deadline := time.Now().Add(wait)
 	for {
 		status, body, err := ingressRequest(ctx, c, addr, host, path)
@@ -606,7 +611,7 @@ func checkIngressRouting(ctx context.Context, c *http.Client, addr, host, path, 
 	if err := negative("host", "other-"+host, path); err != nil {
 		return err
 	}
-	return negative("path", host, "/not"+path)
+	return negative("path", host, wrongPath)
 }
 
 // checkStorage: data a pod writes to a PVC from the default StorageClass is

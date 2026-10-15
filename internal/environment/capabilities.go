@@ -177,6 +177,9 @@ var (
 	imageNamePattern   = regexp.MustCompile(`^[a-z0-9]+(?:[._-][a-z0-9]+)*(?::[0-9]+)?(?:/[a-z0-9]+(?:(?:[._]|__|-+)[a-z0-9]+)*)+:[A-Za-z0-9_][A-Za-z0-9._-]{0,127}$`)
 	imageDigestPattern = regexp.MustCompile(`^sha256:[0-9a-f]{64}$`)
 	archPattern        = regexp.MustCompile(`^[a-z0-9]+$`)
+	// envIDPattern: environment IDs are generated as 12 hex digits; they end
+	// up in container names and in the cloud-provider-kind wrapper script.
+	envIDPattern = regexp.MustCompile(`^[0-9a-f]{12}$`)
 )
 
 func (p PinnedImage) validate() error {
@@ -224,6 +227,11 @@ func (m *Manager) preload(ctx context.Context, cluster, arch string, img PinnedI
 	if err := m.command(ctx, pullTimeout, "docker", "pull", "--quiet", "--platform", platformFlag, img.Ref()); err != nil {
 		return fmt.Errorf("environment: pull %s: %w", img.Ref(), err)
 	}
+	// Re-point the tag on the shared engine at the pinned content. This
+	// overwrites a local tag of the same name (as `docker pull <tag>` of an
+	// unchanged upstream tag would); pods and containers refer to the tag
+	// because a digest reference cannot match after `docker save
+	// --platform` (it writes a reduced index). Accepted by ruling R19.
 	if err := m.command(ctx, dockerTimeout, "docker", "tag", img.Ref(), img.Name); err != nil {
 		return fmt.Errorf("environment: tag %s: %w", img.Name, err)
 	}
@@ -829,39 +837,68 @@ func applyPlatformObject(ctx context.Context, cl *clients, envID string, u *unst
 // cloud-provider-kind for an environment.
 func CloudProviderContainerName(envID string) string { return "junkloud-cpk-" + envID }
 
-// noIPv6Shim is the cloud-provider-kind entrypoint under HostCompatNoIPv6:
-// it puts a docker CLI wrapper first in PATH that drops the net.ipv6.*
-// sysctl flags cloud-provider-kind passes to its load-balancer containers
-// (a kernel without IPv6 rejects them), then runs cloud-provider-kind.
-const noIPv6Shim = `set -eu
-mkdir -p /run/junkloud
-cat > /run/junkloud/docker <<'EOF'
-#!/bin/sh
-for arg do
-  shift
-  case "$arg" in --sysctl=net.ipv6.*) continue ;; esac
-  set -- "$@" "$arg"
-done
-exec /usr/local/bin/docker "$@"
-EOF
-chmod 0755 /run/junkloud/docker
-PATH=/run/junkloud:$PATH
-export PATH
-exec /bin/cloud-provider-kind "$@"`
+// cloudProviderDockerCLI is the docker CLI inside the pinned
+// cloud-provider-kind image (FROM docker:29-cli).
+const cloudProviderDockerCLI = "/usr/local/bin/docker"
+
+// Labels cloud-provider-kind lists across all clusters: kind's cluster
+// discovery (sigs.k8s.io/kind v0.33.0 docker provider ListClusters: `docker
+// ps -a --filter label=io.x-k8s.kind.cluster`) and its final cleanup of
+// every load balancer (`docker ps -a --filter
+// label=io.x-k8s.cloud-provider-kind.cluster`).
+const kindClusterLabel = "io.x-k8s.kind.cluster"
+
+// cloudProviderDockerWrapper is a docker CLI wrapper (POSIX sh) that
+// cloud-provider-kind runs instead of the real CLI at realDocker. It scopes
+// cloud-provider-kind to one cluster: a bare filter on the kind cluster
+// label or on cloud-provider-kind's load-balancer label (any cluster) is
+// narrowed to cluster, so cloud-provider-kind never discovers, configures
+// or cleans up another kind cluster on the engine. Every other argument
+// passes through unchanged. Under HostCompatNoIPv6 it also drops the
+// net.ipv6.* sysctl flags cloud-provider-kind passes to its load-balancer
+// containers (a kernel without IPv6 rejects them). cluster must be a valid
+// cluster name (no quotes).
+func cloudProviderDockerWrapper(cluster string, compat HostCompat, realDocker string) string {
+	ipv6 := ""
+	if compat.Has(HostCompatNoIPv6) {
+		ipv6 = "    --sysctl=net.ipv6.*) continue ;;\n"
+	}
+	return "#!/bin/sh\n" +
+		"# JunKloud: cloud-provider-kind may only see kind cluster $cluster.\n" +
+		"cluster='" + cluster + "'\n" +
+		"for arg do\n" +
+		"  shift\n" +
+		"  case \"$arg\" in\n" +
+		"    label=" + kindClusterLabel + "|label=" + cloudProviderLBLabel + "|--filter=label=" + kindClusterLabel + "|--filter=label=" + cloudProviderLBLabel + ") arg=\"$arg=$cluster\" ;;\n" +
+		ipv6 +
+		"  esac\n" +
+		"  set -- \"$@\" \"$arg\"\n" +
+		"done\n" +
+		"exec " + realDocker + " \"$@\"\n"
+}
+
+// cloudProviderEntrypoint installs the docker CLI wrapper first in PATH
+// and then runs cloud-provider-kind with its arguments.
+func cloudProviderEntrypoint(cluster string, compat HostCompat) string {
+	return "set -eu\nmkdir -p /run/junkloud\ncat > /run/junkloud/docker <<'JUNKLOUD_EOF'\n" +
+		cloudProviderDockerWrapper(cluster, compat, cloudProviderDockerCLI) +
+		"JUNKLOUD_EOF\nchmod 0755 /run/junkloud/docker\nPATH=/run/junkloud:$PATH\nexport PATH\nexec /bin/cloud-provider-kind \"$@\""
+}
 
 // cloudProviderRunArgs is the `docker run` command line of the
 // cloud-provider-kind container: the pinned image on the kind network with
 // the Docker socket (it starts one proxy container per Ingress gateway),
-// restarted by Docker unless JunKloud stops it, and labeled as this
-// environment's. The config label hashes the run configuration.
+// restarted by Docker unless JunKloud stops it, labeled as this
+// environment's, and always started through cloudProviderEntrypoint so it
+// is scoped to this environment's cluster. The config label hashes the run
+// configuration.
 func cloudProviderRunArgs(envID string, compat HostCompat) []string {
-	tail := []string{CloudProviderKindImage.Ref(), "--gateway-channel=standard", "--enable-default-ingress=true"}
-	var entry []string
-	if compat.Has(HostCompatNoIPv6) {
-		entry = []string{"--entrypoint", "/bin/sh"}
-		tail = append([]string{CloudProviderKindImage.Ref(), "-c", noIPv6Shim, "cloud-provider-kind"}, tail[1:]...)
+	tail := []string{
+		"--entrypoint", "/bin/sh", CloudProviderKindImage.Ref(),
+		"-c", cloudProviderEntrypoint(ClusterName(envID), compat), "cloud-provider-kind",
+		"--gateway-channel=standard", "--enable-default-ingress=true",
 	}
-	sum := sha256.Sum256([]byte(strings.Join(append(slices.Clone(entry), tail...), "\x00")))
+	sum := sha256.Sum256([]byte(strings.Join(tail, "\x00")))
 	args := []string{"run", "--detach", "--name", CloudProviderContainerName(envID)}
 	labels := platformLabels(envID, ComponentCloudProvider)
 	labels[labelConfig] = hex.EncodeToString(sum[:8])
@@ -869,7 +906,6 @@ func cloudProviderRunArgs(envID string, compat HostCompat) []string {
 		args = append(args, "--label", k+"="+labels[k])
 	}
 	args = append(args, "--network", kindNetwork, "--restart", "unless-stopped", "--volume", dockerSocket+":"+dockerSocket)
-	args = append(args, entry...)
 	return append(args, tail...)
 }
 
@@ -921,6 +957,9 @@ func (m *Manager) inspectHostContainer(ctx context.Context, ref string) (hostCon
 // that is not this environment's is never touched. It waits until
 // cloud-provider-kind has registered its IngressClass in the cluster.
 func (m *Manager) ensureCloudProvider(ctx context.Context, cl *clients, id model.Identity) (string, error) {
+	if !envIDPattern.MatchString(id.ID) {
+		return "", fmt.Errorf("%w: environment ID %q", ErrIdentityMismatch, id.ID)
+	}
 	name := CloudProviderContainerName(id.ID)
 	want := cloudProviderRunArgs(id.ID, m.hostCompat)
 	c, found, err := m.inspectHostContainer(ctx, name)

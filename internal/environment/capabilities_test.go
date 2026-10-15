@@ -252,8 +252,9 @@ func TestParseHostCompatSet(t *testing.T) {
 }
 
 // cloud-provider-kind runs from the pinned image, on the kind network, with
-// JunKloud ownership labels; the IPv6 sysctl shim exists only under the
-// explicit no-ipv6 host-compat mode.
+// JunKloud ownership labels, always behind the docker CLI wrapper that
+// scopes it to this environment's cluster; the IPv6 sysctl filter exists
+// only under the explicit no-ipv6 host-compat mode.
 func TestCloudProviderRunArgs(t *testing.T) {
 	args := cloudProviderRunArgs("0123456789ab", HostCompatNone)
 	joined := strings.Join(args, " ")
@@ -265,19 +266,22 @@ func TestCloudProviderRunArgs(t *testing.T) {
 		"--network kind",
 		"--restart unless-stopped",
 		"--volume /var/run/docker.sock:/var/run/docker.sock",
-		CloudProviderKindImage.Ref() + " --gateway-channel=standard --enable-default-ingress=true",
+		"--entrypoint /bin/sh " + CloudProviderKindImage.Ref() + " -c ",
+		"cluster='junkloud-0123456789ab'",
+		"exec /bin/cloud-provider-kind",
+		" cloud-provider-kind --gateway-channel=standard --enable-default-ingress=true",
 	} {
 		if !strings.Contains(joined, want) {
 			t.Fatalf("cloud-provider-kind args lack %q:\n%s", want, joined)
 		}
 	}
-	for _, bad := range []string{"--privileged", "ipv6", "--entrypoint"} {
+	for _, bad := range []string{"--privileged", "ipv6"} {
 		if strings.Contains(joined, bad) {
 			t.Fatalf("default cloud-provider-kind args contain %q:\n%s", bad, joined)
 		}
 	}
 	shim := strings.Join(cloudProviderRunArgs("0123456789ab", HostCompat("cgroupv1,no-ipv6")), " ")
-	for _, want := range []string{"--entrypoint /bin/sh", "--sysctl=net.ipv6.*", "exec /bin/cloud-provider-kind"} {
+	for _, want := range []string{"--sysctl=net.ipv6.*", "cluster='junkloud-0123456789ab'"} {
 		if !strings.Contains(shim, want) {
 			t.Fatalf("no-ipv6 args lack %q:\n%s", want, shim)
 		}
@@ -285,6 +289,38 @@ func TestCloudProviderRunArgs(t *testing.T) {
 	if configLabel(args) == configLabel(cloudProviderRunArgs("0123456789ab", HostCompatNoIPv6)) {
 		t.Fatal("config label does not change with the run configuration")
 	}
+}
+
+// The docker CLI wrapper, run for real with a stub docker: cluster-wide
+// listings cloud-provider-kind makes (kind's cluster discovery, its
+// load-balancer cleanup) are narrowed to the owned cluster; everything else
+// passes through unchanged, argument boundaries intact; IPv6 sysctls are
+// dropped only in no-ipv6 mode.
+func TestCloudProviderDockerWrapper(t *testing.T) {
+	dir := t.TempDir()
+	stub := filepath.Join(dir, "docker-stub")
+	testutil.NoError(t, os.WriteFile(stub, []byte("#!/bin/sh\nfor a do printf '%s\\n' \"$a\"; done\n"), 0o755))
+	run := func(compat HostCompat, args ...string) []string {
+		t.Helper()
+		wrapper := filepath.Join(dir, "docker")
+		testutil.NoError(t, os.WriteFile(wrapper, []byte(cloudProviderDockerWrapper("junkloud-0123456789ab", compat, stub)), 0o755))
+		res, err := executil.Run(bg, wrapper, args, nil)
+		testutil.NoError(t, err)
+		return strings.Split(strings.TrimSuffix(string(res.Stdout), "\n"), "\n")
+	}
+	const owned = "junkloud-0123456789ab"
+	// kind ListClusters (sigs.k8s.io/kind v0.33.0 docker provider).
+	testutil.Equal(t, run(HostCompatNone, "ps", "-a", "--filter", "label=io.x-k8s.kind.cluster", "--format", `{{.Label "io.x-k8s.kind.cluster"}}`),
+		[]string{"ps", "-a", "--filter", "label=io.x-k8s.kind.cluster=" + owned, "--format", `{{.Label "io.x-k8s.kind.cluster"}}`})
+	// cloud-provider-kind's final cleanup of every load balancer container.
+	testutil.Equal(t, run(HostCompatNone, "ps", "-a", "--filter", "label=io.x-k8s.cloud-provider-kind.cluster", "--format", "{{.ID }}"),
+		[]string{"ps", "-a", "--filter", "label=io.x-k8s.cloud-provider-kind.cluster=" + owned, "--format", "{{.ID }}"})
+	testutil.Equal(t, run(HostCompatNone, "ps", "--filter=label=io.x-k8s.kind.cluster"),
+		[]string{"ps", "--filter=label=io.x-k8s.kind.cluster=" + owned})
+	// Per-cluster calls and labels with values pass through untouched.
+	pass := []string{"run", "--label", "io.x-k8s.cloud-provider-kind.cluster=" + owned, "--sysctl=net.ipv6.conf.all.forwarding=1", "a b", ""}
+	testutil.Equal(t, run(HostCompatNone, pass...), pass)
+	testutil.Equal(t, run(HostCompatNoIPv6, pass...), []string{"run", "--label", "io.x-k8s.cloud-provider-kind.cluster=" + owned, "a b", ""})
 }
 
 func configLabel(args []string) string {

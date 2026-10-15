@@ -50,15 +50,32 @@ func TestDoctorRequiresIdentity(t *testing.T) {
 	}
 }
 
-// routingServer imitates an Ingress data plane: only host/path is routed.
-func routingServer(t *testing.T, host, prefix, token string, anyHost bool) string {
+// probeBackend behaves like the doctor's probe server (busybox httpd over
+// /tmp/www): the token at / and /probe/ (and their index.html), 404
+// elsewhere.
+func probeBackend(token string) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/", "/index.html", "/probe/", "/probe/index.html":
+			_, _ = w.Write([]byte(token))
+		default:
+			http.NotFound(w, r)
+		}
+	})
+}
+
+// routingServer imitates an Ingress data plane in front of probeBackend:
+// only requests for host (unless anyHost) under prefix (unless anyPath)
+// are forwarded; the rest get the proxy's own 404.
+func routingServer(t *testing.T, host, prefix, token string, anyHost, anyPath bool) string {
 	t.Helper()
+	backend := probeBackend(token)
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if (anyHost || r.Host == host) && strings.HasPrefix(r.URL.Path, prefix) {
-			_, _ = w.Write([]byte(token + "\n"))
+		if (anyHost || r.Host == host) && (anyPath || strings.HasPrefix(r.URL.Path, prefix)) {
+			backend.ServeHTTP(w, r)
 			return
 		}
-		http.NotFound(w, r)
+		http.Error(w, "no route", http.StatusNotFound)
 	}))
 	t.Cleanup(srv.Close)
 	return strings.TrimPrefix(srv.URL, "http://")
@@ -66,24 +83,26 @@ func routingServer(t *testing.T, host, prefix, token string, anyHost bool) strin
 
 func TestCheckIngressRouting(t *testing.T) {
 	client := probeHTTPClient()
-	addr := routingServer(t, "probe-r1.junkloud.test", "/probe", "tok-r1", false)
-	testutil.NoError(t, checkIngressRouting(bg, client, addr, "probe-r1.junkloud.test", "/probe/", "tok-r1", 5*time.Second))
+	addr := routingServer(t, "probe-r1.junkloud.test", "/probe", "tok-r1", false, false)
+	testutil.NoError(t, checkIngressRouting(bg, client, addr, "probe-r1.junkloud.test", "/probe/", "/", "tok-r1", 5*time.Second))
 
 	// Wrong-host requests must not be routed to the backend.
-	loose := routingServer(t, "probe-r1.junkloud.test", "/probe", "tok-r1", true)
-	err := checkIngressRouting(bg, client, loose, "probe-r1.junkloud.test", "/probe/", "tok-r1", 5*time.Second)
+	loose := routingServer(t, "probe-r1.junkloud.test", "/probe", "tok-r1", true, false)
+	err := checkIngressRouting(bg, client, loose, "probe-r1.junkloud.test", "/probe/", "/", "tok-r1", 5*time.Second)
 	if err == nil || !strings.Contains(err.Error(), "host") {
 		t.Fatalf("host-ignoring router passed: %v", err)
 	}
-	// Wrong-path requests must not be routed either.
-	anyPath := routingServer(t, "probe-r1.junkloud.test", "/", "tok-r1", false)
-	err = checkIngressRouting(bg, client, anyPath, "probe-r1.junkloud.test", "/probe/", "tok-r1", 5*time.Second)
+	// Wrong-path requests must not be routed either. The backend answers
+	// the wrong path itself (like the real probe server at /), so a router
+	// that ignores paths is caught even though the backend 404s elsewhere.
+	anyPath := routingServer(t, "probe-r1.junkloud.test", "/probe", "tok-r1", false, true)
+	err = checkIngressRouting(bg, client, anyPath, "probe-r1.junkloud.test", "/probe/", "/", "tok-r1", 5*time.Second)
 	if err == nil || !strings.Contains(err.Error(), "path") {
 		t.Fatalf("path-ignoring router passed: %v", err)
 	}
 	// A backend that never answers with the token fails within the deadline.
 	start := time.Now()
-	err = checkIngressRouting(bg, client, addr, "probe-r1.junkloud.test", "/probe/", "other-token", 2*time.Second)
+	err = checkIngressRouting(bg, client, addr, "probe-r1.junkloud.test", "/probe/", "/", "other-token", 2*time.Second)
 	if err == nil {
 		t.Fatal("wrong token accepted")
 	}
@@ -97,7 +116,7 @@ func TestCheckIngressRouting(t *testing.T) {
 func TestProbeHTTPClientIgnoresProxy(t *testing.T) {
 	t.Setenv("HTTP_PROXY", "http://127.0.0.1:1")
 	t.Setenv("http_proxy", "http://127.0.0.1:1")
-	addr := routingServer(t, "h.junkloud.test", "/", "tok", false)
+	addr := routingServer(t, "h.junkloud.test", "/", "tok", false, false)
 	status, body, err := ingressRequest(bg, probeHTTPClient(), addr, "h.junkloud.test", "/")
 	testutil.NoError(t, err)
 	testutil.Equal(t, status, 200)
