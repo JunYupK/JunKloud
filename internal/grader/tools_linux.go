@@ -22,14 +22,14 @@ const (
 type execTools struct{ timeout time.Duration }
 
 // NewToolRunner returns the ToolRunner backed by internal/executil: no shell,
-// bounded time and output, and an environment without KUBECONFIG, so a tool
-// can only reach a cluster that its arguments name explicitly.
+// bounded time and output, and a child environment built by childEnv, so a
+// tool can only reach a cluster, identity and TLS setting that its arguments
+// name explicitly.
 func NewToolRunner() ToolRunner { return execTools{timeout: toolTimeout} }
 
 // Run implements ToolRunner.
 func (e execTools) Run(ctx context.Context, call ToolCall) (ToolResult, error) {
-	env := executil.EnvWithout(os.Environ(), "KUBECONFIG", "HELM_KUBECONFIG", "HELM_KUBECONTEXT")
-	env = append(env, call.Env...)
+	env := childEnv(call.Exe, os.Environ(), call.Env)
 	r := executil.Runner{Timeout: e.timeout, MaxOutput: toolMaxOutput, Env: env, Dir: call.Dir}
 	var stdin io.Reader
 	if len(call.Stdin) > 0 {

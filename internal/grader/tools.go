@@ -3,6 +3,8 @@ package grader
 import (
 	"context"
 	"errors"
+	"path/filepath"
+	"strings"
 )
 
 // External tools (docker, helm, kubectl, kind) are reached through a
@@ -38,4 +40,39 @@ type ToolResult struct {
 // exit (not found, timed out, output limit, cancelled).
 type ToolRunner interface {
 	Run(ctx context.Context, call ToolCall) (ToolResult, error)
+}
+
+// kubernetesTools are the programs that talk to a Kubernetes API (or read a
+// kubeconfig) and therefore get an allowlisted environment.
+var kubernetesTools = map[string]bool{"helm": true, "kubectl": true}
+
+// allowedEnv are the only variables a Kubernetes tool inherits: enough to
+// find programs and render text. Nothing in the process environment can then
+// redirect it to another API server or identity, change its namespace or
+// driver, or relax TLS verification (HELM_KUBEAPISERVER, HELM_KUBETOKEN,
+// HELM_KUBEASUSER, HELM_KUBECAFILE, HELM_KUBEINSECURE_SKIP_TLS_VERIFY,
+// HELM_DRIVER, HELM_NAMESPACE, KUBECONFIG, KUBECTL_*, proxies, ...).
+var allowedEnv = map[string]bool{"PATH": true, "HOME": true, "TMPDIR": true, "LANG": true, "TZ": true, "USER": true}
+
+// childEnv builds the environment of one tool run from the process
+// environment base and the call's own entries (extra, set by JunKloud, for
+// example private HELM_*_HOME cache directories).
+//
+// helm and kubectl: base is reduced to allowedEnv (plus LC_*). Any other tool
+// (docker, kind) keeps the process environment, which it needs to reach the
+// shared engine (DOCKER_HOST, DOCKER_CONFIG, ...), minus every HELM_*,
+// KUBE* and KUBECTL_* variable.
+func childEnv(exe string, base, extra []string) []string {
+	var out []string
+	strict := kubernetesTools[filepath.Base(exe)]
+	for _, kv := range base {
+		name, _, _ := strings.Cut(kv, "=")
+		switch {
+		case strict && (allowedEnv[name] || strings.HasPrefix(name, "LC_")):
+			out = append(out, kv)
+		case !strict && !strings.HasPrefix(name, "HELM_") && !strings.HasPrefix(name, "KUBE"):
+			out = append(out, kv)
+		}
+	}
+	return append(out, extra...)
 }
