@@ -133,13 +133,15 @@ func (SystemClock) Sleep(ctx context.Context, d time.Duration) error {
 type Option func(*settings)
 
 type settings struct {
-	clock          Clock
-	defaultTimeout time.Duration
-	parallelism    int
-	pollInterval   time.Duration
-	redactor       *Redactor
-	preloaded      []string
-	preloadedSet   bool // WithPreloadedImages was given, even if empty
+	clock            Clock
+	defaultTimeout   time.Duration
+	parallelism      int
+	pollInterval     time.Duration
+	redactor         *Redactor
+	preloaded        []string
+	preloadedSet     bool // WithPreloadedImages was given, even if empty
+	probeImage       string
+	controlNamespace string
 }
 
 // WithClock injects the clock (default SystemClock).
