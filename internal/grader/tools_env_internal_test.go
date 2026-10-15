@@ -1,6 +1,7 @@
 package grader
 
 import (
+	"os/exec"
 	"strings"
 	"testing"
 )
@@ -56,5 +57,49 @@ func TestOtherToolsKeepTheEngineButLoseKubernetesVariables(t *testing.T) {
 				t.Errorf("%s: ambient %s reached the child environment", exe, n)
 			}
 		}
+	}
+}
+
+// A nil Env makes os/exec (and executil.Runner) inherit the whole process
+// environment, which would silently undo the isolation whenever nothing is
+// allowed through. childEnv must return a non-nil slice, even an empty one.
+func TestChildEnvIsNeverNil(t *testing.T) {
+	cases := map[string]struct{ base, extra []string }{
+		"empty process environment":         {nil, nil},
+		"nothing allowlisted":               {[]string{"FOO=bar", "HELM_KUBETOKEN=x", "KUBECONFIG=/k"}, nil},
+		"only unrelated variables for helm": {[]string{"HTTPS_PROXY=http://p"}, nil},
+	}
+	for name, tc := range cases {
+		for _, exe := range []string{"helm", "kubectl", "docker", "kind"} {
+			got := childEnv(exe, tc.base, tc.extra)
+			if got == nil {
+				t.Errorf("%s/%s: childEnv returned a nil slice (the child would inherit os.Environ)", name, exe)
+			}
+		}
+		for _, exe := range []string{"helm", "kubectl"} {
+			if got := childEnv(exe, tc.base, tc.extra); len(got) != 0 {
+				t.Errorf("%s/%s: %v leaked through the allowlist", name, exe, got)
+			}
+		}
+	}
+}
+
+// End to end with os/exec: a helm-style child started with the computed
+// environment sees nothing of the parent's variables.
+func TestNothingIsInheritedWhenNothingIsAllowed(t *testing.T) {
+	env, err := exec.LookPath("env")
+	if err != nil {
+		t.Skip("env is not installed: NOT RUN")
+	}
+	t.Setenv("HELM_KUBETOKEN", "ambient-token")
+	t.Setenv("KUBECONFIG", "/ambient/kubeconfig")
+	cmd := exec.Command(env)
+	cmd.Env = childEnv("helm", []string{"HELM_KUBETOKEN=ambient-token", "KUBECONFIG=/ambient/kubeconfig"}, nil)
+	out, err := cmd.Output()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.TrimSpace(string(out)) != "" {
+		t.Errorf("the child inherited an environment: %q", out)
 	}
 }

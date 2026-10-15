@@ -527,10 +527,8 @@ spec:
 		e.expect(res, "template", "PASS")
 		e.expect(res, "wrongtemplate", "FAIL", "schedule")
 		// TestCronScheduleNotProvedByManualJob against the real controller.
-		e.expect(res, "manual", "FAIL", "does not fire within 75s", "do not prove the schedule")
-		if !strings.Contains(evidenceOf(t, res["manual"]), `"manual_jobs_ignored":1`) {
-			t.Fatalf("manual job not reported as ignored: %s", evidenceOf(t, res["manual"]))
-		}
+		// R23: the yearly schedule is not the declared per-minute one, whatever jobs exist.
+		e.expect(res, "manual", "FAIL", "does not mean the expected schedule")
 		e.expect(res, "ticks", "PASS")
 	})
 
@@ -768,12 +766,6 @@ func captureProcessOutput(t *testing.T) func() string {
 	}
 	t.Cleanup(func() { stop() })
 	return stop
-}
-
-func evidenceOf(t *testing.T, r model.CheckResult) string {
-	raw, err := json.Marshal(r.Evidence.Actual)
-	testutil.NoError(t, err)
-	return string(raw)
 }
 
 func goarch() string {

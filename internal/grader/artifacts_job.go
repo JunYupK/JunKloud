@@ -414,11 +414,16 @@ const (
 //	          controller latency, and at most 120s, so only schedules that
 //	          fire at least every ~110s can be observed. Slower schedules
 //	          must be graded with cronjob-template.
+//	time_zone: optional IANA zone the expected schedule is read in (default
+//	          UTC, or CRON_TZ= in schedule). Irrelevant for a per-minute schedule.
 //	window:   REQUIRED, 5s..120s: how long the grader watches. The criterion's
 //	          own timeout must exceed it by 10s.
 //
-// What the grader does: from the LIVE CronJob (schedule and spec.timeZone;
-// UTC when none) it computes the fire times due inside the window.
+// What the grader does: it first compares the LIVE CronJob (spec.schedule and
+// spec.timeZone) with the declared schedule by meaning ("*/1 * * * *" equals
+// "* * * * *"): a different schedule, slower or not, is FAIL at once with
+// both shown, whatever the clock phase. Only then, from the live schedule, it
+// computes the fire times due inside the window.
 //   - a Job created by the CronJob controller appears: PASS;
 //   - no fire is due inside the window (the learner's schedule is slower than
 //     the window): FAIL, without waiting;
@@ -437,6 +442,7 @@ const (
 //     ignored.
 type cronScheduleArgs struct {
 	Schedule string `json:"schedule"`
+	TimeZone string `json:"time_zone"`
 	Window   string `json:"window"`
 
 	window time.Duration
@@ -465,6 +471,11 @@ func parseCronScheduleArgs(crit model.Criterion, defaultTimeout time.Duration) (
 	if err != nil {
 		return a, invalidf("args.schedule: %v", err)
 	}
+	if a.TimeZone != "" {
+		if _, err := time.LoadLocation(a.TimeZone); err != nil {
+			return a, invalidf("args.time_zone %q is not an IANA time zone", a.TimeZone)
+		}
+	}
 	if gap := spec.maxGap(); gap+schedulePeriodSlack > d {
 		if gap >= longGap {
 			return a, invalidf("args.schedule %q does not fire at least twice a week, so no window can observe it; grade it with cronjob-template", a.Schedule)
@@ -485,6 +496,16 @@ func parseCronScheduleArgs(crit model.Criterion, defaultTimeout time.Duration) (
 type cronRun struct {
 	Job       string `json:"job"`
 	Scheduled string `json:"scheduled_at"`
+}
+
+func zoneName(a cronScheduleArgs) string {
+	if a.TimeZone != "" {
+		return a.TimeZone
+	}
+	if s, err := parseCron(a.Schedule); err == nil && s.tz != "" {
+		return s.tz
+	}
+	return "UTC"
 }
 
 func (c *ArtifactChecker) checkCronSchedule(ctx context.Context, t Target, crit model.Criterion) (model.CheckResult, error) {
@@ -528,6 +549,15 @@ func (c *ArtifactChecker) checkCronSchedule(ctx context.Context, t Target, crit 
 	loc, err := liveSpec.location(zone)
 	if err != nil {
 		return model.CheckResult{}, fmt.Errorf("%w: %v", ErrInsufficientEvidence, err)
+	}
+	same, err := cronEquivalent(a.Schedule, a.TimeZone, liveSchedule, zone)
+	if err != nil {
+		return model.CheckResult{}, fmt.Errorf("%w: %v", ErrInsufficientEvidence, err)
+	}
+	expected["time_zone"] = a.TimeZone
+	if !same {
+		return finish(false, fmt.Sprintf("the CronJob's schedule %q (%s) does not mean the expected schedule %q (%s)",
+			liveSchedule, loc.String(), a.Schedule, zoneName(a)), map[string]any{"schedule": liveSchedule, "time_zone": loc.String()}), nil
 	}
 	deadline := start.Add(a.window)
 	due := liveSpec.dueBetween(start, deadline, loc)
@@ -598,8 +628,10 @@ func (c *ArtifactChecker) checkCronSchedule(ctx context.Context, t Target, crit 
 	case len(runs) >= 1:
 		return finish(true, "", actual), nil
 	case len(due) == 0:
-		return finish(false, fmt.Sprintf("the CronJob's schedule %q does not fire within %s, so the expected schedule %q is not met (Jobs made by hand from the CronJob do not prove the schedule)",
-			liveSchedule, a.Window, a.Schedule), actual), nil
+		// The schedule equals the expected one and the window covers a period,
+		// so this is unreachable for valid criteria; kept as a safe verdict.
+		return finish(false, fmt.Sprintf("the CronJob's schedule %q does not fire within %s (Jobs made by hand from the CronJob do not prove the schedule)",
+			liveSchedule, a.Window), actual), nil
 	}
 	return model.CheckResult{}, fmt.Errorf("%w: a run of schedule %q was due at %s within the %s window but the CronJob controller created no Job (a late controller or a skipped run is not proven to be the answer's fault)",
 		ErrInsufficientEvidence, liveSchedule, strings.Join(dueText, ", "), a.Window)

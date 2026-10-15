@@ -73,3 +73,31 @@ func TestCronMaxGap(t *testing.T) {
 	c, _ := parseCron("0 0 1 1 *")
 	testutil.Equal(t, c.maxGap() > 24*time.Hour*7, true) // not once a week: treated as longer than any window
 }
+
+func TestCronEquivalentWithZones(t *testing.T) {
+	for _, tc := range []struct {
+		expected, expZone, live, liveZone string
+		same                              bool
+	}{
+		{"0 9 * * *", "Asia/Seoul", "0 9 * * *", "Asia/Seoul", true},
+		{"0 9 * * *", "Asia/Seoul", "CRON_TZ=Asia/Seoul 0 9 * * *", "", true},
+		{"0 9 * * *", "", "0 9 * * *", "UTC", true},
+		{"0 9 * * *", "", "0 9 * * *", "Etc/UTC", true},
+		{"0 9 * * *", "", "0 9 * * *", "Asia/Seoul", false},
+		{"0 9 * * *", "Asia/Seoul", "0 9 * * *", "", false},
+		{"@daily", "", "0 0 * * *", "", true},
+		{"@daily", "", "0 1 * * *", "", false},
+		{"* * * * *", "Asia/Seoul", "*/1 * * * *", "America/New_York", true}, // every minute: zone-free
+		{"* * * * *", "", "* * * * 1-5", "", false},
+		{"*/2 * * * *", "", "* * * * *", "", false},
+	} {
+		same, err := cronEquivalent(tc.expected, tc.expZone, tc.live, tc.liveZone)
+		testutil.NoError(t, err)
+		if same != tc.same {
+			t.Errorf("%q [%s] vs %q [%s] = %t, want %t", tc.expected, tc.expZone, tc.live, tc.liveZone, same, tc.same)
+		}
+	}
+	if _, err := cronEquivalent("* * * * *", "", "* * * * *", "Mars/Olympus"); err == nil {
+		t.Error("an unknown zone must be an error")
+	}
+}

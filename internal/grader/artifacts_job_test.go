@@ -230,9 +230,25 @@ func gradeSchedule(t testing.TB, steps [][]map[string]any, window string, cron m
 	return ev.Results[0], r, clock
 }
 
+// gradeScheduleAt grades a cronjob-schedule criterion expecting `expected`
+// against a live CronJob, with the fake clock moved `phase` after 00:00:00.
+func gradeScheduleAt(t testing.TB, steps [][]map[string]any, window, expected string, phase time.Duration, cron map[string]any) (model.CheckResult, *seqReader, *fakeClock) {
+	t.Helper()
+	r := &seqReader{fakeReader: newReader().put(cronRef, cron), steps: steps}
+	clock := newClock()
+	clock.now = clock.now.Add(phase)
+	eng, _ := artifactEngine(grader.ArtifactConfig{Reader: r}, clock)
+	c := scheduleCrit(window)
+	c.Args["schedule"] = expected
+	ev, err := eng.Evaluate(context.Background(), artifactTarget("", c))
+	testutil.NoError(t, err)
+	return ev.Results[0], r, clock
+}
+
 // TestCronScheduleNotProvedByManualJob: the original fixture is a Job the
 // CronJob controller created during the window; the wrong answers are jobs a
-// person made from the CronJob or forged by hand.
+// person made from the CronJob or forged by hand. None of them counts, and a
+// missing controller run is never a PASS.
 func TestCronScheduleNotProvedByManualJob(t *testing.T) {
 	cron := cronDoc(t, "* * * * *", "")
 	t.Run("the controller fired during the window", func(t *testing.T) {
@@ -240,43 +256,41 @@ func TestCronScheduleNotProvedByManualJob(t *testing.T) {
 		testutil.Equal(t, res.Status, "PASS")
 		testutil.Equal(t, res.Points, 4)
 	})
-	t.Run("a manual job proves nothing", func(t *testing.T) {
-		// The live schedule cannot fire in the window, so nothing was due; the
-		// manual job is the only Job and proves nothing.
-		res, _, _ := gradeSchedule(t, [][]map[string]any{{manualJob(t, "nightly-manual")}}, "90s", cronNever(t))
-		testutil.Equal(t, res.Status, "FAIL")
-		reasonHas(t, res, "does not fire within", "90s", "do not prove the schedule")
-		if !strings.Contains(evidenceJSON(t, res), "manual") {
+	t.Run("a manual job next to a controller job is listed as ignored", func(t *testing.T) {
+		m := manualJob(t, "nightly-manual")
+		res, _, _ := gradeSchedule(t, [][]map[string]any{{m}, {m}, {m, firedJob(t, "nightly-1")}}, "90s", cron)
+		testutil.Equal(t, res.Status, "PASS")
+		if !strings.Contains(evidenceJSON(t, res), `"manual_jobs_ignored":1`) {
 			t.Errorf("evidence does not mention the ignored manual job: %s", evidenceJSON(t, res))
 		}
 	})
-	t.Run("a manual job that existed before the window is still reported as ignored", func(t *testing.T) {
+	t.Run("a manual job alone proves nothing", func(t *testing.T) {
+		m := manualJob(t, "nightly-manual")
+		res, _, _ := gradeSchedule(t, [][]map[string]any{{m}, {m}}, "90s", cron)
+		testutil.Equal(t, res.Status, "ERROR") // a run was due and the controller made none: never PASS
+		reasonHas(t, res, "was due")
+	})
+	t.Run("a manual job cannot rescue a wrong schedule", func(t *testing.T) {
 		m := manualJob(t, "nightly-manual")
 		res, _, _ := gradeSchedule(t, [][]map[string]any{{m}, {m}}, "90s", cronNever(t))
 		testutil.Equal(t, res.Status, "FAIL")
-		if !strings.Contains(evidenceJSON(t, res), `"manual_jobs_ignored":1`) {
-			t.Errorf("evidence: %s", evidenceJSON(t, res))
-		}
+		reasonHas(t, res, "does not mean")
 	})
 	t.Run("a job with the scheduled annotation written by a person", func(t *testing.T) {
 		forged := cronChild(t, "nightly-forged", "kubectl-client-side-apply", map[string]string{scheduledAnnotation: "2026-10-15T00:01:00Z"})
-		res, _, _ := gradeSchedule(t, [][]map[string]any{nil, {forged}}, "90s", cronNever(t))
-		testutil.Equal(t, res.Status, "FAIL")
-		// And when a run WAS due, a forged job does not turn the missing run into a pass.
-		res, _, _ = gradeSchedule(t, [][]map[string]any{nil, {forged}}, "90s", cron)
+		res, _, _ := gradeSchedule(t, [][]map[string]any{nil, {forged}}, "90s", cron)
 		testutil.Equal(t, res.Status, "ERROR")
 	})
 	t.Run("a job owned by another cronjob", func(t *testing.T) {
 		other := firedJob(t, "other-1")
 		other["metadata"].(map[string]any)["ownerReferences"] = []any{map[string]any{"kind": "CronJob", "name": "other", "uid": "cron-9", "controller": true}}
-		res, _, _ := gradeSchedule(t, [][]map[string]any{nil, {other}}, "90s", cronNever(t))
-		testutil.Equal(t, res.Status, "FAIL")
+		res, _, _ := gradeSchedule(t, [][]map[string]any{nil, {other}}, "90s", cron)
+		testutil.Equal(t, res.Status, "ERROR")
 	})
 	t.Run("jobs from before the window do not count", func(t *testing.T) {
 		old := firedJob(t, "nightly-old")
-		res, _, _ := gradeSchedule(t, [][]map[string]any{{old}, {old}, {old}}, "90s", cronNever(t))
-		testutil.Equal(t, res.Status, "FAIL")
-		reasonHas(t, res, "does not fire")
+		res, _, _ := gradeSchedule(t, [][]map[string]any{{old}, {old}, {old}}, "90s", cron)
+		testutil.Equal(t, res.Status, "ERROR")
 	})
 	t.Run("an old job and a new one: only the new one counts", func(t *testing.T) {
 		old := firedJob(t, "nightly-old")
@@ -316,31 +330,74 @@ func TestCronScheduleNotProvedByManualJob(t *testing.T) {
 	})
 }
 
+// TestCronScheduleWindowIsExplicit: every rejected case below is otherwise
+// valid (a good schedule, window and timeout), so each isolates the one rule
+// whose message it asserts.
 func TestCronScheduleWindowIsExplicit(t *testing.T) {
 	ck := grader.NewArtifactChecker(grader.ArtifactConfig{})
 	mk := func(args map[string]any, timeout time.Duration) model.Criterion {
-		c := scheduleCrit("60s")
-		c.Args = args
+		a := map[string]any{"schedule": "* * * * *", "window": "90s"}
+		for k, v := range args {
+			if v == nil {
+				delete(a, k)
+			} else {
+				a[k] = v
+			}
+		}
+		c := scheduleCrit("90s")
+		c.Args = a
 		c.Timeout = timeout
 		return c
 	}
-	bad := map[string]model.Criterion{
-		"no window":         mk(map[string]any{}, 100*time.Second),
-		"window above 120s": mk(map[string]any{"window": "130s"}, 300*time.Second),
-		"window below 5s":   mk(map[string]any{"window": "2s"}, 100*time.Second),
-		"not a duration":    mk(map[string]any{"window": "soon"}, 100*time.Second),
-		"timeout shorter":   mk(map[string]any{"window": "90s"}, 95*time.Second),
-		"default timeout":   mk(map[string]any{"window": "90s"}, 0),
-		"too many runs":     mk(map[string]any{"window": "60s", "min_runs": 9}, 100*time.Second),
-		"unknown key":       mk(map[string]any{"window": "60s", "bogus": 1}, 100*time.Second),
-		"wrong target kind": func() model.Criterion { c := scheduleCrit("60s"); c.Target = jobRef; return c }(),
+	good := 100 * time.Second
+	bad := []struct {
+		name string
+		c    model.Criterion
+		want string // the rule the error must name
+	}{
+		{"no window", mk(map[string]any{"window": nil}, good), "args.window is required"},
+		{"no expected schedule", mk(map[string]any{"schedule": nil}, good), "args.schedule is required"},
+		{"unparsable expected schedule", mk(map[string]any{"schedule": "61 * * * *"}, good), "args.schedule"},
+		{"unknown time zone", mk(map[string]any{"time_zone": "Mars/Olympus"}, good), "args.time_zone"},
+		{"window above 120s", mk(map[string]any{"window": "130s"}, 300*time.Second), "must be a duration of"},
+		{"window below 5s", mk(map[string]any{"window": "2s"}, good), "must be a duration of"},
+		{"window not a duration", mk(map[string]any{"window": "soon"}, good), "must be a duration of"},
+		{"criterion timeout only 5s above the window", mk(nil, 95*time.Second), "must exceed args.window"},
+		{"default timeout (30s) is shorter than the window", mk(nil, 0), "must exceed args.window"},
+		{"unknown key", mk(map[string]any{"bogus": 1}, good), "bogus"},
+		{"min_runs no longer exists", mk(map[string]any{"min_runs": 1}, good), "min_runs"},
+		{"window of one period (60s) leaves no slack", mk(map[string]any{"window": "60s"}, 80*time.Second), "cannot cover one period (1m0s)"},
+		{"69s is still below period + 10s", mk(map[string]any{"window": "69s"}, 80*time.Second), "at least 1m10s"},
+		{"every two minutes needs 130s", mk(map[string]any{"schedule": "*/2 * * * *", "window": "70s"}, 100*time.Second), "cannot cover one period (2m0s)"},
+		{"every two minutes cannot fit the 120s maximum", mk(map[string]any{"schedule": "*/2 * * * *", "window": "120s"}, 140*time.Second), "cannot cover one period (2m0s)"},
+		{"hourly with a short window", mk(map[string]any{"schedule": "0 * * * *", "window": "90s"}, good), "cannot cover one period (1h0m0s)"},
+		{"daily", mk(map[string]any{"schedule": "@daily", "window": "120s"}, 140*time.Second), "cannot cover one period (24h0m0s)"},
+		{"yearly is rejected by the long-gap rule", mk(map[string]any{"schedule": "0 0 1 1 *", "window": "120s"}, 140*time.Second), "does not fire at least twice a week"},
+		{"monthly is rejected by the long-gap rule", mk(map[string]any{"schedule": "0 0 1 * *", "window": "120s"}, 140*time.Second), "does not fire at least twice a week"},
+		{"wrong target kind", func() model.Criterion { c := mk(nil, good); c.Target = jobRef; return c }(), "CronJob"},
 	}
-	for name, c := range bad {
-		if err := ck.ValidateCriterion(c); !isInvalid(err) {
-			t.Errorf("%s: err = %v", name, err)
+	for _, tc := range bad {
+		t.Run(tc.name, func(t *testing.T) {
+			err := ck.ValidateCriterion(tc.c)
+			if !isInvalid(err) {
+				t.Fatalf("err = %v, want ErrInvalidCriterion", err)
+			}
+			if !strings.Contains(err.Error(), tc.want) {
+				t.Fatalf("error %q does not name the rule %q", err, tc.want)
+			}
+		})
+	}
+	for name, c := range map[string]model.Criterion{
+		"the minimal valid window (period + slack = 70s, timeout +10s)": mk(map[string]any{"window": "70s"}, 80*time.Second),
+		"a longer window":                              mk(map[string]any{"window": "120s"}, 130*time.Second),
+		"an equivalent way to write every minute":      mk(map[string]any{"schedule": "*/1 * * * *", "window": "70s"}, 80*time.Second),
+		"two fires a minute apart inside an hour":      mk(map[string]any{"schedule": "0-59 * * * *", "window": "90s"}, good),
+		"with a declared zone (irrelevant per minute)": mk(map[string]any{"time_zone": "Asia/Seoul"}, good),
+	} {
+		if err := ck.ValidateCriterion(c); err != nil {
+			t.Errorf("%s: %v", name, err)
 		}
 	}
-	testutil.NoError(t, ck.ValidateCriterion(mk(map[string]any{"schedule": "* * * * *", "window": "70s"}, 80*time.Second)))
 }
 
 func TestJobArgsAreStrict(t *testing.T) {
@@ -386,24 +443,48 @@ func TestCronScheduleDueButLateIsNotAFail(t *testing.T) {
 		res, _, _ := gradeSchedule(t, [][]map[string]any{nil, nil, {firedJob(t, "nightly-1")}}, "90s", cronDoc(t, "* * * * *", ""))
 		testutil.Equal(t, res.Status, "PASS")
 	})
-	t.Run("not due in the window is the learner's schedule", func(t *testing.T) {
-		res, _, clock := gradeSchedule(t, [][]map[string]any{nil}, "90s", cronDoc(t, "*/5 * * * *", ""))
-		testutil.Equal(t, res.Status, "FAIL")
-		reasonHas(t, res, "does not fire within 90s", "*/5 * * * *")
-		testutil.Equal(t, clock.slept() < 5*time.Second, true) // nothing to wait for
-	})
-	t.Run("the time zone of the CronJob decides when it is due", func(t *testing.T) {
-		// 00:00:00 UTC is 09:00:00 in Seoul: "1 9 * * *" in Asia/Seoul is due
-		// at 09:01 local, inside the window; in UTC it would not be.
-		seoul := cronDoc(t, "1 9 * * *", `,"timeZone":"Asia/Seoul"`)
-		res, _, _ := gradeSchedule(t, [][]map[string]any{nil}, "90s", seoul)
-		testutil.Equal(t, res.Status, "ERROR")
-		utc := cronDoc(t, "1 9 * * *", "")
-		res, _, _ = gradeSchedule(t, [][]map[string]any{nil}, "90s", utc)
-		testutil.Equal(t, res.Status, "FAIL")
-	})
 	t.Run("an unknown time zone cannot be judged", func(t *testing.T) {
 		res, _, _ := gradeSchedule(t, [][]map[string]any{nil}, "90s", cronDoc(t, "* * * * *", `,"timeZone":"Mars/Olympus"`))
 		testutil.Equal(t, res.Status, "ERROR")
+	})
+}
+
+// R23: the live schedule must be the declared one before anything is observed.
+// Whatever the clock phase, a different schedule is the learner's FAIL with
+// both shown; the same schedule written another way is accepted.
+func TestCronScheduleMustMatchTheDeclaredSchedule(t *testing.T) {
+	phases := []time.Duration{0, 1 * time.Second, 30 * time.Second, 59 * time.Second, 61 * time.Second, 90 * time.Second, 119 * time.Second}
+	t.Run("a slower schedule fails at every clock phase", func(t *testing.T) {
+		for _, live := range []string{"*/2 * * * *", "*/5 * * * *", "0 * * * *", "0 0 1 1 *", "* * * * 1-5", "30 * * * *"} {
+			for _, phase := range phases {
+				// A controller Job that happens to appear must not rescue it.
+				res, _, clock := gradeScheduleAt(t, [][]map[string]any{nil, {firedJob(t, "late-1")}}, "70s", "* * * * *", phase, cronDoc(t, live, ""))
+				if res.Status != "FAIL" {
+					t.Fatalf("live %q at phase %s: %s (%s), want FAIL", live, phase, res.Status, res.Reason)
+				}
+				reasonHas(t, res, "does not mean", live, "* * * * *")
+				testutil.Equal(t, clock.slept() < 2*time.Second, true) // decided before any observation
+				ev := evidenceJSON(t, res)
+				if !strings.Contains(ev, `"schedule":"`+live+`"`) || !strings.Contains(ev, `"expected":{`) {
+					t.Fatalf("evidence lacks expected vs actual: %s", ev)
+				}
+			}
+		}
+	})
+	t.Run("the same schedule written differently proceeds", func(t *testing.T) {
+		for _, live := range []string{"* * * * *", "*/1 * * * *", "0-59 * * * *", "* * * * ?", "* * * * 0-7", "* 0-23 * * *", "*/1 */1 * * *"} {
+			res, _, _ := gradeSchedule(t, [][]map[string]any{nil, nil, {firedJob(t, "nightly-1")}}, "90s", cronDoc(t, live, ""))
+			if res.Status != "PASS" {
+				t.Fatalf("live %q: %s (%s), want PASS", live, res.Status, res.Reason)
+			}
+		}
+	})
+	t.Run("an equal schedule that then does not fire is not the learner's fault", func(t *testing.T) {
+		res, _, _ := gradeSchedule(t, [][]map[string]any{nil}, "90s", cronDoc(t, "*/1 * * * *", ""))
+		testutil.Equal(t, res.Status, "ERROR")
+	})
+	t.Run("a per-minute schedule is the same in every zone", func(t *testing.T) {
+		res, _, _ := gradeSchedule(t, [][]map[string]any{nil, {firedJob(t, "n-1")}}, "90s", cronDoc(t, "* * * * *", `,"timeZone":"Asia/Seoul"`))
+		testutil.Equal(t, res.Status, "PASS")
 	})
 }

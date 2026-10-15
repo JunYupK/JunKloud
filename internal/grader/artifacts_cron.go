@@ -138,31 +138,107 @@ func cronItem(item string, field, lo, hi int, set []bool, star *bool) error {
 	return nil
 }
 
-// cronEqual reports whether two schedules fire at exactly the same times.
-func cronEqual(a, b string) (bool, error) {
-	x, err := parseCron(a)
-	if err != nil {
-		return false, err
+// dayMatches applies the day-of-month / day-of-week rule: when either field
+// was written with a star both must match, otherwise either may.
+func (c cronSpec) dayMatches(dom, dow int) bool {
+	d, w := c.fields[2][dom], c.fields[4][dow]
+	if c.domStar || c.dowStar {
+		return d && w
 	}
-	y, err := parseCron(b)
-	if err != nil {
-		return false, err
-	}
-	if x.tz != y.tz || x.domStar != y.domStar || x.dowStar != y.dowStar {
-		return false, nil
-	}
-	for i := range x.fields {
-		if len(x.fields[i]) != len(y.fields[i]) {
-			return false, nil
-		}
-		for v := range x.fields[i] {
-			if x.fields[i][v] != y.fields[i][v] {
-				return false, nil
+	return d || w
+}
+
+// sameTimes: the same minutes, hours, days and months (zones are not
+// compared here).
+func (c cronSpec) sameTimes(o cronSpec) bool {
+	// Days are compared by their effect, not by how they were written: with
+	// a star in either day field both must match, with none either may.
+	for dom := 1; dom <= 31; dom++ {
+		for dow := 0; dow <= 6; dow++ {
+			if c.dayMatches(dom, dow) != o.dayMatches(dom, dow) {
+				return false
 			}
 		}
 	}
-	return true, nil
+	for i := range c.fields {
+		if i == 2 || i == 4 {
+			continue
+		}
+		if len(c.fields[i]) != len(o.fields[i]) {
+			return false
+		}
+		for v := range c.fields[i] {
+			if c.fields[i][v] != o.fields[i][v] {
+				return false
+			}
+		}
+	}
+	return true
 }
+
+// everyMinute: fires at every minute of every day, so no zone changes when.
+func (c cronSpec) everyMinute() bool {
+	for i, b := range cronBounds {
+		hi := b[1]
+		if i == 4 {
+			hi = 6 // 7 is folded into 0
+		}
+		for v := b[0]; v <= hi; v++ {
+			if !c.fields[i][v] {
+				return false
+			}
+		}
+	}
+	return true
+}
+
+// cronEquivalent reports whether the live schedule (with the CronJob's
+// spec.timeZone) fires at exactly the times of the expected one (with its
+// declared zone). A zone is taken from CRON_TZ= when not given separately;
+// none means UTC. A schedule that fires every minute is the same in any zone.
+func cronEquivalent(expected, expectedZone, live, liveZone string) (bool, error) {
+	x, err := parseCron(expected)
+	if err != nil {
+		return false, err
+	}
+	y, err := parseCron(live)
+	if err != nil {
+		return false, err
+	}
+	if !x.sameTimes(y) {
+		return false, nil
+	}
+	xl, err := x.location(expectedZone)
+	if err != nil {
+		return false, err
+	}
+	yl, err := y.location(liveZone)
+	if err != nil {
+		return false, err
+	}
+	if x.everyMinute() {
+		return true, nil
+	}
+	return sameZone(xl, yl), nil
+}
+
+// sameZone: both zones have the same UTC offset at 26 instants spread over
+// two years (so "UTC" equals "Etc/UTC", and DST rules count).
+func sameZone(a, b *time.Location) bool {
+	for i := 0; i < 26; i++ {
+		t := time.Date(2026, 1, 1, 12, 0, 0, 0, time.UTC).AddDate(0, 0, 28*i)
+		_, oa := t.In(a).Zone()
+		_, ob := t.In(b).Zone()
+		if oa != ob {
+			return false
+		}
+	}
+	return true
+}
+
+// cronEqual reports whether two schedules (zones given as CRON_TZ=) fire at
+// exactly the same times.
+func cronEqual(a, b string) (bool, error) { return cronEquivalent(a, "", b, "") }
 
 // location is the zone the schedule is read in: the CronJob's spec.timeZone
 // (or CRON_TZ= in the schedule), else UTC, which is the controller manager's
@@ -187,11 +263,7 @@ func (c cronSpec) matches(t time.Time) bool {
 	if !c.fields[0][t.Minute()] || !c.fields[1][t.Hour()] || !c.fields[3][int(t.Month())] {
 		return false
 	}
-	dom, dow := c.fields[2][t.Day()], c.fields[4][int(t.Weekday())]
-	if c.domStar || c.dowStar {
-		return dom && dow
-	}
-	return dom || dow
+	return c.dayMatches(t.Day(), int(t.Weekday()))
 }
 
 // dueBetween lists the fire times in (from, to], in zone loc.

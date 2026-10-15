@@ -63,7 +63,10 @@ var allowedEnv = map[string]bool{"PATH": true, "HOME": true, "TMPDIR": true, "LA
 // shared engine (DOCKER_HOST, DOCKER_CONFIG, ...), minus every HELM_*,
 // KUBE* and KUBECTL_* variable.
 func childEnv(exe string, base, extra []string) []string {
-	var out []string
+	// Never nil: executil.Runner (and os/exec) inherit the whole process
+	// environment from a nil Env, which would defeat the isolation whenever
+	// nothing is allowed through.
+	out := []string{}
 	strict := kubernetesTools[filepath.Base(exe)]
 	for _, kv := range base {
 		name, _, _ := strings.Cut(kv, "=")
