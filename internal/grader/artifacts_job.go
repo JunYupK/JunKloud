@@ -633,8 +633,13 @@ func (c *ArtifactChecker) checkCronSchedule(ctx context.Context, t Target, crit 
 		return finish(false, fmt.Sprintf("the CronJob's schedule %q does not fire within %s (Jobs made by hand from the CronJob do not prove the schedule)",
 			liveSchedule, a.Window), actual), nil
 	}
-	return model.CheckResult{}, fmt.Errorf("%w: a run of schedule %q was due at %s within the %s window but the CronJob controller created no Job (a late controller or a skipped run is not proven to be the answer's fault)",
-		ErrInsufficientEvidence, liveSchedule, strings.Join(dueText, ", "), a.Window)
+	// Not provable either way: ERROR (spec 8.1), with what was observed (the
+	// manual Jobs that were ignored) kept as evidence.
+	res := finish(false, "", actual)
+	res.Status = model.StatusError
+	res.Reason = fmt.Errorf("%w: a run of schedule %q was due at %s within the %s window but the CronJob controller created no Job (a late controller or a skipped run is not proven to be the answer's fault)",
+		ErrInsufficientEvidence, liveSchedule, strings.Join(dueText, ", "), a.Window).Error()
+	return res, nil
 }
 
 type runKind int

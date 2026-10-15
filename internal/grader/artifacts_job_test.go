@@ -270,6 +270,27 @@ func TestCronScheduleNotProvedByManualJob(t *testing.T) {
 		testutil.Equal(t, res.Status, "ERROR") // a run was due and the controller made none: never PASS
 		reasonHas(t, res, "was due")
 	})
+	// The real scenario: `kubectl create job --from=cronjob/...` while the
+	// grader is already watching. The Job appears after the baseline list, so
+	// only its classification keeps it from counting as a run.
+	t.Run("a manual job created mid-window proves nothing", func(t *testing.T) {
+		m := manualJob(t, "nightly-manual-now")
+		res, _, _ := gradeSchedule(t, [][]map[string]any{nil, nil, {m}}, "90s", cron)
+		testutil.Equal(t, res.Status, "ERROR") // never PASS
+		reasonHas(t, res, "insufficient evidence", "was due")
+		if !strings.Contains(evidenceJSON(t, res), `"manual_jobs_ignored":1`) {
+			t.Errorf("evidence does not list the ignored manual job: %s", evidenceJSON(t, res))
+		}
+	})
+	t.Run("a manual job and a controller job both created mid-window: only the controller job counts", func(t *testing.T) {
+		m, fired := manualJob(t, "nightly-manual-now"), firedJob(t, "nightly-1")
+		res, _, _ := gradeSchedule(t, [][]map[string]any{nil, nil, {m, fired}}, "90s", cron)
+		testutil.Equal(t, res.Status, "PASS")
+		ev := evidenceJSON(t, res)
+		if !strings.Contains(ev, `"manual_jobs_ignored":1`) || !strings.Contains(ev, `"runs_observed":1`) || !strings.Contains(ev, "nightly-1") || strings.Contains(ev, `"job":"nightly-manual-now"`) {
+			t.Errorf("evidence: %s", ev)
+		}
+	})
 	t.Run("a manual job cannot rescue a wrong schedule", func(t *testing.T) {
 		m := manualJob(t, "nightly-manual")
 		res, _, _ := gradeSchedule(t, [][]map[string]any{{m}, {m}}, "90s", cronNever(t))

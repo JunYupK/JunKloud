@@ -512,6 +512,9 @@ spec:
 		// A Job made by hand from the CronJob: it exists and even completes.
 		e.kubectl("", "create", "job", "manual-1", "--from=cronjob/yearly", "-n", artNamespace)
 		e.kubectl("", "wait", "--for=condition=Complete", "job/manual-1", "-n", artNamespace, "--timeout=120s")
+		// The per-minute CronJob gets one by hand too: the real controller's Jobs
+		// and this one differ only by their annotations and writer.
+		e.kubectl("", "create", "job", "manual-2", "--from=cronjob/ticker", "-n", artNamespace)
 
 		res := e.grade("", nil,
 			crit("job", model.CriterionJob, 2, nsRef("batch/v1", "Job", "report"), map[string]any{"succeeded": 1}, 90*time.Second),
@@ -530,6 +533,9 @@ spec:
 		// R23: the yearly schedule is not the declared per-minute one, whatever jobs exist.
 		e.expect(res, "manual", "FAIL", "does not mean the expected schedule")
 		e.expect(res, "ticks", "PASS")
+		if actual := evidenceJSON(t, res["ticks"]); !strings.Contains(actual, `"manual_jobs_ignored":1`) || !strings.Contains(actual, `"runs_observed":1`) {
+			t.Fatalf("the hand-made Job of the per-minute CronJob must be ignored and the controller's Job counted once: %s", actual)
+		}
 	})
 
 	t.Run("Authorization", func(t *testing.T) {
