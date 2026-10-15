@@ -197,17 +197,17 @@ Task 2에서 `internal/model`에 아래 타입을 정의한다. 패키지 간에
 
 **Interfaces:** Produces `grader.Checker` with `Check(context.Context,Target,model.Criterion) (model.CheckResult,error)`; `Target{Identity model.Identity; Problem model.FrozenProblem; Workspace string}`; `NewEngine(checkers map[string]Checker) *Engine`; `Engine.Evaluate(ctx,Target) (model.Evaluation,error)`. unit tests용 fake Checker는 test 파일에서 정의한다.
 
-- [ ] **실패 테스트 작성:** `TestPartialScore`, `TestErrorKeepsScorePending`, `TestQuantityEquivalence`, `TestObservedGeneration`, `TestEvidenceRedaction`. 2+2+2+4 배점 fixture에서 PASS 2개(2·4), FAIL 2개는 6/10이고 ERROR가 하나 생기면 Score=nil이다.
+- [x] **실패 테스트 작성:** `TestPartialScore`, `TestErrorKeepsScorePending`, `TestQuantityEquivalence`, `TestObservedGeneration`, `TestEvidenceRedaction`. 2+2+2+4 배점 fixture에서 PASS 2개(2·4), FAIL 2개는 6/10이고 ERROR가 하나 생기면 Score=nil이다.
   ```go
   testutil.Equal(t, *graded.Score, 6)
   testutil.Equal(t, pending.Score, (*int)(nil))
   testutil.Equal(t, pending.Complete, false)
   testutil.Equal(t, strings.Contains(encodedEvidence, "secret-canary-value"), false)
   ```
-- [ ] **실패 확인:** `go test ./internal/grader -run 'TestPartial|TestError|TestQuantity|TestObserved|TestEvidence' -v` 실패 확인.
-- [ ] **최소 구현:** criterion DAG, 선행 FAIL→명시적 prerequisite FAIL, provider 장애→ERROR. quantity·named container·unordered selector는 의미 기반 비교한다. readiness는 observedGeneration과 원하는 replicas를 함께 확인한다. 30초 기본 한도와 주입 가능한 clock 사용. 병렬성 기본 2, 변경 probe는 직렬 실행. evidence에 원문 Secret을 보관하지 않는다.
-- [ ] **통과 확인:** 단위 tests PASS 및 `go test -tags=integration ./tests/integration -run TestResourceGrading -count=1 -v`. API default 값이 있는 동등한 답안과 실제 wrong image를 검증한다.
-- [ ] **커밋:** `feat: grade resource requirements with partial scores`.
+- [x] **실패 확인:** `go test ./internal/grader -run 'TestPartial|TestError|TestQuantity|TestObserved|TestEvidence' -v` 실패 확인.
+- [x] **최소 구현:** criterion DAG, 선행 FAIL→명시적 prerequisite FAIL, provider 장애→ERROR. quantity·named container·unordered selector는 의미 기반 비교한다. readiness는 observedGeneration과 원하는 replicas를 함께 확인한다. 30초 기본 한도와 주입 가능한 clock 사용. 병렬성 기본 2, 변경 probe는 직렬 실행. evidence에 원문 Secret을 보관하지 않는다.
+- [x] **통과 확인:** 단위 tests PASS 및 `go test -tags=integration ./tests/integration -run TestResourceGrading -count=1 -v`. API default 값이 있는 동등한 답안과 실제 wrong image를 검증한다.
+- [x] **커밋:** `feat: grade resource requirements with partial scores`.
 
 ### Task 7: Service·Ingress·NetworkPolicy 동작 검사
 
