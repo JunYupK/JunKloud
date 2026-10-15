@@ -3,6 +3,7 @@ package grader
 import (
 	"context"
 	"fmt"
+	"regexp"
 	"sort"
 	"strings"
 )
@@ -63,13 +64,13 @@ func (r rolloutCause) summary() []any {
 
 // classifyRollout decides whose fault an incomplete rollout is from the pods
 // the workload owns. expectPods: the workload should have pods by now.
-func classifyRollout(pods []object, expectPods bool, preloaded []string) rolloutCause {
+func classifyRollout(pods []object, expectPods bool, cfg causeConfig) rolloutCause {
 	var findings []podFinding
 	for _, p := range pods {
 		if metaOf(p)["deletionTimestamp"] != nil || podReady(p) {
 			continue
 		}
-		findings = append(findings, classifyPod(p, preloaded))
+		findings = append(findings, classifyPod(p, cfg))
 	}
 	sort.SliceStable(findings, func(i, j int) bool { return findings[i].Pod < findings[j].Pod })
 
@@ -116,8 +117,102 @@ func finding(p object, class faultClass, format string, args ...any) podFinding 
 	}
 }
 
+// causeConfig is what the classifier knows besides the pods themselves.
+type causeConfig struct {
+	// preloaded is the set of images the environment provides; configured
+	// says whether the caller declared it at all (fail-closed otherwise).
+	preloaded  []string
+	configured bool
+	// pullMessages: per pod name, kubelet "Failed to pull image" event
+	// messages, oldest first. The container status of a pod in
+	// ImagePullBackOff only says "Back-off pulling image"; the registry's
+	// answer is in the events.
+	pullMessages map[string][]string
+}
+
+// pullVerdict is what an image pull error message proves.
+type pullVerdict int
+
+const (
+	pullUnknown   pullVerdict = iota // unrecognised: nothing proven
+	pullTransport                    // network, registry or rate-limit trouble
+	pullWrongRef                     // the registry says the reference is wrong
+)
+
+var (
+	// pullTransportMarkers: the pull did not get a registry verdict on the
+	// reference, so the image may well be right (spec 8.1: ERROR).
+	pullTransportMarkers = []string{
+		"dial tcp", "connection refused", "connection reset", "connect:", "proxyconnect", "i/o timeout",
+		"timeout", "timed out", "deadline exceeded", "x509", "certificate", "no such host",
+		"lookup ", "server misbehaving", "temporary failure", "network is unreachable", "no route to host",
+		"toomanyrequests", "too many requests", "rate limit", "internal server error",
+		"bad gateway", "service unavailable", "gateway timeout", "failed to do request",
+	}
+	// pullTransportWords are short tokens that must stand alone (a digest
+	// such as sha256:...429... must not look like HTTP 429).
+	pullTransportWords = regexp.MustCompile(`\b(tls|eof|429|500|502|503|504)\b`)
+	// pullWrongRefMarkers: the registry answered, and the answer is that
+	// this repository/tag does not exist or the reference is malformed.
+	pullWrongRefMarkers = []string{
+		"manifest unknown", "name unknown", "not found", "invalid reference format",
+		"repository does not exist", "pull access denied", "requested access to the resource is denied",
+		"couldn't parse image reference", "invalid image name",
+	}
+)
+
+// classifyPullMessage reads one pull error. Transport markers win: a message
+// that mentions both did not reach a verdict. "failed to do request" is the
+// wrapper containerd puts around transport errors, so it only counts as
+// transport when no wrong-reference marker accompanies a registry answer.
+func classifyPullMessage(msg string) pullVerdict {
+	m := strings.ToLower(msg)
+	for _, w := range pullWrongRefMarkers {
+		if strings.Contains(m, w) && !hasTransportCause(m) {
+			return pullWrongRef
+		}
+	}
+	if hasTransportCause(m) {
+		return pullTransport
+	}
+	return pullUnknown
+}
+
+func hasTransportCause(m string) bool {
+	for _, t := range pullTransportMarkers {
+		if strings.Contains(m, t) {
+			return true
+		}
+	}
+	return pullTransportWords.MatchString(m)
+}
+
+// classifyPull decides a container stuck on an image pull.
+func classifyPull(p object, container, reason, statusMsg, image string, cfg causeConfig) podFinding {
+	provided := isPreloaded(image, cfg.preloaded)
+	switch {
+	case provided:
+		return finding(p, faultEnvironment, "container %s: %s for image %q, which the environment itself provides (image preparation failed): %s", container, reason, image, shorten(statusMsg))
+	case !cfg.configured:
+		return finding(p, faultUnknown, "container %s: %s for image %q; the set of environment-provided images is not configured, so the pull failure cannot be attributed to the answer: %s", container, reason, image, shorten(statusMsg))
+	case reason == "ErrImageNeverPull":
+		return finding(p, faultLearner, "container %s: %s, image %q is not on the node and the pod forbids pulling it", container, reason, image)
+	}
+	// Newest evidence first: the container status message, then the events.
+	msgs := append(append([]string{}, cfg.pullMessages[nameOf(p)]...), statusMsg)
+	for i := len(msgs) - 1; i >= 0; i-- {
+		switch classifyPullMessage(msgs[i]) {
+		case pullWrongRef:
+			return finding(p, faultLearner, "container %s: %s, image %q cannot be pulled, the registry says the reference is wrong: %s", container, reason, image, shorten(msgs[i]))
+		case pullTransport:
+			return finding(p, faultEnvironment, "container %s: %s for image %q, but the pull failed on the network or registry side, so the image is not proven wrong: %s", container, reason, image, shorten(msgs[i]))
+		}
+	}
+	return finding(p, faultUnknown, "container %s: %s for image %q without a recognisable registry answer: %s", container, reason, image, shorten(statusMsg))
+}
+
 // classifyPod explains why one not-ready, not-terminating pod is not ready.
-func classifyPod(p object, preloaded []string) podFinding {
+func classifyPod(p object, cfg causeConfig) podFinding {
 	status := mapAt(p, "status")
 	var unprovenStart string
 	for _, group := range []string{"initContainerStatuses", "containerStatuses"} {
@@ -132,11 +227,7 @@ func classifyPod(p object, preloaded []string) podFinding {
 				msg, _ := waiting["message"].(string)
 				switch reason {
 				case "ErrImagePull", "ImagePullBackOff", "ErrImageNeverPull":
-					image := containerImage(p, name, st)
-					if isPreloaded(image, preloaded) {
-						return finding(p, faultEnvironment, "container %s: %s for image %q, which the environment itself provides (image preparation failed): %s", name, reason, image, shorten(msg))
-					}
-					return finding(p, faultLearner, "container %s: %s, image %q cannot be pulled: %s", name, reason, image, shorten(msg))
+					return classifyPull(p, name, reason, msg, containerImage(p, name, st), cfg)
 				case "InvalidImageName":
 					return finding(p, faultLearner, "container %s: InvalidImageName for image %q: %s", name, containerImage(p, name, st), shorten(msg))
 				case "CrashLoopBackOff":
@@ -295,6 +386,66 @@ func controllerUID(o object) string {
 		}
 	}
 	return ""
+}
+
+// pullMessages collects, for every not-ready pod stuck on an image pull, the
+// kubelet's "Failed to pull image" event messages (oldest first).
+func pullMessages(ctx context.Context, r ObjectReader, pods []object) (map[string][]string, error) {
+	out := map[string][]string{}
+	for _, p := range pods {
+		if !pullStuck(p) {
+			continue
+		}
+		name := nameOf(p)
+		events, err := r.List(ctx, ListQuery{APIVersion: "v1", Kind: "Event",
+			Namespace: stringAt(p, "metadata", "namespace"), FieldSelector: "involvedObject.name=" + name})
+		if err != nil {
+			return nil, err
+		}
+		type stamped struct {
+			at, msg string
+		}
+		var found []stamped
+		for _, e := range events {
+			if stringAt(e, "involvedObject", "name") != name {
+				continue
+			}
+			msg, _ := e["message"].(string)
+			if !strings.Contains(strings.ToLower(msg), "pull") {
+				continue
+			}
+			at := firstNonEmpty(stringAt(e, "lastTimestamp"), stringAt(e, "eventTime"), stringAt(e, "metadata", "creationTimestamp"))
+			found = append(found, stamped{at, msg})
+		}
+		sort.SliceStable(found, func(i, j int) bool { return found[i].at < found[j].at })
+		for _, f := range found {
+			out[name] = append(out[name], f.msg)
+		}
+	}
+	return out, nil
+}
+
+func firstNonEmpty(ss ...string) string {
+	for _, s := range ss {
+		if s != "" {
+			return s
+		}
+	}
+	return ""
+}
+
+// pullStuck: some container of the pod waits on an image pull.
+func pullStuck(p object) bool {
+	for _, group := range []string{"initContainerStatuses", "containerStatuses"} {
+		for _, cs := range listAt(p, "status", group) {
+			st, _ := cs.(map[string]any)
+			switch stringAt(st, "state", "waiting", "reason") {
+			case "ErrImagePull", "ImagePullBackOff":
+				return true
+			}
+		}
+	}
+	return false
 }
 
 // ownedPods lists the pods a workload controls: directly (StatefulSet,

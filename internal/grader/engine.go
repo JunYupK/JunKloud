@@ -139,6 +139,7 @@ type settings struct {
 	pollInterval   time.Duration
 	redactor       *Redactor
 	preloaded      []string
+	preloadedSet   bool // WithPreloadedImages was given, even if empty
 }
 
 // WithClock injects the clock (default SystemClock).
@@ -176,11 +177,19 @@ func WithRedactor(r *Redactor) Option { return func(s *settings) { s.redactor = 
 // WithPreloadedImages lists the image references the environment provides
 // itself (the pinned, preloaded set). A pod that cannot start because one of
 // them failed to pull is an environment fault (ERROR); a pull failure of any
-// other image is the learner's wrong image (FAIL). References are compared
-// after Docker defaulting, so "busybox:1.37.0" equals
-// "docker.io/library/busybox:1.37.0".
+// other image may be the learner's wrong image (FAIL) when the registry's
+// answer proves the reference wrong. References are compared after Docker
+// defaulting, so "busybox:1.37.0" equals "docker.io/library/busybox:1.37.0".
+//
+// Fail-closed: without this option the grader does not know which images the
+// environment provides, so every image pull failure is ERROR. Composition
+// code must always pass the environment's provided set (probe image plus
+// every pinned problem image), possibly empty.
 func WithPreloadedImages(images ...string) Option {
-	return func(s *settings) { s.preloaded = append(s.preloaded, images...) }
+	return func(s *settings) {
+		s.preloaded = append(s.preloaded, images...)
+		s.preloadedSet = true
+	}
 }
 
 type redactorKey struct{}

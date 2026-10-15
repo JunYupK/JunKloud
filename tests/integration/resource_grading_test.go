@@ -10,6 +10,7 @@ import (
 	"testing"
 	"time"
 
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/client-go/tools/clientcmd"
 
 	"github.com/JunYupK/JunKloud/internal/environment"
@@ -156,14 +157,20 @@ func TestResourceGrading(t *testing.T) {
 		testutil.Equal(t, r.ObservedAt.Location(), time.UTC)
 	})
 
-	// A reference that cannot exist anywhere, so the outcome does not depend
-	// on whether this host can reach a registry.
-	const wrongImage = "docker.io/library/busybox:jk-does-not-exist"
+	// Two kinds of wrong image. A malformed reference is proven wrong by the
+	// kubelet alone, on any host. A tag that does not exist is proven wrong
+	// only by a registry that answers "not found"; a node that cannot reach
+	// the registry (this sandbox) proves nothing, and the honest result is
+	// ERROR.
+	const (
+		malformedImage = "docker.io/library/BusyBox:1.37.0" // repository names must be lowercase
+		missingTag     = "docker.io/library/busybox:jk-does-not-exist"
+	)
 
 	t.Run("WrongImageIsFail", func(t *testing.T) {
-		// The pod never becomes ready because of the learner's image. A
-		// short explicit limit keeps the test fast.
-		apply(gradeDeployment("wrong", wrongImage, nil, 1))
+		// The pod never becomes ready because of the learner's image
+		// reference. A short explicit limit keeps the test fast.
+		apply(gradeDeployment("wrong", malformedImage, nil, 1))
 		start := time.Now()
 		ev := grade(gradeCriteria("wrong", 8*time.Second))
 		elapsed := time.Since(start)
@@ -173,20 +180,17 @@ func TestResourceGrading(t *testing.T) {
 		for _, r := range ev.Results {
 			switch r.CriterionID {
 			case "ready":
-				for _, want := range []string{"8s", "availableReplicas", "cause", wrongImage, "cannot be pulled"} {
+				for _, want := range []string{"8s", "availableReplicas", "cause", "InvalidImageName", "BusyBox"} {
 					if !strings.Contains(r.Reason, want) {
 						t.Errorf("ready reason lacks %q: %q", want, r.Reason)
 					}
-				}
-				if !strings.Contains(r.Reason, "ErrImagePull") && !strings.Contains(r.Reason, "ImagePullBackOff") {
-					t.Errorf("ready reason does not name the image-pull cause: %q", r.Reason)
 				}
 				act, _ := r.Evidence.Actual.(map[string]any)
 				if pods, _ := act["pods"].([]any); len(pods) == 0 {
 					t.Errorf("evidence lacks the failing pod: %v", r.Evidence.Actual)
 				}
 			case "image":
-				if !strings.Contains(r.Reason, "jk-does-not-exist") {
+				if !strings.Contains(r.Reason, "BusyBox") {
 					t.Errorf("image reason does not show the actual image: %q", r.Reason)
 				}
 			}
@@ -196,18 +200,76 @@ func TestResourceGrading(t *testing.T) {
 		}
 	})
 
+	t.Run("MissingTagFollowsTheRegistryAnswer", func(t *testing.T) {
+		apply(gradeDeployment("missing", missingTag, nil, "100m")) // small: the node is already busy
+		crits := gradeCriteria("missing", 8*time.Second)
+		ev := grade([]model.Criterion{crits[0], crits[4]})
+
+		// What did the node's registry pull actually say? Prove the expected
+		// class from the cluster's own events instead of assuming it.
+		var pulls []string
+		events, err := kubeClient(t, m, id).CoreV1().Events(gradeNamespace).List(ctx, metav1.ListOptions{})
+		testutil.NoError(t, err)
+		for _, e := range events.Items {
+			if e.InvolvedObject.Kind == "Pod" && strings.HasPrefix(e.InvolvedObject.Name, "missing-") && strings.HasPrefix(e.Message, "Failed to pull image") {
+				pulls = append(pulls, e.Message)
+			}
+		}
+		if len(pulls) == 0 {
+			t.Fatal("the node reported no image pull event for the missing tag")
+		}
+		last := strings.ToLower(pulls[len(pulls)-1])
+		t.Logf("node pull answer: %s", pulls[len(pulls)-1])
+		transport := false
+		for _, marker := range []string{"dial tcp", "connection refused", "proxyconnect", "timeout", "no such host", "toomanyrequests", "tls"} {
+			transport = transport || strings.Contains(last, marker)
+		}
+		switch {
+		case transport:
+			// The registry was not consulted: nothing proves the tag wrong.
+			t.Log("observed: the node cannot reach a registry, so the correct class is ERROR")
+			testutil.Equal(t, statuses(ev), map[string]string{"exists": "PASS", "ready": "ERROR"})
+			testutil.Equal(t, ev.Score, (*int)(nil))
+			if !strings.Contains(ev.Results[1].Reason, "not proven wrong") {
+				t.Errorf("reason: %q", ev.Results[1].Reason)
+			}
+		case strings.Contains(last, "not found") || strings.Contains(last, "manifest unknown"):
+			t.Log("observed: the registry answered not found, so the correct class is FAIL")
+			testutil.Equal(t, statuses(ev), map[string]string{"exists": "PASS", "ready": "FAIL"})
+			if !strings.Contains(ev.Results[1].Reason, "registry says the reference is wrong") {
+				t.Errorf("reason: %q", ev.Results[1].Reason)
+			}
+		default:
+			t.Fatalf("unrecognised pull answer, cannot decide the expected class: %s", last)
+		}
+	})
+
 	t.Run("PullFailureOfProvidedImageIsError", func(t *testing.T) {
 		// The same stuck pod is an environment fault, not the learner's, when
 		// the image is one the environment promised to provide.
-		provided := []grader.Option{grader.WithRedactor(redactor), grader.WithPreloadedImages(environment.ProbeImage.Name, wrongImage)}
+		provided := []grader.Option{grader.WithRedactor(redactor), grader.WithPreloadedImages(environment.ProbeImage.Name, missingTag)}
 		e := grader.NewEngine(grader.DefaultCheckers(reader, provided...), provided...)
-		crits := gradeCriteria("wrong", 8*time.Second)
+		crits := gradeCriteria("missing", 8*time.Second)
 		ev, err := e.Evaluate(ctx, gradeTarget(id, []model.Criterion{crits[0], crits[4]}))
 		testutil.NoError(t, err)
 		testutil.Equal(t, statuses(ev), map[string]string{"exists": "PASS", "ready": "ERROR"})
 		testutil.Equal(t, ev.Score, (*int)(nil))
 		testutil.Equal(t, ev.Complete, false)
 		if !strings.Contains(ev.Results[1].Reason, "image preparation failed") {
+			t.Errorf("reason: %q", ev.Results[1].Reason)
+		}
+	})
+
+	t.Run("UnconfiguredProvidedSetFailsClosed", func(t *testing.T) {
+		// Composition that forgot WithPreloadedImages must never turn a pull
+		// failure into a learner FAIL.
+		forgot := []grader.Option{grader.WithRedactor(redactor)}
+		e := grader.NewEngine(grader.DefaultCheckers(reader, forgot...), forgot...)
+		crits := gradeCriteria("missing", 8*time.Second)
+		ev, err := e.Evaluate(ctx, gradeTarget(id, []model.Criterion{crits[0], crits[4]}))
+		testutil.NoError(t, err)
+		testutil.Equal(t, statuses(ev), map[string]string{"exists": "PASS", "ready": "ERROR"})
+		if !strings.Contains(ev.Results[1].Reason, "not configured") {
 			t.Errorf("reason: %q", ev.Results[1].Reason)
 		}
 	})

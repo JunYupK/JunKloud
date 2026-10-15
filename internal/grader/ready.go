@@ -122,7 +122,12 @@ func (c *ReadyChecker) Check(ctx context.Context, t Target, crit model.Criterion
 	if err != nil {
 		return model.CheckResult{}, err
 	}
-	cause := classifyRollout(pods, obs.v.expectPods, c.set.preloaded)
+	msgs, err := pullMessages(ctx, c.reader, pods)
+	if err != nil {
+		return model.CheckResult{}, err
+	}
+	cause := classifyRollout(pods, obs.v.expectPods, causeConfig{
+		preloaded: c.set.preloaded, configured: c.set.preloadedSet, pullMessages: msgs})
 	if cause.class != faultLearner {
 		return model.CheckResult{}, fmt.Errorf("%w: %s; %s", ErrInsufficientEvidence, obs.v.reason, cause.text)
 	}

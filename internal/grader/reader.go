@@ -27,6 +27,9 @@ type ListQuery struct {
 	Kind          string
 	Namespace     string
 	LabelSelector string
+	// FieldSelector uses the Kubernetes field selector syntax
+	// ("involvedObject.name=web-1"); empty selects all.
+	FieldSelector string
 }
 
 // ObjectReader reads Kubernetes objects of any group/version/kind as decoded
@@ -155,7 +158,7 @@ func (r *dynamicReader) List(ctx context.Context, q ListQuery) ([]map[string]any
 	if err != nil {
 		return nil, err
 	}
-	list, err := ri.List(ctx, metav1.ListOptions{LabelSelector: q.LabelSelector})
+	list, err := ri.List(ctx, metav1.ListOptions{LabelSelector: q.LabelSelector, FieldSelector: q.FieldSelector})
 	if err != nil {
 		return nil, fmt.Errorf("list %s: %w", q.Kind, err)
 	}

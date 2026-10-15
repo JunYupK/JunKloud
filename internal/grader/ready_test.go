@@ -279,7 +279,7 @@ func TestReadyFaultClassification(t *testing.T) {
 		})
 	}
 	t.Run("an image only counts as provided after Docker defaulting", func(t *testing.T) {
-		p := pod(t, "p", waiting("ErrImagePull", "x"), "web", "busybox:1.37.0")
+		p := pod(t, "p", waiting("ErrImagePull", "manifest unknown"), "web", "busybox:1.37.0")
 		r := withPods(t, newReader().put(deployRef, notReady), p)
 		// Not in the provided set: the learner's own wrong image.
 		res, err := runReady(t, r, newClock(), readyCrit(time.Second, nil), grader.WithPreloadedImages("alpine:3.20"))
@@ -407,4 +407,158 @@ func TestReadyTargetReplacedDuringGrading(t *testing.T) {
 	swapped["metadata"].(map[string]any)["uid"] = "uid-other"
 	_, err = runReady(t, newReader().put(deployRef, ok, swapped), newClock(), readyCrit(10*time.Second, nil))
 	testutil.ErrorIs(t, err, grader.ErrTargetChanged)
+}
+
+// Realistic containerd/kubelet pull errors. Only an answer that proves the
+// reference itself wrong is the learner's FAIL; transport, registry and
+// rate-limit trouble leaves the image unproven (ERROR), and so does anything
+// unrecognised.
+const (
+	msgNotFound = `rpc error: code = NotFound desc = failed to pull and unpack image "docker.io/library/busybox:jk-does-not-exist": failed to resolve reference "docker.io/library/busybox:jk-does-not-exist": docker.io/library/busybox:jk-does-not-exist: not found`
+	msgManifest = `rpc error: code = Unknown desc = failed to pull and unpack image "registry.example.com/team/app:9": failed to resolve reference "registry.example.com/team/app:9": failed to authorize: failed to fetch anonymous token: unexpected status: 404 manifest unknown`
+	msgDenied   = `rpc error: code = Unknown desc = failed to pull and unpack image "docker.io/library/nope-xyz:1": failed to resolve reference "docker.io/library/nope-xyz:1": pull access denied, repository does not exist or may require authorization: server message: insufficient_scope: authorization failed`
+	msgInvalid  = `Failed to apply default image tag "nginx::1": couldn't parse image reference "nginx::1": invalid reference format`
+	msgNameUnk  = `Error response from daemon: pull access denied for foo, name unknown: repository name not known to registry`
+	// Digest text that contains transport-looking numbers is not transport trouble.
+	msgDigest = `failed to resolve reference "docker.io/library/app@sha256:8a4291f1e5039b5d6429ab1ec0f2cf3b5e502c9eed86a2d5ba0fd6c1e5035e3f": not found`
+
+	msgDial    = `rpc error: code = Unknown desc = failed to pull and unpack image "docker.io/library/busybox:1.37.0": failed to resolve reference "docker.io/library/busybox:1.37.0": failed to do request: Head "https://registry-1.docker.io/v2/library/busybox/manifests/1.37.0": dial tcp 52.1.2.3:443: i/o timeout`
+	msgProxy   = `failed to resolve reference "docker.io/library/busybox:jk-does-not-exist": failed to do request: Head "https://registry-1.docker.io/v2/library/busybox/manifests/jk-does-not-exist": proxyconnect tcp: dial tcp 127.0.0.1:45073: connect: connection refused`
+	msgDNS     = `failed to resolve reference "ghcr.io/x/y:1": failed to do request: Head "https://ghcr.io/v2/x/y/manifests/1": dial tcp: lookup ghcr.io on 10.96.0.10:53: no such host`
+	msgTLS     = `failed to resolve reference "registry.local/app:1": failed to do request: Head "https://registry.local/v2/app/manifests/1": tls: failed to verify certificate: x509: certificate signed by unknown authority`
+	msgHandshk = `failed to do request: Head "https://registry-1.docker.io/v2/library/nginx/manifests/1.27.0": net/http: TLS handshake timeout`
+	msgRate    = `rpc error: code = Unknown desc = failed to pull and unpack image "docker.io/library/nginx:1.27.0": failed to copy: httpReadSeeker: failed open: unexpected status code https://registry-1.docker.io/v2/library/nginx/manifests/sha256:abc: 429 Too Many Requests - Server message: toomanyrequests: You have reached your unauthenticated pull rate limit. https://www.docker.com/increase-rate-limit`
+	msg503     = `failed to copy: httpReadSeeker: failed open: unexpected status code: 503 Service Unavailable`
+	msgEOF     = `failed to pull and unpack image "nginx:1.27.0": failed to copy: read tcp 10.244.0.2:41522->104.16.1.1:443: unexpected EOF`
+	msgCtx     = `rpc error: code = DeadlineExceeded desc = context deadline exceeded`
+	// A "not found" that came with transport trouble (a proxy answering for the registry) proves nothing.
+	msgMixed   = `failed to do request: Head "https://registry-1.docker.io/v2/library/x/manifests/1": proxyconnect tcp: dial tcp 10.0.0.1:3128: connect: no route to host (upstream: 404 not found)`
+	msgNovel   = `something the kubelet has never said before`
+	msgBackoff = `Back-off pulling image "nginx:1.27.0"`
+)
+
+func pullPod(t testing.TB, reason, msg string) map[string]any {
+	return pod(t, "p", waiting(reason, msg), "web", "nginx:1.27.0")
+}
+
+func event(t testing.TB, podName, ts, msg string) map[string]any {
+	return obj(t, fmt.Sprintf(`{"apiVersion":"v1","kind":"Event","metadata":{"name":"e-%s","namespace":"jk-p1"},
+	  "involvedObject":{"kind":"Pod","name":%q},"reason":"Failed","lastTimestamp":%q,"message":%q}`, ts, podName, ts, msg))
+}
+
+func TestPullFailureAttribution(t *testing.T) {
+	notReady := deployment(t, 1, 1, 1, [4]int{1, 1, 0, 0}, "")
+	run := func(t *testing.T, p map[string]any, events []map[string]any, opts ...grader.Option) (model.CheckResult, error) {
+		t.Helper()
+		r := withPods(t, newReader().put(deployRef, notReady), p).putList("Event", "jk-p1", events...)
+		return runReady(t, r, newClock(), readyCrit(2*time.Second, nil), opts...)
+	}
+	configured := grader.WithPreloadedImages("docker.io/library/busybox:1.37.0")
+
+	wrongRef := map[string]string{"not found": msgNotFound, "manifest unknown": msgManifest, "repository does not exist": msgDenied,
+		"invalid reference format": msgInvalid, "name unknown": msgNameUnk, "digest with 429 inside": msgDigest}
+	for name, msg := range wrongRef {
+		t.Run("FAIL on a registry answer: "+name, func(t *testing.T) {
+			for _, reason := range []string{"ErrImagePull", "ImagePullBackOff"} {
+				res, err := run(t, pullPod(t, reason, msg), nil, configured)
+				testutil.NoError(t, err)
+				testutil.Equal(t, res.Status, "FAIL")
+				if !strings.Contains(res.Reason, "registry says the reference is wrong") {
+					t.Fatalf("reason: %q", res.Reason)
+				}
+			}
+		})
+	}
+	transport := map[string]string{"i/o timeout": msgDial, "proxyconnect refused": msgProxy, "dns": msgDNS, "tls x509": msgTLS,
+		"tls handshake timeout": msgHandshk, "429 toomanyrequests": msgRate, "503": msg503, "unexpected EOF": msgEOF,
+		"context deadline exceeded": msgCtx, "not found beside a transport error": msgMixed}
+	for name, msg := range transport {
+		t.Run("ERROR on transport trouble: "+name, func(t *testing.T) {
+			_, err := run(t, pullPod(t, "ErrImagePull", msg), nil, configured)
+			testutil.ErrorIs(t, err, grader.ErrInsufficientEvidence)
+			if !strings.Contains(err.Error(), "not proven wrong") {
+				t.Fatalf("error: %v", err)
+			}
+		})
+	}
+	t.Run("ERROR on an unrecognised message", func(t *testing.T) {
+		_, err := run(t, pullPod(t, "ErrImagePull", msgNovel), nil, configured)
+		testutil.ErrorIs(t, err, grader.ErrInsufficientEvidence)
+		if !strings.Contains(err.Error(), "without a recognisable registry answer") {
+			t.Fatalf("error: %v", err)
+		}
+	})
+	t.Run("ERROR on a bare back-off without any registry answer", func(t *testing.T) {
+		_, err := run(t, pullPod(t, "ImagePullBackOff", msgBackoff), nil, configured)
+		testutil.ErrorIs(t, err, grader.ErrInsufficientEvidence)
+	})
+
+	// In back-off the container status carries no cause: the kubelet's
+	// events do. The newest recognised message decides.
+	t.Run("back-off uses the pull events: wrong reference", func(t *testing.T) {
+		res, err := run(t, pullPod(t, "ImagePullBackOff", msgBackoff), []map[string]any{
+			event(t, "p", "2026-10-15T10:00:01Z", "Pulling image \"nginx:1.27.0\""),
+			event(t, "p", "2026-10-15T10:00:02Z", "Failed to pull image \"nginx:1.27.0\": "+msgNotFound),
+			event(t, "other-pod", "2026-10-15T10:00:03Z", "Failed to pull image: "+msgDial),
+		}, configured)
+		testutil.NoError(t, err)
+		testutil.Equal(t, res.Status, "FAIL")
+	})
+	t.Run("back-off uses the pull events: transport trouble", func(t *testing.T) {
+		_, err := run(t, pullPod(t, "ImagePullBackOff", msgBackoff), []map[string]any{
+			event(t, "p", "2026-10-15T10:00:02Z", "Failed to pull image \"nginx:1.27.0\": "+msgProxy),
+		}, configured)
+		testutil.ErrorIs(t, err, grader.ErrInsufficientEvidence)
+	})
+	t.Run("the newest pull event wins over an older one", func(t *testing.T) {
+		_, err := run(t, pullPod(t, "ImagePullBackOff", msgBackoff), []map[string]any{
+			event(t, "p", "2026-10-15T10:00:09Z", "Failed to pull image: "+msgDial), // newest, listed first
+			event(t, "p", "2026-10-15T10:00:01Z", "Failed to pull image: "+msgNotFound),
+		}, configured)
+		testutil.ErrorIs(t, err, grader.ErrInsufficientEvidence)
+	})
+	t.Run("event listing failure is an error", func(t *testing.T) {
+		r := withPods(t, newReader().put(deployRef, notReady), pullPod(t, "ImagePullBackOff", msgBackoff))
+		r.listErr = errors.New("apiserver busy")
+		_, err := runReady(t, r, newClock(), readyCrit(time.Second, nil), configured)
+		testutil.ErrorIs(t, err, r.listErr)
+	})
+}
+
+// Fail-closed: the grader does not know which images the environment itself
+// provides unless the caller says so.
+func TestPullFailureFailsClosedWithoutProvidedSet(t *testing.T) {
+	notReady := deployment(t, 1, 1, 1, [4]int{1, 1, 0, 0}, "")
+	run := func(t *testing.T, p map[string]any, opts ...grader.Option) (model.CheckResult, error) {
+		r := withPods(t, newReader().put(deployRef, notReady), p)
+		return runReady(t, r, newClock(), readyCrit(time.Second, nil), opts...)
+	}
+	t.Run("unconfigured: even a registry-proven wrong reference is ERROR", func(t *testing.T) {
+		_, err := run(t, pullPod(t, "ErrImagePull", msgNotFound))
+		testutil.ErrorIs(t, err, grader.ErrInsufficientEvidence)
+		if !strings.Contains(err.Error(), "not configured") {
+			t.Fatalf("error should say why: %v", err)
+		}
+		_, err = run(t, pullPod(t, "ImagePullBackOff", msgBackoff))
+		testutil.ErrorIs(t, err, grader.ErrInsufficientEvidence)
+	})
+	t.Run("unconfigured: a syntactically invalid name is still the learner's", func(t *testing.T) {
+		res, err := run(t, pod(t, "p", waiting("InvalidImageName", msgInvalid), "web", "nginx::1"))
+		testutil.NoError(t, err)
+		testutil.Equal(t, res.Status, "FAIL")
+	})
+	t.Run("configured but empty is an explicit statement", func(t *testing.T) {
+		res, err := run(t, pullPod(t, "ErrImagePull", msgNotFound), grader.WithPreloadedImages())
+		testutil.NoError(t, err)
+		testutil.Equal(t, res.Status, "FAIL")
+	})
+	t.Run("an engine built from DefaultCheckers without the option never FAILs a pull", func(t *testing.T) {
+		r := withPods(t, newReader().put(deployRef, notReady), pullPod(t, "ErrImagePull", msgNotFound))
+		opts := []grader.Option{grader.WithClock(newClock())}
+		e := grader.NewEngine(grader.DefaultCheckers(r, opts...), opts...)
+		ev, err := e.Evaluate(context.Background(), target(readyCrit(time.Second, nil)))
+		testutil.NoError(t, err)
+		testutil.Equal(t, ev.Results[0].Status, "ERROR")
+		testutil.Equal(t, ev.Score, (*int)(nil))
+	})
 }
