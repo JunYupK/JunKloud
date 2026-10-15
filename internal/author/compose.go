@@ -272,6 +272,9 @@ func PrepareEnvironment(ctx context.Context, m *environment.Manager, id model.Id
 type Runtime struct {
 	Validator *Validator
 	Grader    *Grader
+	// Identity is the verified environment the runtime was composed for; the
+	// grader reads that cluster, so sessions must serve only on it.
+	Identity model.Identity
 	// EnvironmentHash is the certificate component of this environment
 	// (GraderConfig.EnvironmentHash); sessions must compare against the same
 	// value.
@@ -305,7 +308,7 @@ func NewRuntime(ctx context.Context, m *environment.Manager, st *store.Store, id
 		g.Close()
 		return nil, err
 	}
-	return &Runtime{Validator: v, Grader: g, EnvironmentHash: envHash}, nil
+	return &Runtime{Validator: v, Grader: g, Identity: id, EnvironmentHash: envHash}, nil
 }
 
 // Close releases the grader's scratch space.
