@@ -133,7 +133,7 @@ func (c *ArtifactChecker) ValidateCriterion(crit model.Criterion) error {
 		_, err := parseLogsArgs(crit)
 		return err
 	case model.CriterionImage:
-		_, err := parseImageArgs(crit)
+		_, err := parseImageArgs(crit, c.set.defaultTimeout)
 		return err
 	case model.CriterionHelm:
 		_, err := parseHelmArgs(crit)
@@ -259,4 +259,30 @@ func (c *ArtifactChecker) learnNamespaceSecrets(ctx context.Context, ns string) 
 		r.LearnObject(s)
 	}
 	return nil
+}
+
+// NewClusterArtifactChecker wires an ArtifactChecker to the cluster that one
+// explicit kubeconfig file and context point at (never $KUBECONFIG), the
+// docker/helm/kubectl CLIs found on PATH, and, when WithProbeControlNamespace
+// is given, an image runner that runs learner images as pods in that
+// namespace. probes may be nil unless a criterion runs a serving image.
+func NewClusterArtifactChecker(kubeconfigPath, contextName string, probes ProbeRunner, opts ...Option) (*ArtifactChecker, error) {
+	reader, err := NewClusterReader(kubeconfigPath, contextName)
+	if err != nil {
+		return nil, err
+	}
+	k, err := newClusterClients(kubeconfigPath, contextName)
+	if err != nil {
+		return nil, err
+	}
+	tools := NewToolRunner()
+	cfg := ArtifactConfig{Reader: reader, Tools: tools, Pods: k, KubeconfigPath: kubeconfigPath, Context: contextName}
+	if newSettings(opts).controlNamespace != "" {
+		runner, err := newClusterImageRunner(tools, kubePods{k.cs}, k, probes, opts...)
+		if err != nil {
+			return nil, err
+		}
+		cfg.Images = runner
+	}
+	return NewArtifactChecker(cfg, opts...), nil
 }

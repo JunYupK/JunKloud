@@ -42,7 +42,8 @@ const maxFileBytes = 4 << 20
 //	              semantics as the field checker: key order, quoting and flow
 //	              style never matter). At least one selected document must
 //	              satisfy all of them.
-//	contains / not_contains: substrings; matches: RE2 patterns
+//	contains / not_contains: substrings; matches: RE2 patterns, always in
+//	              multi-line mode (^ and $ match at line boundaries)
 //	exact:        the whole text, only for problems that ask for exact text
 //	min_bytes / max_bytes, sha256: size bounds and content digest (hex)
 //
@@ -120,7 +121,7 @@ func compilePatterns(what string, list []string) ([]*regexp.Regexp, error) {
 		if p == "" || len(p) > 1000 {
 			return nil, invalidf("args.%s[%d] must be 1..1000 characters", what, i)
 		}
-		re, err := regexp.Compile(p)
+		re, err := regexp.Compile("(?m)" + p)
 		if err != nil {
 			return nil, invalidf("args.%s[%d]: %v", what, i, err)
 		}
@@ -370,7 +371,7 @@ func textRuleFailures(text string, contains, notContains []string, patterns []*r
 	}
 	for _, re := range patterns {
 		if !re.MatchString(text) {
-			out = append(out, fmt.Sprintf("nothing matches /%s/", re.String()))
+			out = append(out, fmt.Sprintf("nothing matches /%s/", strings.TrimPrefix(re.String(), "(?m)")))
 		}
 	}
 	return out
