@@ -400,17 +400,31 @@ const (
 	minScheduleWindow       = 5 * time.Second
 	maxScheduleWindow       = 120 * time.Second
 	scheduleSlack           = 10 * time.Second
-	maxScheduleRuns         = 5
+	// schedulePeriodSlack is the controller latency a window must allow on top
+	// of one period of the schedule.
+	schedulePeriodSlack = 10 * time.Second
 )
 
 // cronScheduleArgs are the Args of a "cronjob-schedule" criterion: the
 // CronJob FIRED on its schedule. Target is a batch/v1 CronJob.
 //
+//	schedule: REQUIRED, the schedule the problem expects (cron syntax). It is
+//	          what the window is validated against: window must be at least
+//	          one period of it (its longest gap between fires) plus 10s of
+//	          controller latency, and at most 120s, so only schedules that
+//	          fire at least every ~110s can be observed. Slower schedules
+//	          must be graded with cronjob-template.
 //	window:   REQUIRED, 5s..120s: how long the grader watches. The criterion's
-//	          own timeout must exceed it by 10s. A schedule that cannot fire
-//	          within the window cannot pass: such a problem must grade the
-//	          declaration with cronjob-template instead.
-//	min_runs: default 1, max 5: how many runs must appear in the window.
+//	          own timeout must exceed it by 10s.
+//
+// What the grader does: from the LIVE CronJob (schedule and spec.timeZone;
+// UTC when none) it computes the fire times due inside the window.
+//   - a Job created by the CronJob controller appears: PASS;
+//   - no fire is due inside the window (the learner's schedule is slower than
+//     the window): FAIL, without waiting;
+//   - a fire was due but no controller Job appeared: ERROR (insufficient
+//     evidence: a late controller, a skipped run under concurrencyPolicy
+//     Forbid or a missed deadline is not proven to be the learner's fault).
 //
 // A run counts only if a Job
 //   - is owned (controller owner reference) by THIS CronJob (UID),
@@ -422,8 +436,8 @@ const (
 //     annotations does not count. Manual Jobs are listed in the evidence as
 //     ignored.
 type cronScheduleArgs struct {
-	Window  string `json:"window"`
-	MinRuns int    `json:"min_runs"`
+	Schedule string `json:"schedule"`
+	Window   string `json:"window"`
 
 	window time.Duration
 }
@@ -444,11 +458,19 @@ func parseCronScheduleArgs(crit model.Criterion, defaultTimeout time.Duration) (
 		return a, invalidf("args.window %q must be a duration of %s..%s", a.Window, minScheduleWindow, maxScheduleWindow)
 	}
 	a.window = d
-	if a.MinRuns == 0 {
-		a.MinRuns = 1
+	if a.Schedule == "" {
+		return a, invalidf("args.schedule is required: the window is validated against the expected schedule")
 	}
-	if a.MinRuns < 1 || a.MinRuns > maxScheduleRuns {
-		return a, invalidf("args.min_runs must be 1..%d", maxScheduleRuns)
+	spec, err := parseCron(a.Schedule)
+	if err != nil {
+		return a, invalidf("args.schedule: %v", err)
+	}
+	if gap := spec.maxGap(); gap+schedulePeriodSlack > d {
+		if gap >= longGap {
+			return a, invalidf("args.schedule %q does not fire at least twice a week, so no window can observe it; grade it with cronjob-template", a.Schedule)
+		}
+		return a, invalidf("args.window %s cannot cover one period (%s) of schedule %q plus %s of controller latency; use a window of at least %s (max %s) or grade it with cronjob-template",
+			a.Window, gap, a.Schedule, schedulePeriodSlack, gap+schedulePeriodSlack, maxScheduleWindow)
 	}
 	timeout := crit.Timeout
 	if timeout <= 0 {
@@ -478,7 +500,7 @@ func (c *ArtifactChecker) checkCronSchedule(ctx context.Context, t Target, crit 
 		return model.CheckResult{}, err
 	}
 	start := c.set.clock.Now()
-	expected := map[string]any{"cronjob": describeRef(ref), "window": a.Window, "min_runs": a.MinRuns}
+	expected := map[string]any{"cronjob": describeRef(ref), "window": a.Window, "schedule": a.Schedule}
 	cron, err := c.obs.get(ctx, ref)
 	if isNotFound(err) {
 		return c.verdictResult(start, false, fmt.Sprintf("CronJob %q not found", ref.Name), expected, map[string]any{"exists": false}), nil
@@ -496,12 +518,29 @@ func (c *ArtifactChecker) checkCronSchedule(ctx context.Context, t Target, crit 
 		return finish(false, "the CronJob is suspended, so it can never fire", map[string]any{"suspend": true}), nil
 	}
 
+	// When is a run due inside the window, by the live schedule?
+	liveSchedule, _ := valueAt(cron, "spec", "schedule").(string)
+	liveSpec, err := parseCron(liveSchedule)
+	if err != nil {
+		return model.CheckResult{}, fmt.Errorf("%w: the CronJob's schedule cannot be read: %v", ErrInsufficientEvidence, err)
+	}
+	zone, _ := valueAt(cron, "spec", "timeZone").(string)
+	loc, err := liveSpec.location(zone)
+	if err != nil {
+		return model.CheckResult{}, fmt.Errorf("%w: %v", ErrInsufficientEvidence, err)
+	}
+	deadline := start.Add(a.window)
+	due := liveSpec.dueBetween(start, deadline, loc)
+	dueText := make([]string, 0, len(due))
+	for _, d := range due {
+		dueText = append(dueText, d.UTC().Format(time.RFC3339))
+	}
+
 	cronUID := uidOf(cron)
 	seen := map[string]bool{} // jobs that existed when the observation began
 	var runs []cronRun
 	manual := map[string]bool{}
 	first := true
-	deadline := start.Add(a.window)
 	for {
 		jobs, err := c.cfg.Reader.List(ctx, ListQuery{APIVersion: "batch/v1", Kind: "Job", Namespace: ref.Namespace})
 		if err != nil {
@@ -528,8 +567,8 @@ func (c *ArtifactChecker) checkCronSchedule(ctx context.Context, t Target, crit 
 			runs = append(runs, cronRun{Job: name, Scheduled: stringAt(j, "metadata", "annotations", annotationCronScheduled)})
 		}
 		first = false
-		if len(runs) >= a.MinRuns {
-			break
+		if len(runs) >= 1 || len(due) == 0 {
+			break // nothing is due: waiting cannot change the verdict
 		}
 		now := c.set.clock.Now()
 		if !now.Before(deadline) {
@@ -550,15 +589,20 @@ func (c *ArtifactChecker) checkCronSchedule(ctx context.Context, t Target, crit 
 			return model.CheckResult{}, fmt.Errorf("%w: CronJob %s was replaced or edited during the observation", ErrTargetChanged, ref.Name)
 		}
 	}
-	actual := map[string]any{"runs_observed": len(runs), "runs": append([]cronRun{}, runs...)}
+	actual := map[string]any{"schedule": liveSchedule, "time_zone": loc.String(), "due_in_window": dueText,
+		"runs_observed": len(runs), "runs": append([]cronRun{}, runs...)}
 	if len(manual) > 0 {
 		actual["manual_jobs_ignored"] = len(manual)
 	}
-	if len(runs) >= a.MinRuns {
+	switch {
+	case len(runs) >= 1:
 		return finish(true, "", actual), nil
+	case len(due) == 0:
+		return finish(false, fmt.Sprintf("the CronJob's schedule %q does not fire within %s, so the expected schedule %q is not met (Jobs made by hand from the CronJob do not prove the schedule)",
+			liveSchedule, a.Window, a.Schedule), actual), nil
 	}
-	return finish(false, fmt.Sprintf("no Job was created by the CronJob controller within %s (%d of %d runs observed; Jobs made by hand from the CronJob do not prove the schedule)",
-		a.Window, len(runs), a.MinRuns), actual), nil
+	return model.CheckResult{}, fmt.Errorf("%w: a run of schedule %q was due at %s within the %s window but the CronJob controller created no Job (a late controller or a skipped run is not proven to be the answer's fault)",
+		ErrInsufficientEvidence, liveSchedule, strings.Join(dueText, ", "), a.Window)
 }
 
 type runKind int

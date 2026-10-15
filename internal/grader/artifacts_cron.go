@@ -4,6 +4,8 @@ import (
 	"fmt"
 	"strconv"
 	"strings"
+	"time"
+	_ "time/tzdata" // zone names must resolve on any host
 )
 
 // cronSpec is a parsed 5-field cron schedule: the set of values each field
@@ -107,9 +109,7 @@ func cronItem(item string, field, lo, hi int, set []bool, star *bool) error {
 	from, to := lo, hi
 	switch {
 	case rng == "*" || rng == "?":
-		if !hasStep {
-			*star = true
-		}
+		*star = true // like the CronJob controller: "*/n" also counts as a star
 	case strings.Contains(rng, "-"):
 		a, b, _ := strings.Cut(rng, "-")
 		var err error
@@ -162,4 +162,73 @@ func cronEqual(a, b string) (bool, error) {
 		}
 	}
 	return true, nil
+}
+
+// location is the zone the schedule is read in: the CronJob's spec.timeZone
+// (or CRON_TZ= in the schedule), else UTC, which is the controller manager's
+// zone in the environment's nodes.
+func (c cronSpec) location(specTimeZone string) (*time.Location, error) {
+	name := specTimeZone
+	if name == "" {
+		name = c.tz
+	}
+	if name == "" {
+		return time.UTC, nil
+	}
+	loc, err := time.LoadLocation(name)
+	if err != nil {
+		return nil, fmt.Errorf("unknown time zone %q", name)
+	}
+	return loc, nil
+}
+
+// matches reports whether the schedule fires at the minute t falls in.
+func (c cronSpec) matches(t time.Time) bool {
+	if !c.fields[0][t.Minute()] || !c.fields[1][t.Hour()] || !c.fields[3][int(t.Month())] {
+		return false
+	}
+	dom, dow := c.fields[2][t.Day()], c.fields[4][int(t.Weekday())]
+	if c.domStar || c.dowStar {
+		return dom && dow
+	}
+	return dom || dow
+}
+
+// dueBetween lists the fire times in (from, to], in zone loc.
+func (c cronSpec) dueBetween(from, to time.Time, loc *time.Location) []time.Time {
+	var out []time.Time
+	for t := from.In(loc).Truncate(time.Minute).Add(time.Minute); !t.After(to); t = t.Add(time.Minute) {
+		if c.matches(t) {
+			out = append(out, t)
+		}
+	}
+	return out
+}
+
+// longGap stands for "no regular period within a week": longer than any
+// observation window.
+const longGap = 365 * 24 * time.Hour
+
+// maxGap is the longest time between two consecutive fires, found over a
+// reference week (the zone does not change gaps). Schedules that fire less
+// than twice a week report longGap.
+func (c cronSpec) maxGap() time.Duration {
+	start := time.Date(2001, 1, 1, 0, 0, 0, 0, time.UTC) // a Monday
+	var prev time.Time
+	var gap time.Duration
+	n := 0
+	for t := start; t.Before(start.AddDate(0, 0, 9)); t = t.Add(time.Minute) {
+		if !c.matches(t) {
+			continue
+		}
+		if n > 0 && t.Sub(prev) > gap {
+			gap = t.Sub(prev)
+		}
+		prev = t
+		n++
+	}
+	if n < 2 {
+		return longGap
+	}
+	return gap
 }

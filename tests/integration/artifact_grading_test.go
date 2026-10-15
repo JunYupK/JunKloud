@@ -498,15 +498,15 @@ spec:
 			crit("brokenexpected", model.CriterionJob, 2, nsRef("batch/v1", "Job", "broken"), map[string]any{"outcome": "failed", "reason": "BackoffLimitExceeded"}, 60*time.Second),
 			crit("template", model.CriterionCronJobTemplate, 2, nsRef("batch/v1", "CronJob", "declared"), map[string]any{"schedule": "*/5 * * * *", "concurrency_policy": "Forbid"}, 0),
 			crit("wrongtemplate", model.CriterionCronJobTemplate, 2, nsRef("batch/v1", "CronJob", "declared"), map[string]any{"schedule": "*/10 * * * *"}, 0),
-			crit("manual", model.CriterionCronJobSchedule, 2, nsRef("batch/v1", "CronJob", "yearly"), map[string]any{"window": "15s"}, 40*time.Second),
-			crit("ticks", model.CriterionCronJobSchedule, 2, nsRef("batch/v1", "CronJob", "ticker"), map[string]any{"window": "100s"}, 130*time.Second))
+			crit("manual", model.CriterionCronJobSchedule, 2, nsRef("batch/v1", "CronJob", "yearly"), map[string]any{"schedule": "* * * * *", "window": "75s"}, 100*time.Second),
+			crit("ticks", model.CriterionCronJobSchedule, 2, nsRef("batch/v1", "CronJob", "ticker"), map[string]any{"schedule": "* * * * *", "window": "100s"}, 130*time.Second))
 		e.expect(res, "job", "PASS")
 		e.expect(res, "broken", "FAIL", "BackoffLimitExceeded")
 		e.expect(res, "brokenexpected", "PASS")
 		e.expect(res, "template", "PASS")
 		e.expect(res, "wrongtemplate", "FAIL", "schedule")
 		// TestCronScheduleNotProvedByManualJob against the real controller.
-		e.expect(res, "manual", "FAIL", "no Job was created by the CronJob controller")
+		e.expect(res, "manual", "FAIL", "does not fire within 75s", "do not prove the schedule")
 		if !strings.Contains(evidenceOf(t, res["manual"]), `"manual_jobs_ignored":1`) {
 			t.Fatalf("manual job not reported as ignored: %s", evidenceOf(t, res["manual"]))
 		}
