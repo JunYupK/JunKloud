@@ -10,7 +10,6 @@ import (
 
 var errTODO = errors.New("not implemented")
 
-type logsArgs struct{}
 type imageArgs struct{}
 type helmArgs struct{}
 type kustomizeArgs struct{}
@@ -21,7 +20,6 @@ type cronScheduleArgs struct{}
 // ImageRunner runs a learner image in the cluster.
 type ImageRunner interface{}
 
-func parseLogsArgs(model.Criterion) (logsArgs, error)           { return logsArgs{}, nil }
 func parseImageArgs(model.Criterion) (imageArgs, error)         { return imageArgs{}, nil }
 func parseHelmArgs(model.Criterion) (helmArgs, error)           { return helmArgs{}, nil }
 func parseKustomizeArgs(model.Criterion) (kustomizeArgs, error) { return kustomizeArgs{}, nil }
@@ -33,9 +31,6 @@ func parseCronScheduleArgs(model.Criterion, time.Duration) (cronScheduleArgs, er
 	return cronScheduleArgs{}, nil
 }
 
-func (c *ArtifactChecker) checkLogs(context.Context, Target, model.Criterion) (model.CheckResult, error) {
-	return model.CheckResult{}, errTODO
-}
 func (c *ArtifactChecker) checkImage(context.Context, Target, model.Criterion) (model.CheckResult, error) {
 	return model.CheckResult{}, errTODO
 }
