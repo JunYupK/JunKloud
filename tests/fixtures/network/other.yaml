@@ -1,0 +1,26 @@
+# A different application behind the same kind of Service. A learner whose
+# Service selects it gets HTTP 200, but with the wrong application marker.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: other
+spec:
+  replicas: 1
+  selector:
+    matchLabels: {app: other}
+  template:
+    metadata:
+      labels: {app: other}
+    spec:
+      securityContext: {runAsNonRoot: true, runAsUser: 65534, seccompProfile: {type: RuntimeDefault}}
+      containers:
+      - name: other
+        image: docker.io/library/busybox:1.37.0
+        imagePullPolicy: IfNotPresent
+        command: [sh, -c, "mkdir -p /tmp/www && printf 'JK-NET-OTHER' > /tmp/www/index.html && exec httpd -f -p 8080 -h /tmp/www"]
+        ports: [{containerPort: 8080}]
+        readinessProbe: {tcpSocket: {port: 8080}, periodSeconds: 1}
+        resources:
+          requests: {cpu: 10m, memory: 16Mi}
+          limits: {cpu: 100m, memory: 32Mi}
+        securityContext: {allowPrivilegeEscalation: false, capabilities: {drop: [ALL]}}

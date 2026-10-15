@@ -15,7 +15,7 @@ import (
 
 // Probe protocols.
 const (
-	// ProbeHTTP sends one HTTP/1.0 GET and reports the status and whether
+	// ProbeHTTP sends one HTTP/1.1 GET (Connection: close) and reports the status and whether
 	// the expected marker is in the body.
 	ProbeHTTP = "http"
 	// ProbeTCP only completes a TCP handshake.
@@ -53,14 +53,14 @@ const (
 )
 
 const (
-	clusterDomain     = "svc.cluster.local"
-	maxExpectations   = 8
-	maxMarkerLen      = 256
-	maxConcurrentProb = 4
-	reservedLabelNS   = "junkloud.io/"
-	ingressClassOwn   = "cloud-provider-kind"
-	endpointSliceAPI  = "discovery.k8s.io/v1"
-	serviceNameLabel  = "kubernetes.io/service-name"
+	clusterDomain       = "svc.cluster.local"
+	maxExpectations     = 8
+	maxMarkerLen        = 256
+	maxConcurrentProbes = 4
+	reservedLabelNS     = "junkloud.io/"
+	ingressClassOwn     = "cloud-provider-kind"
+	endpointSliceAPI    = "discovery.k8s.io/v1"
+	serviceNameLabel    = "kubernetes.io/service-name"
 )
 
 // ErrProbeFailed marks a probe that could not run or report (the probe pod
@@ -704,7 +704,7 @@ func (c *NetworkChecker) request(t Target, e netExpect, d destination) ProbeRequ
 // probeAll runs every expectation's probe, a few at a time.
 func (c *NetworkChecker) probeAll(ctx context.Context, t Target, p netPlan, d destination) []netOutcome {
 	outs := make([]netOutcome, len(p.expects))
-	sem := make(chan struct{}, maxConcurrentProb)
+	sem := make(chan struct{}, maxConcurrentProbes)
 	var wg sync.WaitGroup
 	for i, e := range p.expects {
 		outs[i].exp = e
@@ -739,7 +739,7 @@ func (c *NetworkChecker) judge(ctx context.Context, t Target, p netPlan, d desti
 		o := &outs[i]
 		switch {
 		case o.err != nil:
-			o.state, o.text = stateUnknown, o.err.Error()
+			o.state, o.text = stateUnknown, strings.TrimPrefix(o.err.Error(), ErrProbeFailed.Error()+": ")
 		case o.result.FailureClass == FailureProbeError:
 			o.state, o.text = stateUnknown, "the probe could not run or report"
 			o.err = ErrProbeFailed
@@ -812,7 +812,7 @@ func judgeDeny(o *netOutcome, all []netOutcome) {
 			return
 		}
 	}
-	o.state, o.text = stateFails, fmt.Sprintf("the %s was observed, but no allowed source reached port %d in this run, so the destination is not shown to be healthy and the block proves nothing", r.FailureClass, o.exp.port)
+	o.state, o.text = stateFails, fmt.Sprintf("a %s was observed, but no allowed source reached port %d in this run, so the destination is not shown to be healthy and the block proves nothing", r.FailureClass, o.exp.port)
 }
 
 // judgeDNS decides an expectation whose probe could not resolve the name.

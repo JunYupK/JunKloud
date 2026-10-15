@@ -30,7 +30,6 @@ attempts=0
 dir=$(mktemp -d) || dir=/tmp
 err=$dir/err
 resp=$dir/resp
-rcf=$dir/rc
 
 now() { date +%s; }
 
@@ -78,12 +77,29 @@ while [ "$i" -lt "$N" ]; do
   start=$(now)
   case "$JK_PROTO" in
     http)
-      {
-        printf 'GET %s HTTP/1.0\r\nHost: %s\r\nUser-Agent: junkloud-probe\r\nConnection: close\r\n\r\n' "$JK_PATH" "$JK_HTTP_HOST" |
-          timeout -s KILL $((T + 2)) nc -v -w "$T" "$JK_HOST" "$JK_PORT" 2>"$err"
-        echo $? >"$rcf"
-      } | head -c 65536 >"$resp"
-      rc=$(cat "$rcf" 2>/dev/null || echo 1)
+      # Keep stdin open until the first byte of the answer has arrived: a
+      # proxy such as envoy treats the client's half-close (nc's reaction to
+      # EOF on stdin) as a reason to drop the request. Afterwards close
+      # stdin, so nc ends when the server closes (or after -w seconds).
+      mkfifo "$dir/in"
+      exec 3<>"$dir/in"
+      printf 'GET %s HTTP/1.1\r\nHost: %s\r\nUser-Agent: junkloud-probe\r\nConnection: close\r\n\r\n' "$JK_PATH" "$JK_HTTP_HOST" >&3
+      (ulimit -f 128; exec timeout -s KILL $((T + 2)) nc -v -w "$T" "$JK_HOST" "$JK_PORT" <"$dir/in" >"$resp" 2>"$err" 3>&-) &
+      npid=$!
+      n=0
+      while kill -0 "$npid" 2>/dev/null; do
+        if [ -s "$resp" ]; then
+          exec 3>&-
+          break
+        fi
+        n=$((n + 1))
+        [ "$n" -gt $(((T + 2) * 10)) ] && break
+        usleep 100000
+      done
+      exec 3>&-
+      wait "$npid"
+      rc=$?
+      rm -f "$dir/in"
       ;;
     *)
       timeout -s KILL $((T + 2)) nc -v -w "$T" "$JK_HOST" "$JK_PORT" </dev/null >/dev/null 2>"$err"
@@ -129,12 +145,17 @@ while [ "$i" -lt "$N" ]; do
     status=0
     marker=0
     case "$msg" in
-      *"timed out"*) class=timeout ;;
-      "")
-        if [ "$elapsed" -ge "$T" ] || [ "$rc" = 137 ]; then class=timeout; else class=refused; fi
-        ;;
       *refused*) class=refused ;;
-      *) class=network-error ;;
+      *"timed out"*) class=timeout ;;
+      *)
+        if [ "$rc" = 137 ] || [ "$elapsed" -ge "$T" ]; then
+          class=timeout # nothing (more) arrived in time
+        elif [ -z "$msg" ]; then
+          class=refused # busybox nc says nothing when the peer resets
+        else
+          class=network-error
+        fi
+        ;;
     esac
     detail=$msg
   fi

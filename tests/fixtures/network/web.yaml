@@ -1,0 +1,35 @@
+# The destination of every network grading scenario: an HTTP application that
+# identifies itself with the body marker JK-NET-WEB, behind Service "web".
+# Images are the pinned, preloaded probe image only (nodes cannot pull).
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: web
+spec:
+  replicas: 1
+  selector:
+    matchLabels: {app: web}
+  template:
+    metadata:
+      labels: {app: web}
+    spec:
+      securityContext: {runAsNonRoot: true, runAsUser: 65534, seccompProfile: {type: RuntimeDefault}}
+      containers:
+      - name: web
+        image: docker.io/library/busybox:1.37.0
+        imagePullPolicy: IfNotPresent
+        command: [sh, -c, "mkdir -p /tmp/www && printf 'JK-NET-WEB' > /tmp/www/index.html && exec httpd -f -p 8080 -h /tmp/www"]
+        ports: [{containerPort: 8080}]
+        readinessProbe: {tcpSocket: {port: 8080}, periodSeconds: 1}
+        resources:
+          requests: {cpu: 10m, memory: 16Mi}
+          limits: {cpu: 100m, memory: 32Mi}
+        securityContext: {allowPrivilegeEscalation: false, capabilities: {drop: [ALL]}}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: web
+spec:
+  selector: {app: web}
+  ports: [{port: 80, targetPort: 8080}]

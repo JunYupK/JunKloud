@@ -215,17 +215,17 @@ Task 2에서 `internal/model`에 아래 타입을 정의한다. 패키지 간에
 
 **Interfaces:** Produces `NetworkChecker` implementing Task 6 Checker. Criterion Kind는 `http,tcp,network-policy`; Args에 source namespace/labels, destination ref, port, expected connection, HTTP host/path/status/body marker를 정의한다. typed probe result는 `ProbeResult{Connected bool; HTTPStatus int; BodyMarker,FailureClass string}`.
 
-- [ ] **실패 테스트 작성:** `TestAllowAndDeny`, `TestDeadServerNotPolicyPass`, `TestDNSFailureNotDenyPass`, `TestWrongBackend`, `TestProbeCleanupAfterCancel`.
+- [x] **실패 테스트 작성:** `TestAllowAndDeny`, `TestDeadServerNotPolicyPass`, `TestDNSFailureNotDenyPass`, `TestWrongBackend`, `TestProbeCleanupAfterCancel`.
   ```go
   testutil.Equal(t, correctPolicy.Status, "PASS")
   testutil.Equal(t, allTrafficBroken.Status == "PASS", false)
   testutil.Equal(t, wrongBackend.Status, "FAIL")
   testutil.Equal(t, remainingProbePods, 0)
   ```
-- [ ] **실패 확인:** `go test ./internal/grader -run 'TestAllow|TestDead|TestDNS|TestWrongBackend|TestProbeCleanup' -v` 실패 확인.
-- [ ] **최소 구현:** 3초×최대3회, 명시된 source identity의 probe Pod, 정상 서버 대조 확인, DNS 오류 분류, 라우팅 응답 marker 검사. allow/deny 결과가 함께 성립해야 policy 완전 정답. 성공했을 때도 probe inventory 정리. 이미지를 시작 전에 준비해 image pull 실패와 학습자 오답을 구분한다.
+- [x] **실패 확인:** `go test ./internal/grader -run 'TestAllow|TestDead|TestDNS|TestWrongBackend|TestProbeCleanup' -v` 실패 확인.
+- [x] **최소 구현:** 3초×최대3회, 명시된 source identity의 probe Pod, 정상 서버 대조 확인, DNS 오류 분류, 라우팅 응답 marker 검사. allow/deny 결과가 함께 성립해야 policy 완전 정답. 성공했을 때도 probe inventory 정리. 이미지를 시작 전에 준비해 image pull 실패와 학습자 오답을 구분한다.
 - [ ] **통과 확인:** `go test -tags=integration ./tests/integration -run TestNetworkGrading -count=1 -v`에서 정책 없음·올바름·전부 차단·서버 다운·DNS 실패를 각각 확인한다.
-- [ ] **커밋:** `feat: verify network behavior without false passes`.
+- [x] **커밋:** `feat: verify network behavior without false passes`.
 
 ### Task 8: 파일·이미지·Helm·Kustomize·보안 검사
 
