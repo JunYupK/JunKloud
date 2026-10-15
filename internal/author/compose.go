@@ -11,6 +11,8 @@ import (
 	"maps"
 	"os"
 	"path/filepath"
+	"regexp"
+	"strings"
 
 	"github.com/JunYupK/JunKloud/internal/environment"
 	"github.com/JunYupK/JunKloud/internal/grader"
@@ -76,13 +78,27 @@ func InputKey(stateDir string) ([]byte, error) {
 	}
 }
 
+var imageDigest = regexp.MustCompile(`^sha256:[0-9a-f]{64}$`)
+
 // EnvironmentManifest is the environment's version manifest that
-// EnvironmentHash digests: the versions recorded in the identity (kind, node
-// image, Kubernetes server) and the pinned platform images (cloud-provider-
-// kind, envoy, metrics-server, the probe image). It holds no identifier of
-// one environment instance, so a rebuilt environment with the same versions
-// keeps its certificates.
-func EnvironmentManifest(id model.Identity) map[string]string {
+// EnvironmentHash digests. It holds everything that can change a verdict
+// without changing the problem or the grader code:
+//
+//   - the versions recorded in the identity (kind, node image, Kubernetes
+//     server) and the pinned platform images (cloud-provider-kind, envoy,
+//     metrics-server, the probe image);
+//   - images: every provided pinned image with its digest, as
+//     "image:<name>" -> digest. Manifests name images by tag, so a changed
+//     digest under the same tag changes neither the problem hash nor the
+//     grader version. Order and repetition do not matter; one name with two
+//     digests is an error;
+//   - tools: the host tool versions DetectToolVersions reports, as
+//     "tool:<name>" -> version. All of helm, kubectl, docker-client and
+//     docker-server are required, so a manifest can never be partial.
+//
+// It holds no identifier of one environment instance, so a rebuilt
+// environment with the same versions keeps its certificates.
+func EnvironmentManifest(id model.Identity, images []environment.PinnedImage, tools map[string]string) (map[string]string, error) {
 	m := maps.Clone(id.Versions)
 	if m == nil {
 		m = map[string]string{}
@@ -91,7 +107,25 @@ func EnvironmentManifest(id model.Identity) map[string]string {
 	m["envoy-proxy"] = environment.EnvoyProxyImage.Ref()
 	m["metrics-server"] = environment.MetricsServerImage.Ref()
 	m["probe-image"] = environment.ProbeImage.Ref()
-	return m
+	for _, img := range images {
+		key := "image:" + img.Name
+		if img.Name == "" || !imageDigest.MatchString(img.Digest) {
+			return nil, fmt.Errorf("author: provided image %q needs a name and a sha256 digest, has %q", img.Name, img.Digest)
+		}
+		if old, dup := m[key]; dup && old != img.Digest {
+			return nil, fmt.Errorf("author: provided image %q has two digests (%s, %s)", img.Name, old, img.Digest)
+		}
+		m[key] = img.Digest
+	}
+	for _, name := range toolKeys {
+		if strings.TrimSpace(tools[name]) == "" {
+			return nil, fmt.Errorf("author: the %s version is missing: the environment hash needs every tool version", name)
+		}
+	}
+	for name, version := range tools {
+		m["tool:"+name] = version
+	}
+	return m, nil
 }
 
 // GraderConfig is what composing the runtime grader needs.
@@ -108,6 +142,34 @@ type GraderConfig struct {
 	// parallelism, poll interval). They go to the engine and to EVERY
 	// checker, so one option decides every default timeout.
 	Options []grader.Option
+	// Tools runs the host tools (helm, kubectl, docker): the grader's own
+	// commands and the version detection behind the environment hash. Nil
+	// means grader.NewToolRunner().
+	Tools grader.ToolRunner
+}
+
+func (c GraderConfig) tools() grader.ToolRunner {
+	if c.Tools != nil {
+		return c.Tools
+	}
+	return grader.NewToolRunner()
+}
+
+// EnvironmentHash is the certificate's environment component for a verified
+// environment: EnvironmentHash(EnvironmentManifest(id, provided images,
+// detected host tool versions)). Sessions must compute it the same way to
+// compare against a certificate; it fails if any tool version cannot be
+// detected.
+func (c GraderConfig) EnvironmentHash(ctx context.Context, id model.Identity) (string, error) {
+	tools, err := DetectToolVersions(ctx, c.tools())
+	if err != nil {
+		return "", err
+	}
+	manifest, err := EnvironmentManifest(id, c.ProvidedImages(), tools)
+	if err != nil {
+		return "", err
+	}
+	return EnvironmentHash(manifest), nil
 }
 
 // ProvidedImages are the images the environment provides: the probe image
@@ -163,6 +225,9 @@ func ComposeGrader(m *environment.Manager, id model.Identity, cfg GraderConfig) 
 		grader.WithProbeControlNamespace(environment.PlatformNamespace),
 		grader.WithInputKey(key),
 	}, cfg.Options...)
+	if cfg.Tools != nil {
+		opts = append(opts, grader.WithToolRunner(cfg.Tools))
+	}
 
 	kubeconfig := m.KubeconfigPath()
 	reader, err := grader.NewClusterReader(kubeconfig, id.Context)
@@ -208,15 +273,19 @@ type Runtime struct {
 	Validator *Validator
 	Grader    *Grader
 	// EnvironmentHash is the certificate component of this environment
-	// (EnvironmentHash(EnvironmentManifest(id))); sessions must compare
-	// against the same value.
+	// (GraderConfig.EnvironmentHash); sessions must compare against the same
+	// value.
 	EnvironmentHash string
 }
 
 // NewRuntime composes the Validator on the Manager, Store and grader. The
 // Validator prepares the environment itself, under the lock, on every
 // Validate.
-func NewRuntime(m *environment.Manager, st *store.Store, id model.Identity, cfg GraderConfig, janitor ...JanitorOption) (*Runtime, error) {
+func NewRuntime(ctx context.Context, m *environment.Manager, st *store.Store, id model.Identity, cfg GraderConfig, janitor ...JanitorOption) (*Runtime, error) {
+	envHash, err := cfg.EnvironmentHash(ctx, id)
+	if err != nil {
+		return nil, err
+	}
 	g, err := ComposeGrader(m, id, cfg)
 	if err != nil {
 		return nil, err
@@ -226,7 +295,6 @@ func NewRuntime(m *environment.Manager, st *store.Store, id model.Identity, cfg 
 		g.Close()
 		return nil, err
 	}
-	envHash := EnvironmentHash(EnvironmentManifest(id))
 	v, err := NewValidator(Config{
 		Identity: id, Env: m, Janitor: j, Engine: g.Engine, Store: st,
 		LockPath: LockPath(cfg.StateDir), GraderVersion: grader.GraderVersion, EnvironmentHash: envHash,

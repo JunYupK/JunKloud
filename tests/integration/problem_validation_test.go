@@ -89,14 +89,16 @@ func TestProblemValidation(t *testing.T) {
 	m, id, dir, st := bootEnvironmentState(t)
 	testutil.NoError(t, m.EnsurePlatform(ctx, id))
 
-	rt, err := author.NewRuntime(m, st, id, author.GraderConfig{StateDir: dir})
+	cfg := author.GraderConfig{StateDir: dir}
+	rt, err := author.NewRuntime(ctx, m, st, id, cfg)
 	testutil.NoError(t, err)
 	t.Cleanup(func() { rt.Close() })
 
 	p := loadValidationFixture(t)
 	hash, err := problem.Hash(p)
 	testutil.NoError(t, err)
-	envHash := author.EnvironmentHash(author.EnvironmentManifest(id))
+	envHash, err := cfg.EnvironmentHash(ctx, id)
+	testutil.NoError(t, err)
 	testutil.Equal(t, rt.EnvironmentHash, envHash)
 
 	certified := func(h string) bool {
@@ -181,8 +183,17 @@ func TestProblemValidation(t *testing.T) {
 		testutil.Equal(t, ok, true)
 		testutil.Equal(t, author.CertificateMatches(record, changedHash, grader.GraderVersion, envHash), false)
 		testutil.Equal(t, author.CertificateMatches(record, hash, "grader-99", envHash), false)
-		moved := author.EnvironmentManifest(id)
-		moved["kubernetes"] = "v9.9.9"
+		tools, err := author.DetectToolVersions(ctx, grader.NewToolRunner())
+		testutil.NoError(t, err)
+		testutil.Equal(t, tools["helm"] != "" && tools["kubectl"] != "" && tools["docker-server"] != "", true)
+		tools["helm"] = "v9.9.9"
+		moved, err := author.EnvironmentManifest(id, cfg.ProvidedImages(), tools)
+		testutil.NoError(t, err)
+		testutil.Equal(t, author.CertificateMatches(record, hash, grader.GraderVersion, author.EnvironmentHash(moved)), false)
+		pins := cfg.ProvidedImages()
+		pins[0].Digest = "sha256:" + strings.Repeat("0", 64)
+		moved, err = author.EnvironmentManifest(id, pins, tools)
+		testutil.NoError(t, err)
 		testutil.Equal(t, author.CertificateMatches(record, hash, grader.GraderVersion, author.EnvironmentHash(moved)), false)
 		_, ok, err = author.CurrentCertificate(ctx, st, hash, "grader-99", envHash)
 		testutil.NoError(t, err)
