@@ -251,17 +251,17 @@ Task 2에서 `internal/model`에 아래 타입을 정의한다. 패키지 간에
 
 **Interfaces:** Consumes Problem/Freeze, Manager.Apply, Engine.Evaluate, Store.SaveValidation. Produces `author.Validator.Validate(ctx context.Context,p model.Problem,seeds []uint64) (model.ValidationRecord,error)`, `CertificateMatches(record model.ValidationRecord,problemHash,graderVersion,environmentHash string) bool`.
 
-- [ ] **실패 테스트 작성:** `TestInitialSolvedWrongReset`, `TestInitiallyPerfectRejected`, `TestStaleCertificate`, `TestValidationBlockedDuringSession`. 초기 부분 점수 2, 정답 10, 오답 6인 fixture를 준비한다.
+- [x] **실패 테스트 작성:** `TestInitialSolvedWrongReset`, `TestInitiallyPerfectRejected`, `TestStaleCertificate`, `TestValidationBlockedDuringSession`. 초기 부분 점수 2, 정답 10, 오답 6인 fixture를 준비한다.
   ```go
   testutil.Equal(t, record.Cases["initial"].MaxScore, 10)
   testutil.Equal(t, *record.Cases["initial"].Score, 2)
   testutil.Equal(t, *record.Cases["solved"].Score, 10)
   testutil.Equal(t, author.CertificateMatches(record, changedHash, engineVersion, envHash), false)
   ```
-- [ ] **실패 확인:** `go test ./internal/author -v` 실패 확인.
-- [ ] **최소 구현:** 허용된 Action dispatch, 임시 문제 namespace 묶음, 단계별 환경·grader 공용 호출. cleanup 기능은 임시 관리 inventory만으로 구현하고 Task 13에서 공통 reset에 통합한다. 각 문제의 초기 벡터·정답·오답·대표 seed·대체 정답을 기록한다. 하나라도 ERROR이면 validation 성공 처리하지 않는다.
-- [ ] **통과 확인:** `go test -tags=integration ./tests/integration -run TestProblemValidation -count=1 -v`. 모범 해답 적용 후의 상태가 다음 사례로 누출되지 않으며 certificate hash 변경은 재검증을 요구한다.
-- [ ] **커밋:** `feat: validate authored problems with the runtime grader`.
+- [x] **실패 확인:** `go test ./internal/author -v` 실패 확인.
+- [x] **최소 구현:** 허용된 Action dispatch, 임시 문제 namespace 묶음, 단계별 환경·grader 공용 호출. cleanup 기능은 임시 관리 inventory만으로 구현하고 Task 13에서 공통 reset에 통합한다. 각 문제의 초기 벡터·정답·오답·대표 seed·대체 정답을 기록한다. 하나라도 ERROR이면 validation 성공 처리하지 않는다.
+- [x] **통과 확인:** `go test -tags=integration ./tests/integration -run TestProblemValidation -count=1 -v`. 모범 해답 적용 후의 상태가 다음 사례로 누출되지 않으며 certificate hash 변경은 재검증을 요구한다.
+- [x] **커밋:** `feat: validate authored problems with the runtime grader`.
 
 ### Task 10: 준비·시작·시간·동결된 세션
 

@@ -505,6 +505,13 @@ func quantityOf(v any) (resource.Quantity, bool) {
 	return resource.Quantity{}, false
 }
 
+// NormalizeImageRef expands the defaults Docker applies to an image reference
+// (registry docker.io, repository library/, tag latest), so that "busybox:1.37.0"
+// and "docker.io/library/busybox:1.37.0" compare equal. It is the comparison
+// WithPreloadedImages uses; callers that decide whether an image is part of
+// the provided set must use it too.
+func NormalizeImageRef(ref string) string { return normalizeImage(ref) }
+
 // normalizeImage expands the defaults of an image reference so that
 // "nginx" and "docker.io/library/nginx:latest" compare equal. Only used when
 // a criterion asks for compare: image; images are otherwise exact.

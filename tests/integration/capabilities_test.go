@@ -21,6 +21,7 @@ import (
 
 	"github.com/JunYupK/JunKloud/internal/environment"
 	"github.com/JunYupK/JunKloud/internal/model"
+	"github.com/JunYupK/JunKloud/internal/store"
 	"github.com/JunYupK/JunKloud/internal/testutil"
 )
 
@@ -85,6 +86,15 @@ func union(a map[string]bool, names ...string) map[string]bool {
 // then deletes the cluster.
 func bootEnvironment(t *testing.T) (*environment.Manager, model.Identity) {
 	t.Helper()
+	m, id, _, _ := bootEnvironmentState(t)
+	return m, id
+}
+
+// bootEnvironmentState is bootEnvironment that also returns the state
+// directory and the store, for tests that compose more of the runtime on top
+// of the environment (validation, sessions).
+func bootEnvironmentState(t *testing.T) (*environment.Manager, model.Identity, string, *store.Store) {
+	t.Helper()
 	dir, st := newEnvironmentDir(t)
 	m := environment.New(dir, st, hostCompatOptions(t)...)
 	id, err := m.Ensure(context.Background())
@@ -97,7 +107,7 @@ func bootEnvironment(t *testing.T) (*environment.Manager, model.Identity) {
 			t.Errorf("cleanup: platform containers left: %v", ids)
 		}
 	})
-	return m, id
+	return m, id, dir, st
 }
 
 // cloudProviderContainers lists the JunKloud cloud-provider-kind container
