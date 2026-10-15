@@ -10,15 +10,11 @@ import (
 
 var errTODO = errors.New("not implemented")
 
-type helmArgs struct{}
-type kustomizeArgs struct{}
 type jobArgs struct{}
 type cronTemplateArgs struct{}
 type cronScheduleArgs struct{}
 
-func parseHelmArgs(model.Criterion) (helmArgs, error)           { return helmArgs{}, nil }
-func parseKustomizeArgs(model.Criterion) (kustomizeArgs, error) { return kustomizeArgs{}, nil }
-func parseJobArgs(model.Criterion) (jobArgs, error)             { return jobArgs{}, nil }
+func parseJobArgs(model.Criterion) (jobArgs, error) { return jobArgs{}, nil }
 func parseCronTemplateArgs(model.Criterion) (cronTemplateArgs, error) {
 	return cronTemplateArgs{}, nil
 }
@@ -26,12 +22,6 @@ func parseCronScheduleArgs(model.Criterion, time.Duration) (cronScheduleArgs, er
 	return cronScheduleArgs{}, nil
 }
 
-func (c *ArtifactChecker) checkHelm(context.Context, Target, model.Criterion) (model.CheckResult, error) {
-	return model.CheckResult{}, errTODO
-}
-func (c *ArtifactChecker) checkKustomize(context.Context, Target, model.Criterion) (model.CheckResult, error) {
-	return model.CheckResult{}, errTODO
-}
 func (c *ArtifactChecker) checkJob(context.Context, Target, model.Criterion) (model.CheckResult, error) {
 	return model.CheckResult{}, errTODO
 }
