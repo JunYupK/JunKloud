@@ -14,7 +14,10 @@
 //
 // Concurrency: Ensure and Apply change the outside world. Callers must hold
 // the environment lock (internal/lock) around them; the Manager does not take
-// it itself, so a caller that already holds it does not deadlock.
+// it itself, so a caller that already holds it does not deadlock. A command
+// that needs the identity first (to compose the runtime) gets it through
+// author.EnsureEnvironment, which takes the lock around Ensure and
+// EnsurePlatform.
 package environment
 
 import (

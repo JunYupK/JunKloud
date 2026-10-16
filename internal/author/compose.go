@@ -16,6 +16,7 @@ import (
 
 	"github.com/JunYupK/JunKloud/internal/environment"
 	"github.com/JunYupK/JunKloud/internal/grader"
+	"github.com/JunYupK/JunKloud/internal/lock"
 	"github.com/JunYupK/JunKloud/internal/model"
 	"github.com/JunYupK/JunKloud/internal/store"
 )
@@ -27,8 +28,49 @@ const (
 )
 
 // LockPath is the environment's mutation lock file under stateDir. Start,
-// reset, bank validation and grading all take it (internal/lock).
-func LockPath(stateDir string) string { return filepath.Join(stateDir, lockFile) }
+// reset, bank validation, grading and the first environment setup
+// (EnsureEnvironment) all take it (internal/lock). stateDir is made absolute,
+// as environment.New does, so every spelling of one directory names one lock.
+func LockPath(stateDir string) string {
+	if abs, err := filepath.Abs(stateDir); err == nil {
+		stateDir = abs
+	}
+	return filepath.Join(stateDir, lockFile)
+}
+
+// EnvironmentEnsurer is the part of *environment.Manager that
+// EnsureEnvironment drives.
+type EnvironmentEnsurer interface {
+	Ensure(ctx context.Context) (model.Identity, error)
+	EnsurePlatform(ctx context.Context, id model.Identity) error
+}
+
+var _ EnvironmentEnsurer = (*environment.Manager)(nil)
+
+// EnsureEnvironment is how a command gets the verified environment identity
+// NewRuntime needs: under the environment lock it runs Ensure (which creates
+// the cluster on first use, writing the kubeconfig and the identity) and then
+// EnsurePlatform (always right after Ensure). Two commands running it at once
+// cannot both create a cluster: the second one gets lock.ErrLocked at once.
+// The caller must not hold the lock already.
+func EnsureEnvironment(ctx context.Context, m EnvironmentEnsurer, stateDir string) (model.Identity, error) {
+	release, err := lock.Acquire(LockPath(stateDir))
+	if errors.Is(err, lock.ErrLocked) {
+		return model.Identity{}, fmt.Errorf("author: set up the environment: another start, reset, validation, grade or environment setup is running: %w", err)
+	}
+	if err != nil {
+		return model.Identity{}, fmt.Errorf("author: set up the environment: %w", err)
+	}
+	defer release()
+	id, err := m.Ensure(ctx)
+	if err != nil {
+		return model.Identity{}, fmt.Errorf("author: set up the environment: %w", err)
+	}
+	if err := m.EnsurePlatform(ctx, id); err != nil {
+		return model.Identity{}, fmt.Errorf("author: install the platform: %w", err)
+	}
+	return id, nil
+}
 
 // InputKey returns the installation's secret key for input fingerprints
 // (grader.WithInputKey), creating it on first use: 32 random bytes in
