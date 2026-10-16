@@ -351,7 +351,9 @@ func TestProblemValidation(t *testing.T) {
 	// provided files, rendered. Before the fix validation graded without a
 	// workspace and such a problem could never be certified.
 	t.Run("GradesFilesInTheServedWorkspace", func(t *testing.T) {
-		withFile := pinnedValidationFixture(t, seedA)
+		// seedB: NeverTouchesAForeignNamespace leaves a foreign namespace
+		// named like seedA's bundle.
+		withFile := pinnedValidationFixture(t, seedB)
 		withFile.Version = "1.0.3"
 		withFile.Files = maps.Clone(withFile.Files)
 		withFile.Files["setup/provided/notes.txt"] = []byte("namespace ${namespace}\n")
@@ -366,7 +368,7 @@ func TestProblemValidation(t *testing.T) {
 		withFile.Cases[0].Expected = maps.Clone(withFile.Cases[0].Expected)
 		withFile.Cases[0].Expected["notes-provided"] = model.StatusPass
 		withFile.Cases[0].ExpectedScore++
-		record, err := rt.Validator.Validate(ctx, withFile, []uint64{seedA})
+		record, err := rt.Validator.Validate(ctx, withFile, []uint64{seedB})
 		testutil.NoError(t, err)
 		testutil.Equal(t, record.Passed, true)
 		for _, key := range []string{author.KeyInitial, author.KeySolved, author.KeyReset} {

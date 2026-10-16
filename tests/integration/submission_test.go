@@ -4,6 +4,7 @@ package integration
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"path/filepath"
 	"strings"
@@ -94,9 +95,9 @@ func TestSubmission(t *testing.T) {
 	svc, err := session.NewService(session.Config{
 		Store: st, Env: m, Engine: engine, Inputs: rt.Grader.Artifacts, Identity: rt.Identity,
 		GraderVersion:       grader.GraderVersion,
-		EnvironmentManifest: cfg.EnvironmentManifest,
+		EnvironmentManifest: rt.Config.EnvironmentManifest, // the runtime's one GraderConfig (I6)
 		PrepareEnvironment: func(ctx context.Context, id model.Identity) error {
-			return author.PrepareEnvironment(ctx, m, id, cfg.Images)
+			return author.PrepareEnvironment(ctx, m, id, rt.Config.Images)
 		},
 		BankDir: devBank, StateDir: dir, Workspace: workspace,
 	})
@@ -228,8 +229,10 @@ func TestSubmission(t *testing.T) {
 		label(`"yes"`)
 		_, err := svc.Grade(ctx, sid, session.GradeOptions{Retry: true, At: at(10, 2)})
 		testutil.ErrorIs(t, err, session.ErrAnswerChanged)
-		if !strings.Contains(err.Error(), "--resubmit") || !strings.Contains(err.Error(), "ConfigMap") {
-			t.Errorf("the refusal does not say what changed and what to do: %v", err)
+		// A mock exam whose result is not open names the problem, never the
+		// fingerprinted objects (spec 9.2).
+		if !strings.Contains(err.Error(), "--resubmit") || !strings.Contains(err.Error(), "dev-config-001") || strings.Contains(err.Error(), "ConfigMap") {
+			t.Errorf("the refusal does not say which problem changed and what to do, or names what is graded: %v", err)
 		}
 		runs, err := st.ListRuns(ctx, original.SubmissionID)
 		testutil.NoError(t, err)
@@ -277,7 +280,9 @@ func TestSubmission(t *testing.T) {
 		testutil.Equal(t, runs[0].Evaluation.Complete, false)
 	})
 
+	var examScore int
 	t.Run("AChangedAnswerIsResubmitted", func(t *testing.T) {
+		examScore = *retried.Evaluation.Score
 		firstSub, err := st.GetSubmission(ctx, original.SubmissionID)
 		testutil.NoError(t, err)
 		firstRuns, err := st.ListRuns(ctx, original.SubmissionID)
@@ -311,23 +316,67 @@ func TestSubmission(t *testing.T) {
 			t.Errorf("the answer was not opened from the frozen package: %q / %q", rv.ReferenceSolution, rv.Explanation)
 		}
 		testutil.Equal(t, rv.SolutionViewed, true)
-		// The problem's own result, narrowed from the whole-session run.
-		saMax := 0
-		for _, c := range byID["dev-sa-001"].Definition.Criteria {
-			saMax += c.Points
-		}
-		testutil.Equal(t, rv.Confirmed != nil, true)
-		testutil.Equal(t, *rv.Confirmed.Evaluation.Score, saMax)
+		// The exam's result is its first complete run (the retry); the later
+		// resubmission is a review submission and never the exam total
+		// (spec 9.2). The problem's own result is narrowed from the exam run.
+		testutil.Equal(t, rv.Confirmed != nil && rv.Confirmed.ID == retried.ID, true)
+		testutil.Equal(t, *rv.Confirmed.Evaluation.Score, byID["dev-sa-001"].Definition.InitialScore)
 		whole, err := svc.Review(ctx, sid, "", false)
 		testutil.NoError(t, err)
-		testutil.Equal(t, whole.Confirmed != nil, true)
-		testutil.Equal(t, *whole.Confirmed.Evaluation.Score, maxScore)
-		testutil.Equal(t, len(whole.Runs), 3) // the failed run, its retry and the resubmission
+		testutil.Equal(t, whole.Confirmed != nil && whole.Confirmed.ID == retried.ID, true)
+		testutil.Equal(t, *whole.Confirmed.Evaluation.Score, examScore)
+		testutil.Equal(t, len(whole.Runs), 2) // the failed run and its retry
+		testutil.Equal(t, len(whole.ReviewRuns), 1)
+		testutil.Equal(t, *whole.ReviewRuns[0].Evaluation.Score, maxScore) // the resubmission, shown apart
 		events, err := st.ListReviews(ctx, sid)
 		testutil.NoError(t, err)
 		testutil.Equal(t, len(events), 1)
 		other, err := svc.Review(ctx, sid, "dev-scale-001", false)
 		testutil.NoError(t, err)
 		testutil.Equal(t, other.SolutionViewed, false)
+	})
+
+	// The view a caller gets never carries the grading definition (I4).
+	t.Run("CallersSeeNoGradingDefinition", func(t *testing.T) {
+		status, err := svc.Status(ctx, sid, at(11, 0))
+		testutil.NoError(t, err)
+		raw, err := json.Marshal(status)
+		testutil.NoError(t, err)
+		for _, f := range frozen.Problems {
+			for _, c := range f.Definition.Criteria {
+				if strings.Contains(string(raw), `"`+c.ID+`"`) {
+					t.Errorf("Status reveals criterion %s", c.ID)
+				}
+			}
+		}
+		for _, s := range secrets {
+			if strings.Contains(string(raw), s) {
+				t.Errorf("Status reveals %q", s)
+			}
+		}
+	})
+
+	// A COMPLETED session is not active, but its namespaces stay until a
+	// reset: a new session over them is refused before anything is recorded
+	// (no SETUP_ERROR), and a resubmission is refused while another session
+	// is active (I3).
+	t.Run("ANewSessionWaitsForTheReset", func(t *testing.T) {
+		_, err := svc.Prepare(ctx, session.StartOptions{Mode: model.ModeMock, MockID: "dev-mock", Seed: 7})
+		testutil.ErrorIs(t, err, session.ErrEnvironmentOccupied)
+		if !strings.Contains(err.Error(), "reset") || !strings.Contains(err.Error(), sid) {
+			t.Errorf("the refusal does not name the session and the reset: %v", err)
+		}
+		active, err := st.ActiveSessions(ctx, id.ID)
+		testutil.NoError(t, err)
+		testutil.Equal(t, len(active), 0)
+
+		testutil.NoError(t, st.CreateSession(ctx, model.SessionRecord{
+			ID: "practice-other", EnvironmentID: id.ID, Mode: model.ModePractice, State: model.StateRunning,
+		}))
+		_, err = svc.Grade(ctx, sid, session.GradeOptions{Resubmit: true, At: at(11, 0)})
+		testutil.ErrorIs(t, err, session.ErrSessionActive)
+		cur, _ := st.LoadSession(ctx, sid)
+		testutil.Equal(t, cur.State, model.StateCompleted)
+		testutil.NoError(t, st.Transition(ctx, "practice-other", model.StateRunning, model.StateAbandoned))
 	})
 }

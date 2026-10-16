@@ -18,6 +18,7 @@ import (
 	"github.com/JunYupK/JunKloud/internal/author"
 	"github.com/JunYupK/JunKloud/internal/environment"
 	"github.com/JunYupK/JunKloud/internal/grader"
+	"github.com/JunYupK/JunKloud/internal/lock"
 	"github.com/JunYupK/JunKloud/internal/model"
 	"github.com/JunYupK/JunKloud/internal/problem"
 	"github.com/JunYupK/JunKloud/internal/session"
@@ -62,6 +63,20 @@ func TestSessionStart(t *testing.T) {
 		testutil.NoError(t, err)
 		testutil.Equal(t, record.Passed, true)
 	}
+
+	// The identity commands compose the runtime with comes from
+	// EnsureEnvironment, under the environment lock (I7): the same
+	// environment, and a concurrent holder of the lock is refused.
+	t.Run("EnsureEnvironmentTakesTheLock", func(t *testing.T) {
+		got, err := author.EnsureEnvironment(ctx, m, dir)
+		testutil.NoError(t, err)
+		testutil.Equal(t, got.ID, id.ID)
+		release, err := lock.Acquire(author.LockPath(dir))
+		testutil.NoError(t, err)
+		_, err = author.EnsureEnvironment(ctx, m, dir)
+		testutil.ErrorIs(t, err, lock.ErrLocked)
+		testutil.NoError(t, release())
+	})
 
 	workspace := t.TempDir()
 	svc := session.New(st, m, rt, devBank, dir, session.WithWorkspace(workspace))
