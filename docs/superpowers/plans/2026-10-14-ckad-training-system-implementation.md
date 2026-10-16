@@ -269,7 +269,7 @@ Task 2에서 `internal/model`에 아래 타입을 정의한다. 패키지 간에
 
 **Interfaces:** Produces `session.New(s *store.Store,env *environment.Manager,engine *grader.Engine,bankDir,stateDir string) *Service`; `Prepare(ctx,StartOptions) (model.SessionRecord,error)`, `Start(ctx,sessionID string,at time.Time) error`, `Status(ctx,sessionID string,now time.Time) (Status,error)`. `StartOptions{Mode,MockID,Domain,Difficulty,Tag string; Count int; Seed uint64; RetrySessionID string; NewSeed bool}`; `Status{Session model.SessionRecord; Elapsed,Overtime time.Duration; ClockAnomaly bool}`.
 
-- [ ] **실패 테스트 작성:** `TestPrepareHidesQuestions`, `TestBrokenInitialStateIsExpected`, `TestStartClock`, `TestWallClockAfterSleep`, `TestSecondSessionRejected`, `TestBankChangeDoesNotChangeActiveSession`.
+- [x] **실패 테스트 작성:** `TestPrepareHidesQuestions`, `TestBrokenInitialStateIsExpected`, `TestStartClock`, `TestWallClockAfterSleep`, `TestSecondSessionRejected`, `TestBankChangeDoesNotChangeActiveSession`.
   ```go
   testutil.Equal(t, prepared.StartedAt, (*time.Time)(nil))
   testutil.Equal(t, publicQuestionFilesBeforeStart, 0)
@@ -277,9 +277,9 @@ Task 2에서 `internal/model`에 아래 타입을 정의한다. 패키지 간에
   testutil.Equal(t, status.Overtime, time.Minute)
   ```
 - [ ] **실패 확인:** `go test ./internal/session -run 'TestPrepare|TestBroken|TestStartClock|TestWall|TestSecond|TestBankChange' -v` 실패 확인.
-- [ ] **최소 구현:** 전용 환경·capability·validation 확인→문제 freeze→모든 setup·초기 결과 검증→PREPARING. 확인 후 public assets 공개·RUNNING 전환·시작 시각 저장. 의도된 CrashLoop를 플랫폼 고장으로 혼동하지 않는다. 실패 준비의 inventory는 보존해 복구할 수 있게 한다.
-- [ ] **통과 확인:** `go test -tags=integration ./tests/integration -run TestSessionStart -count=1 -v` PASS. 개발용 세트는 5개 fixture를 사용하며 출시 문제 수로 세지 않는다.
-- [ ] **커밋:** `feat: prepare reproducible sessions before starting the clock`.
+- [x] **최소 구현:** 전용 환경·capability·validation 확인→문제 freeze→모든 setup·초기 결과 검증→PREPARING. 확인 후 public assets 공개·RUNNING 전환·시작 시각 저장. 의도된 CrashLoop를 플랫폼 고장으로 혼동하지 않는다. 실패 준비의 inventory는 보존해 복구할 수 있게 한다.
+- [x] **통과 확인:** `go test -tags=integration ./tests/integration -run TestSessionStart -count=1 -v` PASS. 개발용 세트는 5개 fixture를 사용하며 출시 문제 수로 세지 않는다.
+- [x] **커밋:** `feat: prepare reproducible sessions before starting the clock`.
 
 ### Task 11: 제출·부분 저장·retry/resubmit·공개 규칙
 

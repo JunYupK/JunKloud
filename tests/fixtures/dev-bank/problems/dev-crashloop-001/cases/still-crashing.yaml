@@ -18,5 +18,8 @@ spec:
           image: docker.io/library/busybox:1.37.0
           imagePullPolicy: IfNotPresent
           command: ["sh", "-c", "echo again; exit 2"]
+          readinessProbe:
+            exec: {command: ["false"]}
+            periodSeconds: 1
           resources:
             limits: {cpu: 50m, memory: 16Mi}

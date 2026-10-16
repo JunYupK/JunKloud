@@ -1,6 +1,8 @@
 # Development fixture 3 of 5 (not product content): an intentionally broken
 # app. The api Deployment crash-loops in its initial state; that is the
-# declared starting point of the problem, not a platform fault.
+# declared starting point of the problem, not a platform fault. The failing
+# readiness probe keeps the pod from ever being Ready, so a restart window
+# cannot make the broken state look rolled out.
 schema_version: 1
 id: dev-crashloop-001
 version: 1.0.0
@@ -26,7 +28,7 @@ criteria:
     target: {api_version: apps/v1, kind: Deployment, namespace: dev-crash, name: api}
     points: 4
     depends_on: [api-exists]
-    timeout: 90s
+    timeout: 20s
     args:
       replicas: 1
 setup:

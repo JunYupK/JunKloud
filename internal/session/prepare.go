@@ -363,7 +363,7 @@ func (e *setupError) Unwrap() []error { return append([]error{ErrSetupFailed}, e
 // private diagnostics file instead of the error, which must not reveal the
 // problem's checks before the exam starts.
 func (s *Service) fail(rec model.SessionRecord, op model.Operation, public error, detail string, cause ...error) (model.SessionRecord, error) {
-	ctx, cancel := context.WithTimeout(context.WithoutCancel(context.Background()), failureBudget)
+	ctx, cancel := context.WithTimeout(context.Background(), failureBudget)
 	defer cancel()
 
 	var notes []string

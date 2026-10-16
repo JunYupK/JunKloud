@@ -5,7 +5,7 @@ metadata:
   name: web
   namespace: dev-scale
 spec:
-  replicas: "${replicas}"
+  replicas: 3
   selector:
     matchLabels: {app: web}
   template:

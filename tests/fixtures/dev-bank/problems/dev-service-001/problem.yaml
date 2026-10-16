@@ -10,8 +10,6 @@ tags: [service]
 competencies:
   - "Provide and troubleshoot access to applications via services"
 capabilities: []
-parameters:
-  port: [8080, 9090]
 namespace: dev-svc
 budget:
   cpu: 50m
@@ -33,7 +31,7 @@ criteria:
     args:
       fields:
         - path: spec.ports[0].port
-          equals: "${port}"
+          equals: 8080
 setup:
   - kind: apply
     args: {path: setup/notes.yaml}
