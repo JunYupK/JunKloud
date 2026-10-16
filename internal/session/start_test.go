@@ -125,9 +125,9 @@ func TestWallClockAfterSleep(t *testing.T) {
 	// state, three and a half hours of wall time later.
 	reopened, err := session.NewService(session.Config{
 		Store: h.st, Env: h.env, Engine: h.eng, Identity: testIdentity, GraderVersion: testGraderVersion,
-		EnvironmentHash:    func(context.Context, model.Identity) (string, error) { return testEnvHash, nil },
-		PrepareEnvironment: func(context.Context, model.Identity) error { return nil },
-		BankDir:            h.bank, StateDir: h.stateDir, Workspace: h.workspace,
+		EnvironmentManifest: func(context.Context, model.Identity) (map[string]string, error) { return testManifest, nil },
+		PrepareEnvironment:  func(context.Context, model.Identity) error { return nil },
+		BankDir:             h.bank, StateDir: h.stateDir, Workspace: h.workspace,
 	})
 	testutil.NoError(t, err)
 	later := at.Round(0).Add(3*time.Hour + 30*time.Minute)
@@ -317,24 +317,6 @@ func TestStartLeavesNothingVisibleWithoutAClock(t *testing.T) {
 	testutil.NoError(t, err)
 	testutil.Equal(t, stored.State, model.StatePreparing)
 	testutil.Equal(t, stored.StartedAt, (*time.Time)(nil))
-}
-
-// TestStartRejectsAReservedAssetName: a provided file may not shadow the
-// question.
-func TestStartRejectsAReservedAssetName(t *testing.T) {
-	h := newHarness(t, func(o *harnessOption) {
-		o.mutateBank = func(t *testing.T, bank string) {
-			dir := filepath.Join(bank, "problems", "dev-sa-001", "setup", "provided")
-			testutil.NoError(t, os.MkdirAll(dir, 0o755))
-			testutil.NoError(t, os.WriteFile(filepath.Join(dir, "question.md"), []byte("sneaky"), 0o644))
-		}
-	})
-	prepared := h.prepareMock()
-	err := h.svc.Start(ctx, prepared.ID, t0)
-	if err == nil {
-		t.Fatal("Start accepted a provided file named question.md")
-	}
-	testutil.Equal(t, countFiles(t, h.workspace), 0)
 }
 
 // TestBankChangeDoesNotChangeActiveSession: a session is frozen. Editing or

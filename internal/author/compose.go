@@ -155,17 +155,22 @@ func (c GraderConfig) tools() grader.ToolRunner {
 	return grader.NewToolRunner()
 }
 
-// EnvironmentHash is the certificate's environment component for a verified
-// environment: EnvironmentHash(EnvironmentManifest(id, provided images,
-// detected host tool versions)). Sessions must compute it the same way to
-// compare against a certificate; it fails if any tool version cannot be
-// detected.
-func (c GraderConfig) EnvironmentHash(ctx context.Context, id model.Identity) (string, error) {
+// EnvironmentManifest is the version manifest of a verified environment:
+// EnvironmentManifest(id, provided images, detected host tool versions). It
+// fails if any tool version cannot be detected.
+func (c GraderConfig) EnvironmentManifest(ctx context.Context, id model.Identity) (map[string]string, error) {
 	tools, err := DetectToolVersions(ctx, c.tools())
 	if err != nil {
-		return "", err
+		return nil, err
 	}
-	manifest, err := EnvironmentManifest(id, c.ProvidedImages(), tools)
+	return EnvironmentManifest(id, c.ProvidedImages(), tools)
+}
+
+// EnvironmentHash is the certificate's environment component for a verified
+// environment: EnvironmentHash(c.EnvironmentManifest(ctx, id)). Sessions must
+// compute it the same way to compare against a certificate.
+func (c GraderConfig) EnvironmentHash(ctx context.Context, id model.Identity) (string, error) {
+	manifest, err := c.EnvironmentManifest(ctx, id)
 	if err != nil {
 		return "", err
 	}

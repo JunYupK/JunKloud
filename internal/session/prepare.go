@@ -29,12 +29,16 @@ const failureBudget = time.Minute
 //
 // Under the environment lock it:
 //
-//  1. composes the problems (mock: the exam file's order and duration;
-//     practice: problem.Select) and refuses a second unfinished session;
-//  2. verifies the environment (Ensure) and requires a current validation
-//     certificate for every chosen problem and PASSing doctor capabilities
-//     for the capabilities they declare. A problem that fails either is
-//     refused with the reason; none is skipped or replaced;
+//  1. refuses a second unfinished session and verifies the environment
+//     (Ensure); the environment version manifest, its hash and the grader
+//     version are computed now and frozen on the session;
+//  2. decides which problems are servable (serve.go): a current validation
+//     certificate for this grader and environment, PASSing doctor
+//     capabilities for the capabilities they declare, no provided file
+//     named like the question. A mock session (exam file order and duration)
+//     is refused with every reason if any of its problems is not servable;
+//     a practice session draws with problem.Select from the servable
+//     problems only and PrepareWithReport says which were left out;
 //  3. freezes every problem with the session seed, stores the private package
 //     under its content hash and records the session as PREPARING;
 //  4. applies every problem's setup (scope enforced, the inventory recorded by
@@ -51,47 +55,67 @@ const failureBudget = time.Minute
 // recorded, the returned record (state SETUP_ERROR) is returned with the
 // error, which wraps ErrSetupFailed.
 func (s *Service) Prepare(ctx context.Context, opts StartOptions) (model.SessionRecord, error) {
+	rec, _, err := s.PrepareWithReport(ctx, opts)
+	return rec, err
+}
+
+// PrepareWithReport is Prepare that also returns what was left out of the
+// draw (Report.Excluded). The report is valid with or without an error.
+func (s *Service) PrepareWithReport(ctx context.Context, opts StartOptions) (model.SessionRecord, Report, error) {
+	rec, report, err := s.prepare(ctx, opts)
+	return rec, report, err
+}
+
+func (s *Service) prepare(ctx context.Context, opts StartOptions) (model.SessionRecord, Report, error) {
 	seed := opts.Seed
 	if seed == 0 {
 		var err error
 		if seed, err = s.cfg.NewSeed(); err != nil {
-			return model.SessionRecord{}, err
+			return model.SessionRecord{}, Report{}, err
 		}
 	}
-	chosen, limit, err := s.compose(opts, seed)
+	pl, err := s.plan(opts)
 	if err != nil {
-		return model.SessionRecord{}, err
+		return model.SessionRecord{}, Report{}, err
 	}
 
 	release, err := lock.Acquire(author.LockPath(s.cfg.StateDir))
 	if errors.Is(err, lock.ErrLocked) {
-		return model.SessionRecord{}, fmt.Errorf("session: prepare: another start, reset, validation or grade is running on this environment: %w", err)
+		return model.SessionRecord{}, Report{}, fmt.Errorf("session: prepare: another start, reset, validation or grade is running on this environment: %w", err)
 	}
 	if err != nil {
-		return model.SessionRecord{}, fmt.Errorf("session: prepare: %w", err)
+		return model.SessionRecord{}, Report{}, fmt.Errorf("session: prepare: %w", err)
 	}
 	defer release()
 
 	if err := s.requireNoActiveSession(ctx); err != nil {
-		return model.SessionRecord{}, err
+		return model.SessionRecord{}, Report{}, err
 	}
 	id, err := s.cfg.Env.Ensure(ctx)
 	if err != nil {
-		return model.SessionRecord{}, fmt.Errorf("session: verify the environment: %w", err)
+		return model.SessionRecord{}, Report{}, fmt.Errorf("session: verify the environment: %w", err)
 	}
 	if id.ID != s.cfg.Identity.ID {
-		return model.SessionRecord{}, fmt.Errorf("%w: found %q, expected %q; start the program again", ErrEnvironmentChanged, id.ID, s.cfg.Identity.ID)
+		return model.SessionRecord{}, Report{}, fmt.Errorf("%w: found %q, expected %q; start the program again", ErrEnvironmentChanged, id.ID, s.cfg.Identity.ID)
 	}
-	if err := s.requireCertificates(ctx, id, chosen); err != nil {
-		return model.SessionRecord{}, err
+	manifest, err := s.cfg.EnvironmentManifest(ctx, id)
+	if err != nil {
+		return model.SessionRecord{}, Report{}, fmt.Errorf("session: compute the environment manifest: %w", err)
 	}
-	if err := s.cfg.PrepareEnvironment(ctx, id); err != nil {
-		return model.SessionRecord{}, fmt.Errorf("session: prepare the environment: %w", err)
+	envHash := author.EnvironmentHash(manifest)
+	chosen, report, err := s.serve(ctx, id, envHash, pl, opts, seed)
+	if err != nil {
+		return model.SessionRecord{}, report, err
 	}
-	if err := s.requireCapabilities(ctx, id, chosen); err != nil {
-		return model.SessionRecord{}, err
-	}
+	limit := pl.limit
+	rec, err := s.record(ctx, id, opts, seed, limit, chosen, manifest, envHash)
+	return rec, report, err
+}
 
+// record freezes the chosen problems, stores the session and carries the
+// preparation out. The caller holds the lock and has verified the
+// environment and the problems.
+func (s *Service) record(ctx context.Context, id model.Identity, opts StartOptions, seed uint64, limit time.Duration, chosen []model.Problem, manifest map[string]string, envHash string) (model.SessionRecord, error) {
 	frozen, setups, err := s.freeze(id, chosen, seed)
 	if err != nil {
 		return model.SessionRecord{}, err
@@ -109,6 +133,7 @@ func (s *Service) Prepare(ctx context.Context, opts StartOptions) (model.Session
 	rec := model.SessionRecord{
 		ID: sid, EnvironmentID: id.ID, Mode: opts.Mode, State: model.StatePreparing,
 		Seed: seed, Problems: frozen, DurationLimit: limit,
+		GraderVersion: s.cfg.GraderVersion, EnvironmentHash: envHash, EnvironmentManifest: manifest,
 	}
 	if err := s.cfg.Store.CreateSession(ctx, rec); err != nil {
 		return model.SessionRecord{}, fmt.Errorf("session: record the session: %w", err)
@@ -176,65 +201,6 @@ func (s *Service) requireNoActiveSession(ctx context.Context) error {
 		list = append(list, fmt.Sprintf("%s (%s, %s)", a.ID, a.Mode, a.State))
 	}
 	return fmt.Errorf("%w: finish or abandon %s first", ErrSessionActive, strings.Join(list, ", "))
-}
-
-// requireCertificates demands a current certificate for every problem (spec
-// 7.2): a passing validation for exactly this package content, grader version
-// and environment. The refusal names every problem that lacks one.
-func (s *Service) requireCertificates(ctx context.Context, id model.Identity, problems []model.Problem) error {
-	envHash, err := s.cfg.EnvironmentHash(ctx, id)
-	if err != nil {
-		return fmt.Errorf("session: compute the environment hash: %w", err)
-	}
-	var missing []string
-	for _, p := range problems {
-		hash, err := problem.Hash(p)
-		if err != nil {
-			return err
-		}
-		_, ok, err := author.CurrentCertificate(ctx, s.cfg.Store, hash, s.cfg.GraderVersion, envHash)
-		if err != nil {
-			return fmt.Errorf("session: look up the validation of %q: %w", p.ID, err)
-		}
-		if !ok {
-			missing = append(missing, p.ID)
-		}
-	}
-	if len(missing) > 0 {
-		return fmt.Errorf("%w: %s; each needs a passing validation for this exact package, grader version (%s) and environment (it was never validated, failed, or the package, grader or environment changed since); validate the bank and try again",
-			ErrNotCertified, strings.Join(missing, ", "), s.cfg.GraderVersion)
-	}
-	return nil
-}
-
-// requireCapabilities runs the doctor only when a chosen problem declares
-// capabilities, and refuses every problem whose declared capabilities are not
-// all PASS, with the doctor's reason.
-func (s *Service) requireCapabilities(ctx context.Context, id model.Identity, problems []model.Problem) error {
-	if !slices.ContainsFunc(problems, func(p model.Problem) bool { return len(p.Capabilities) > 0 }) {
-		return nil
-	}
-	report, err := s.cfg.Env.Doctor(ctx, id)
-	if err != nil {
-		return fmt.Errorf("session: check the environment capabilities: %w", err)
-	}
-	var refused []string
-	for _, p := range problems {
-		for _, name := range report.Unavailable(p.Capabilities) {
-			reason := "not reported by the doctor"
-			if i := slices.IndexFunc(report.Checks, func(c environment.CapabilityCheck) bool { return c.Name == name }); i >= 0 {
-				reason = report.Checks[i].Status
-				if r := report.Checks[i].Reason; r != "" {
-					reason += ": " + r
-				}
-			}
-			refused = append(refused, fmt.Sprintf("%s needs %s (%s)", p.ID, name, reason))
-		}
-	}
-	if len(refused) > 0 {
-		return fmt.Errorf("%w: %s", ErrCapabilityUnavailable, strings.Join(refused, "; "))
-	}
-	return nil
 }
 
 // freeze fixes every problem with the session seed and renders its setup

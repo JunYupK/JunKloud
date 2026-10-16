@@ -59,30 +59,35 @@ func (s *Service) loadBank() ([]model.Problem, error) {
 	return bank, nil
 }
 
-// compose chooses the session's problems: mock sessions follow the exam file
-// in its order and take its duration; practice sessions use problem.Select
-// and have no time limit (spec: only the mock exam has an official time).
-func (s *Service) compose(opts StartOptions, seed uint64) ([]model.Problem, time.Duration, error) {
+// plan is what a request is composed from before the environment is asked
+// anything: a mock session's problems are fixed by its exam file (in exam
+// order, with the exam's duration); a practice session's candidates are the
+// whole bank, narrowed to the servable ones once the environment is known
+// (serve.go).
+type plan struct {
+	mock     bool
+	problems []model.Problem
+	limit    time.Duration
+}
+
+func (s *Service) plan(opts StartOptions) (plan, error) {
 	switch opts.Mode {
 	case model.ModeMock:
-		return s.composeMock(opts)
+		problems, limit, err := s.composeMock(opts)
+		return plan{mock: true, problems: problems, limit: limit}, err
 	case model.ModePractice:
 		if opts.MockID != "" || opts.RetrySessionID != "" || opts.NewSeed {
-			return nil, 0, fmt.Errorf("%w: a practice session takes no exam, retry session or new-seed option", ErrInvalidOptions)
+			return plan{}, fmt.Errorf("%w: a practice session takes no exam, retry session or new-seed option", ErrInvalidOptions)
+		}
+		if opts.Count < problem.PracticeMinCount || opts.Count > problem.PracticeMaxCount {
+			return plan{}, fmt.Errorf("%w: practice sessions take %d-%d problems, got %d", problem.ErrInvalidCount, problem.PracticeMinCount, problem.PracticeMaxCount, opts.Count)
 		}
 		bank, err := s.loadBank()
-		if err != nil {
-			return nil, 0, err
-		}
-		chosen, err := problem.Select(bank, problem.SelectOptions{
-			Mode: model.ModePractice, Domain: opts.Domain, Difficulty: opts.Difficulty,
-			Tag: opts.Tag, Count: opts.Count, Seed: seed,
-		})
-		return chosen, 0, err
+		return plan{problems: bank}, err
 	case model.ModeRetry:
-		return nil, 0, ErrRetryUnavailable
+		return plan{}, ErrRetryUnavailable
 	default:
-		return nil, 0, fmt.Errorf("%w: mode %q, want %q or %q", ErrInvalidOptions, opts.Mode, model.ModePractice, model.ModeMock)
+		return plan{}, fmt.Errorf("%w: mode %q, want %q or %q", ErrInvalidOptions, opts.Mode, model.ModePractice, model.ModeMock)
 	}
 }
 

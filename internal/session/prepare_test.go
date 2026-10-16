@@ -537,9 +537,14 @@ func TestPrepareComposesPracticeSessions(t *testing.T) {
 			_, err := h.svc.Prepare(ctx, opts)
 			testutil.ErrorIs(t, err, problem.ErrInsufficientProblems)
 		}
-		_, err := h.svc.Prepare(ctx, session.StartOptions{Mode: model.ModePractice, Count: 4})
+		testutil.Equal(t, h.env.count("apply"), 0)
+		active, aerr := h.st.ActiveSessions(ctx, testEnvID)
+		testutil.NoError(t, aerr)
+		testutil.Equal(t, len(active), 0)
+		h2 := newHarness(t)
+		_, err := h2.svc.Prepare(ctx, session.StartOptions{Mode: model.ModePractice, Count: 4})
 		testutil.ErrorIs(t, err, problem.ErrInvalidCount)
-		testutil.Equal(t, len(h.env.kinds()), 0)
+		testutil.Equal(t, len(h2.env.kinds()), 0) // a bad count is refused before the environment is asked
 	})
 	t.Run("a package that does not load is an error, not a smaller bank", func(t *testing.T) {
 		h := newHarness(t)
@@ -622,4 +627,198 @@ func TestPrepareChecksTheEnvironment(t *testing.T) {
 		testutil.NoError(t, aerr)
 		testutil.Equal(t, len(active), 0)
 	})
+}
+
+// TestPrepareFreezesTheEnvironmentManifest (spec 6.3): the grader version, the
+// environment version manifest and its hash are stored on the session at
+// prepare time, are exactly what the certificates were matched with, and
+// survive Start unchanged.
+func TestPrepareFreezesTheEnvironmentManifest(t *testing.T) {
+	h := newHarness(t)
+	prepared := h.prepareMock()
+	for name, rec := range map[string]model.SessionRecord{"returned": prepared, "stored": mustLoad(t, h, prepared.ID)} {
+		testutil.Equal(t, rec.GraderVersion, testGraderVersion)
+		testutil.Equal(t, rec.EnvironmentHash, testEnvHash)
+		testutil.Equal(t, rec.EnvironmentManifest, testManifest)
+		testutil.Equal(t, author.EnvironmentHash(rec.EnvironmentManifest), rec.EnvironmentHash)
+		// The frozen triple is the certificate key: every frozen problem has a
+		// passing certificate under it.
+		for _, f := range rec.Problems {
+			_, ok, err := author.CurrentCertificate(ctx, h.st, f.Hash, rec.GraderVersion, rec.EnvironmentHash)
+			testutil.NoError(t, err)
+			if !ok {
+				t.Errorf("%s: %s has no certificate under the frozen grader version and environment hash", name, f.Definition.ID)
+			}
+		}
+	}
+	testutil.NoError(t, h.svc.Start(ctx, prepared.ID, t0))
+	after := mustLoad(t, h, prepared.ID)
+	testutil.Equal(t, after.EnvironmentHash, testEnvHash)
+	testutil.Equal(t, after.EnvironmentManifest, testManifest)
+	st, err := h.svc.Status(ctx, prepared.ID, t0)
+	testutil.NoError(t, err)
+	testutil.Equal(t, st.Session.EnvironmentManifest, testManifest)
+}
+
+func mustLoad(t *testing.T, h *harness, id string) model.SessionRecord {
+	t.Helper()
+	rec, err := h.st.LoadSession(ctx, id)
+	testutil.NoError(t, err)
+	return rec
+}
+
+// degradedBank has seven problems: the five fixtures, one variant that will
+// have no certificate (dev-sa-002) and one that needs network-policy
+// (dev-sa-003).
+func degradedBank(o *harnessOption) {
+	o.uncertified = []string{"dev-sa-002"}
+	o.mutateBank = func(t *testing.T, bank string) {
+		addVariant(t, bank, "dev-sa-001", "dev-sa-002", "dev-sec", "dev-sec2")
+		addVariant(t, bank, "dev-sa-001", "dev-sa-003", "dev-sec", "dev-sec3")
+		editFile(t, filepath.Join(bank, "problems", "dev-sa-003", "problem.yaml"), "capabilities: []", "capabilities: [network-policy]")
+	}
+}
+
+func npFails() environment.DoctorReport {
+	return environment.DoctorReport{Checks: []environment.CapabilityCheck{
+		{Name: environment.CapabilityNetworkPolicy, Status: environment.StatusFail, Reason: "NetworkPolicy is not enforced"},
+	}}
+}
+
+// TestPracticeDrawsOnlyFromServableProblems (spec 7.2, ruling R27): the
+// candidates are narrowed to problems with a current certificate and PASSing
+// capabilities BEFORE the draw, so success never depends on the seed, and what
+// was left out is reported.
+func TestPracticeDrawsOnlyFromServableProblems(t *testing.T) {
+	servable := []string{"dev-config-001", "dev-crashloop-001", "dev-sa-001", "dev-scale-001", "dev-service-001"}
+
+	for seed := uint64(1); seed <= 8; seed++ {
+		h := newHarness(t, degradedBank)
+		h.env.report = npFails()
+		rec, report, err := h.svc.PrepareWithReport(ctx, session.StartOptions{Mode: model.ModePractice, Count: 5, Seed: seed})
+		testutil.NoError(t, err)
+		got := problemIDs(rec)
+		slices.Sort(got)
+		testutil.Equal(t, got, servable)
+
+		var ids []string
+		reasons := map[string]string{}
+		for _, e := range report.Excluded {
+			ids = append(ids, e.ProblemID)
+			reasons[e.ProblemID] = e.Reason
+		}
+		slices.Sort(ids)
+		testutil.Equal(t, ids, []string{"dev-sa-002", "dev-sa-003"})
+		if !strings.Contains(reasons["dev-sa-002"], "no passing validation") {
+			t.Errorf("dev-sa-002 reason = %q", reasons["dev-sa-002"])
+		}
+		if !strings.Contains(reasons["dev-sa-003"], "network-policy") || !strings.Contains(reasons["dev-sa-003"], "NetworkPolicy is not enforced") {
+			t.Errorf("dev-sa-003 reason = %q", reasons["dev-sa-003"])
+		}
+		testutil.Equal(t, h.env.count("doctor"), 1)
+	}
+
+	t.Run("the pool is too small", func(t *testing.T) {
+		h := newHarness(t, degradedBank)
+		h.env.report = npFails()
+		_, report, err := h.svc.PrepareWithReport(ctx, session.StartOptions{Mode: model.ModePractice, Count: 6, Seed: 3})
+		testutil.ErrorIs(t, err, problem.ErrInsufficientProblems)
+		for _, want := range []string{"6 requested, 5 available", "dev-sa-002", "no passing validation", "dev-sa-003", "NetworkPolicy is not enforced"} {
+			if !strings.Contains(err.Error(), want) {
+				t.Errorf("error lacks %q: %v", want, err)
+			}
+		}
+		testutil.Equal(t, len(report.Excluded), 2)
+		testutil.Equal(t, h.env.count("apply"), 0)
+		active, aerr := h.st.ActiveSessions(ctx, testEnvID)
+		testutil.NoError(t, aerr)
+		testutil.Equal(t, len(active), 0)
+	})
+
+	t.Run("only the requested slice is accounted for", func(t *testing.T) {
+		h := newHarness(t, degradedBank)
+		h.env.report = npFails()
+		_, report, err := h.svc.PrepareWithReport(ctx, session.StartOptions{Mode: model.ModePractice, Count: 5, Domain: model.DomainNetworking})
+		testutil.ErrorIs(t, err, problem.ErrInsufficientProblems)
+		if !strings.Contains(err.Error(), "5 requested, 1 available") || strings.Contains(err.Error(), "dev-sa-00") {
+			t.Errorf("error = %v", err)
+		}
+		testutil.Equal(t, len(report.Excluded), 0)
+	})
+
+	t.Run("a reserved provided-file name excludes the problem", func(t *testing.T) {
+		h := newHarness(t, func(o *harnessOption) {
+			o.mutateBank = func(t *testing.T, bank string) {
+				addVariant(t, bank, "dev-sa-001", "dev-sa-002", "dev-sec", "dev-sec2")
+				addVariant(t, bank, "dev-sa-001", "dev-sa-003", "dev-sec", "dev-sec3")
+				dir := filepath.Join(bank, "problems", "dev-sa-002", "setup", "provided")
+				testutil.NoError(t, os.MkdirAll(dir, 0o755))
+				testutil.NoError(t, os.WriteFile(filepath.Join(dir, "question.md"), []byte("sneaky"), 0o644))
+			}
+		})
+		_, report, err := h.svc.PrepareWithReport(ctx, session.StartOptions{Mode: model.ModePractice, Count: 7, Seed: 5})
+		testutil.ErrorIs(t, err, problem.ErrInsufficientProblems)
+		testutil.Equal(t, len(report.Excluded), 1)
+		testutil.Equal(t, report.Excluded[0].ProblemID, "dev-sa-002")
+	})
+}
+
+// TestMockRefusesUnservableProblems: an exam file is strict. Any problem in it
+// that cannot be served refuses the session and every reason is listed.
+func TestMockRefusesUnservableProblems(t *testing.T) {
+	h := newHarness(t, func(o *harnessOption) {
+		degradedBank(o)
+		mutate := o.mutateBank
+		o.mutateBank = func(t *testing.T, bank string) {
+			mutate(t, bank)
+			exam := filepath.Join(bank, "exams", "dev-mock.yaml")
+			b, err := os.ReadFile(exam)
+			testutil.NoError(t, err)
+			testutil.NoError(t, os.WriteFile(exam, append(b, "  - dev-sa-002\n  - dev-sa-003\n"...), 0o644))
+		}
+	})
+	h.env.report = npFails()
+
+	_, err := h.svc.Prepare(ctx, h.mock())
+	testutil.ErrorIs(t, err, session.ErrNotCertified)
+	if !strings.Contains(err.Error(), "dev-sa-002") {
+		t.Errorf("error does not name the uncertified problem: %v", err)
+	}
+	testutil.Equal(t, h.env.count("apply"), 0)
+	active, aerr := h.st.ActiveSessions(ctx, testEnvID)
+	testutil.NoError(t, aerr)
+	testutil.Equal(t, len(active), 0)
+
+	// With the certificate in place, the capability failure still refuses it.
+	h.certifyProblem(h.loadBankProblem("dev-sa-002"), testGraderVersion, testEnvHash, true)
+	_, err = h.svc.Prepare(ctx, h.mock())
+	testutil.ErrorIs(t, err, session.ErrCapabilityUnavailable)
+	if !strings.Contains(err.Error(), "dev-sa-003") || !strings.Contains(err.Error(), "NetworkPolicy is not enforced") {
+		t.Errorf("error does not explain the capability refusal: %v", err)
+	}
+	testutil.Equal(t, h.env.count("apply"), 0)
+}
+
+// TestPrepareRefusesAReservedAssetName (R28): a provided file that would
+// shadow the question is caught before any cluster change, so no session is
+// left blocking the environment.
+func TestPrepareRefusesAReservedAssetName(t *testing.T) {
+	h := newHarness(t, func(o *harnessOption) {
+		o.mutateBank = func(t *testing.T, bank string) {
+			dir := filepath.Join(bank, "problems", "dev-sa-001", "setup", "provided")
+			testutil.NoError(t, os.MkdirAll(dir, 0o755))
+			testutil.NoError(t, os.WriteFile(filepath.Join(dir, "question.md"), []byte("sneaky"), 0o644))
+		}
+	})
+	_, err := h.svc.Prepare(ctx, h.mock())
+	testutil.ErrorIs(t, err, session.ErrReservedAsset)
+	if !strings.Contains(err.Error(), "dev-sa-001") {
+		t.Errorf("error does not name the problem: %v", err)
+	}
+	testutil.Equal(t, h.env.count("apply"), 0)
+	testutil.Equal(t, h.env.count("prepare-env"), 0)
+	active, aerr := h.st.ActiveSessions(ctx, testEnvID)
+	testutil.NoError(t, aerr)
+	testutil.Equal(t, len(active), 0)
+	testutil.Equal(t, countFiles(t, h.workspace), 0)
 }

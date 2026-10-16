@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"io/fs"
+	"maps"
 	"os"
 	"path/filepath"
 	"slices"
@@ -15,6 +16,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/JunYupK/JunKloud/internal/author"
 	"github.com/JunYupK/JunKloud/internal/environment"
 	"github.com/JunYupK/JunKloud/internal/grader"
 	"github.com/JunYupK/JunKloud/internal/model"
@@ -33,8 +35,16 @@ const devBank = "../../tests/fixtures/dev-bank"
 const (
 	testEnvID         = "env-test"
 	testGraderVersion = "grader-test"
-	testEnvHash       = "sha256:env-hash-1"
 )
+
+// testManifest is the environment version manifest of the fake environment;
+// certificates are keyed by its hash, exactly as the real composition does.
+var testManifest = map[string]string{
+	"kind": "v0.33.0", "kubernetes": "v1.37.0", "probe-image": "docker.io/library/busybox:1.37.0",
+	"tool:helm": "v4.3.0", "tool:kubectl": "v1.37.0",
+}
+
+var testEnvHash = author.EnvironmentHash(testManifest)
 
 // Markers planted in the fixtures' private files (solution, case, explanation).
 var privateMarkers = []string{"DEV-SOLUTION-MARKER", "DEV-CASE-MARKER", "DEV-EXPLANATION-MARKER"}
@@ -288,8 +298,8 @@ func newHarness(t *testing.T, opts ...func(*harnessOption)) *harness {
 	h.svc, err = session.NewService(session.Config{
 		Store: h.rec, Env: h.env, Engine: h.eng, Identity: testIdentity,
 		GraderVersion: testGraderVersion,
-		EnvironmentHash: func(context.Context, model.Identity) (string, error) {
-			return testEnvHash, nil
+		EnvironmentManifest: func(context.Context, model.Identity) (map[string]string, error) {
+			return maps.Clone(testManifest), nil
 		},
 		PrepareEnvironment: func(context.Context, model.Identity) error {
 			h.env.log(event{Kind: "prepare-env"})
@@ -401,4 +411,34 @@ func problemIDs(rec model.SessionRecord) []string {
 		ids = append(ids, p.Definition.ID)
 	}
 	return ids
+}
+
+// addVariant copies a bank problem under a new ID and namespace, so a test
+// can have more than the five fixtures to draw from.
+func addVariant(t *testing.T, bank, from, to, nsFrom, nsTo string) {
+	t.Helper()
+	src, dst := filepath.Join(bank, "problems", from), filepath.Join(bank, "problems", to)
+	copyTree(t, src, dst)
+	err := filepath.WalkDir(dst, func(path string, d fs.DirEntry, err error) error {
+		if err != nil || d.IsDir() {
+			return err
+		}
+		b, err := os.ReadFile(path)
+		if err != nil {
+			return err
+		}
+		edited := strings.NewReplacer(from, to, nsFrom, nsTo).Replace(string(b))
+		return os.WriteFile(path, []byte(edited), 0o644)
+	})
+	testutil.NoError(t, err)
+}
+
+// editFile applies a text replacement to a bank file and requires it to match.
+func editFile(t *testing.T, path, old, new string) {
+	t.Helper()
+	b, err := os.ReadFile(path)
+	testutil.NoError(t, err)
+	edited := strings.Replace(string(b), old, new, 1)
+	testutil.Equal(t, edited != string(b), true)
+	testutil.NoError(t, os.WriteFile(path, []byte(edited), 0o644))
 }

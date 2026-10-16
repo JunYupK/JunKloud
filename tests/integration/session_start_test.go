@@ -18,6 +18,7 @@ import (
 
 	"github.com/JunYupK/JunKloud/internal/author"
 	"github.com/JunYupK/JunKloud/internal/environment"
+	"github.com/JunYupK/JunKloud/internal/grader"
 	"github.com/JunYupK/JunKloud/internal/model"
 	"github.com/JunYupK/JunKloud/internal/problem"
 	"github.com/JunYupK/JunKloud/internal/session"
@@ -145,6 +146,17 @@ func TestSessionStart(t *testing.T) {
 			testutil.Equal(t, f.Question, "")
 		}
 		testutil.Equal(t, ids, devExamOrder)
+
+		// The grader version and environment manifest the problems were
+		// certified against are frozen on the session.
+		stored, err := st.LoadSession(ctx, prepared.ID)
+		testutil.NoError(t, err)
+		testutil.Equal(t, stored.GraderVersion, grader.GraderVersion)
+		testutil.Equal(t, stored.EnvironmentHash, rt.EnvironmentHash)
+		testutil.Equal(t, author.EnvironmentHash(stored.EnvironmentManifest), rt.EnvironmentHash)
+		if stored.EnvironmentManifest["kubernetes"] == "" || stored.EnvironmentManifest["tool:helm"] == "" {
+			t.Errorf("manifest incomplete: %v", stored.EnvironmentManifest)
+		}
 
 		publicQuestionFilesBeforeStart := 0
 		_ = filepath.WalkDir(workspace, func(path string, d os.DirEntry, err error) error {

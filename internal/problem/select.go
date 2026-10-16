@@ -82,6 +82,12 @@ func Select(bank []model.Problem, opts SelectOptions) ([]model.Problem, error) {
 	return candidates[:opts.Count:opts.Count], nil
 }
 
+// Matches reports whether p passes opts' Domain, Difficulty and Tag filters
+// (empty filters match everything), the same test Select applies. Callers
+// that narrow the pool before Select use it to know which problems the
+// request was about.
+func Matches(p model.Problem, opts SelectOptions) bool { return matches(p, opts) }
+
 func matches(p model.Problem, opts SelectOptions) bool {
 	return (opts.Domain == "" || p.Domain == opts.Domain) &&
 		(opts.Difficulty == "" || p.Difficulty == opts.Difficulty) &&

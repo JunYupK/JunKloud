@@ -57,6 +57,9 @@ var (
 	// ErrCapabilityUnavailable: a chosen problem needs an environment
 	// capability that the doctor does not report as PASS.
 	ErrCapabilityUnavailable = errors.New("session: a required environment capability is unavailable")
+	// ErrReservedAsset: a chosen problem provides a file whose name the
+	// session reserves for the question.
+	ErrReservedAsset = errors.New("session: a problem provides a file named like the question")
 	// ErrNamespaceClash: two chosen problems would own the same namespace.
 	ErrNamespaceClash = errors.New("session: two problems would use the same namespace")
 	// ErrEnvironmentChanged: the live environment is not the one this
@@ -98,6 +101,22 @@ type StartOptions struct {
 	Seed                                  uint64
 	RetrySessionID                        string
 	NewSeed                               bool
+}
+
+// Exclusion is a problem the request was about but which cannot be served,
+// and why. Practice sessions are drawn only from servable problems; the
+// exclusions say what was left out (spec 7.2: nothing is skipped silently).
+type Exclusion struct {
+	ProblemID string
+	Reason    string
+}
+
+// Report is what Prepare found besides the session itself.
+type Report struct {
+	// Excluded lists the problems matching the request that were not
+	// candidates: no current validation certificate, a required capability
+	// that is not PASS, or a reserved provided-file name.
+	Excluded []Exclusion
 }
 
 // Status is a session and its clock.
@@ -155,10 +174,12 @@ type Config struct {
 	Identity model.Identity
 	// GraderVersion is grader.GraderVersion.
 	GraderVersion string
-	// EnvironmentHash computes the certificate's environment component for a
-	// verified identity; it must use the same GraderConfig.Images as the
-	// validation (GraderConfig.EnvironmentHash).
-	EnvironmentHash func(ctx context.Context, id model.Identity) (string, error)
+	// EnvironmentManifest computes the environment version manifest of a
+	// verified identity (GraderConfig.EnvironmentManifest); it must use the
+	// same GraderConfig.Images as the validation. Its hash
+	// (author.EnvironmentHash) is the certificate's environment component,
+	// and the manifest, hash and grader version are frozen on the session.
+	EnvironmentManifest func(ctx context.Context, id model.Identity) (map[string]string, error)
 	// PrepareEnvironment installs the platform and preloads the pinned images
 	// (author.PrepareEnvironment); called under the lock.
 	PrepareEnvironment func(ctx context.Context, id model.Identity) error
@@ -197,8 +218,8 @@ func WithClock(now func() time.Time) Option { return func(c *Config) { c.Now = n
 func New(s *store.Store, env *environment.Manager, rt *author.Runtime, graderCfg author.GraderConfig, bankDir, stateDir string, opts ...Option) *Service {
 	cfg := Config{
 		Store: s, Env: env, Engine: rt.Grader.Engine, Identity: rt.Identity,
-		GraderVersion:   grader.GraderVersion,
-		EnvironmentHash: graderCfg.EnvironmentHash,
+		GraderVersion:       grader.GraderVersion,
+		EnvironmentManifest: graderCfg.EnvironmentManifest,
 		PrepareEnvironment: func(ctx context.Context, id model.Identity) error {
 			return author.PrepareEnvironment(ctx, env, id, graderCfg.Images)
 		},
@@ -221,8 +242,8 @@ func NewService(cfg Config) (*Service, error) {
 		return nil, errors.New("session: a service needs a Store, Env and Engine")
 	case cfg.Identity.ID == "":
 		return nil, errors.New("session: a service needs the verified environment identity")
-	case cfg.GraderVersion == "", cfg.EnvironmentHash == nil, cfg.PrepareEnvironment == nil:
-		return nil, errors.New("session: a service needs the grader version, the environment hash and the environment preparation")
+	case cfg.GraderVersion == "", cfg.EnvironmentManifest == nil, cfg.PrepareEnvironment == nil:
+		return nil, errors.New("session: a service needs the grader version, the environment manifest and the environment preparation")
 	case cfg.BankDir == "", cfg.StateDir == "":
 		return nil, errors.New("session: a service needs the bank and state directories")
 	}
