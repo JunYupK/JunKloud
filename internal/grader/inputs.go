@@ -32,7 +32,9 @@ type InputCapturer interface {
 //	    network-policy) the workloads whose pod template its selector selects
 //	    (also at zero replicas) and bare pods it selects; for an Ingress its
 //	    backend Services and their workloads; for any captured workload or pod
-//	    the ConfigMaps, Secrets and ServiceAccount its pod spec references; for
+//	    the ConfigMaps, Secrets and ServiceAccount its pod spec references
+//	    (containers, init and ephemeral containers, imagePullSecrets, the
+//	    ServiceAccount's imagePullSecrets; more than 30 is an error); for
 //	    http/tcp/network-policy the NetworkPolicies of the target's and every
 //	    source namespace; for authorization the RoleBindings/ClusterRoleBindings
 //	    granting the ServiceAccount with the Roles they reference and the
@@ -282,11 +284,18 @@ const maxReferenced = 30
 
 // captureReferenced fingerprints the ConfigMaps, Secrets and ServiceAccount
 // that a workload's pod spec refers to: part of what the learner submitted.
+// That includes the Secrets named by spec.imagePullSecrets and by the
+// ServiceAccount's imagePullSecrets (a changed pull credential can turn an
+// ImagePullBackOff into a running pod), references from ephemeral
+// containers and the deprecated spec.serviceAccount field. A pod spec naming
+// more than maxReferenced objects is not silently cut short: the answer
+// cannot be fingerprinted completely, so it is an error (the submission is
+// then never confirmed as unchanged).
 func (c *ArtifactChecker) captureReferenced(ctx context.Context, ref model.ObjectRef, obj object, out map[string]string, depth int) error {
 	spec := mapAt(obj, podSpecPath[ref.Kind]...)
 	refs := map[model.ObjectRef]bool{}
 	add := func(kind, name string) {
-		if name != "" && len(refs) < maxReferenced {
+		if name != "" {
 			refs[model.ObjectRef{APIVersion: "v1", Kind: kind, Namespace: ref.Namespace, Name: name}] = true
 		}
 	}
@@ -300,7 +309,7 @@ func (c *ArtifactChecker) captureReferenced(ctx context.Context, ref model.Objec
 			add("Secret", name(asMap(src)["secret"], "name"))
 		}
 	}
-	for _, group := range []string{"containers", "initContainers"} {
+	for _, group := range []string{"containers", "initContainers", "ephemeralContainers"} {
 		for _, cv := range listAt(spec, group) {
 			cm := asMap(cv)
 			for _, e := range listAt(cm, "env") {
@@ -314,8 +323,48 @@ func (c *ArtifactChecker) captureReferenced(ctx context.Context, ref model.Objec
 			}
 		}
 	}
-	if sa, _ := spec["serviceAccountName"].(string); sa != "" {
-		add("ServiceAccount", sa)
+	for _, s := range listAt(spec, "imagePullSecrets") {
+		add("Secret", name(s, "name"))
+	}
+	var accounts []string
+	for _, key := range []string{"serviceAccountName", "serviceAccount"} {
+		if sa, _ := spec[key].(string); sa != "" {
+			add("ServiceAccount", sa)
+			accounts = append(accounts, sa)
+		}
+	}
+	if err := c.captureRefs(ctx, ref, refs, out); err != nil {
+		return err
+	}
+	// The ServiceAccount's own pull credentials are injected into the pods.
+	pull := map[model.ObjectRef]bool{}
+	for _, sa := range accounts {
+		saRef := model.ObjectRef{APIVersion: "v1", Kind: "ServiceAccount", Namespace: ref.Namespace, Name: sa}
+		if out[objectKey(saRef)] == "absent" {
+			continue
+		}
+		saObj, err := c.obs.get(ctx, saRef)
+		if errors.Is(err, ErrNotFound) {
+			continue
+		}
+		if err != nil {
+			return err
+		}
+		for _, s := range listAt(saObj, "imagePullSecrets") {
+			if n := name(s, "name"); n != "" {
+				pull[model.ObjectRef{APIVersion: "v1", Kind: "Secret", Namespace: ref.Namespace, Name: n}] = true
+			}
+		}
+	}
+	return c.captureRefs(ctx, ref, pull, out)
+}
+
+// captureRefs fingerprints a set of referenced objects, refusing more than
+// maxReferenced.
+func (c *ArtifactChecker) captureRefs(ctx context.Context, owner model.ObjectRef, refs map[model.ObjectRef]bool, out map[string]string) error {
+	if len(refs) > maxReferenced {
+		return fmt.Errorf("%w: the pod spec of %s %s references %d ConfigMaps, Secrets and ServiceAccounts, more than the %d the grader fingerprints, so the answer cannot be shown unchanged",
+			ErrInsufficientEvidence, owner.Kind, owner.Name, len(refs), maxReferenced)
 	}
 	list := make([]model.ObjectRef, 0, len(refs))
 	for r := range refs {

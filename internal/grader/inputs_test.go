@@ -423,3 +423,92 @@ func TestInputChangeSeesNetworkPoliciesOfTheInvolvedNamespaces(t *testing.T) {
 	testutil.Equal(t, reflect.DeepEqual(a, mk(policy("jk-p1", "web-in", "intruder"), policy("jk-other", "egress", "x"))), false)
 	testutil.Equal(t, reflect.DeepEqual(a, mk(policy("jk-p1", "web-in", "frontend"), policy("jk-other", "egress", "y"))), false)
 }
+
+// TestInputsCoverPullCredentialsAndRefuseTooMany: the Secrets a pod pulls its
+// images with are part of the answer (a changed pull credential can turn
+// ImagePullBackOff into a running pod), so are references from ephemeral
+// containers and the deprecated serviceAccount field; and a pod spec naming
+// more objects than the grader fingerprints makes the answer unprovable, it
+// never drops the rest silently (Codex review P1/P2 on PR #2).
+func TestInputsCoverPullCredentialsAndRefuseTooMany(t *testing.T) {
+	ready := model.Criterion{ID: "r", Kind: model.CriterionReady, Points: 1, Target: deployRef}
+	secret := func(name, rv string) map[string]any {
+		return obj(t, fmt.Sprintf(`{"apiVersion":"v1","kind":"Secret","metadata":{"name":%q,"namespace":"jk-p1","uid":"sec-%s","resourceVersion":%q},
+		  "type":"kubernetes.io/dockerconfigjson","data":{".dockerconfigjson":"e30="}}`, name, name, rv))
+	}
+	withPodSpec := func(podSpec string) map[string]any {
+		return obj(t, `{"apiVersion":"apps/v1","kind":"Deployment","metadata":{"name":"web","namespace":"jk-p1","uid":"dep-1","generation":1},
+		  "spec":{"replicas":1,"selector":{"matchLabels":{"app":"web"}},"template":{"metadata":{"labels":{"app":"web"}},"spec":`+podSpec+`}}}`)
+	}
+	t.Run("imagePullSecrets of the pod spec", func(t *testing.T) {
+		dep := withPodSpec(`{"imagePullSecrets":[{"name":"regcred"}],"containers":[{"name":"c","image":"registry.example/app:1"}]}`)
+		mk := func(rv string) map[string]string {
+			r := newReader().put(deployRef, dep).put(refOf("v1", "Secret", "jk-p1", "regcred"), secret("regcred", rv))
+			return capture(t, grader.ArtifactConfig{Reader: r}, "", ready)
+		}
+		a := mk("1")
+		if _, ok := a["object:v1/Secret/jk-p1/regcred"]; !ok {
+			t.Fatalf("the pull Secret is not fingerprinted: %v", a)
+		}
+		testutil.Equal(t, reflect.DeepEqual(a, mk("1")), true)
+		testutil.Equal(t, reflect.DeepEqual(a, mk("2")), false) // the credential was changed
+		// With a key the payload itself is covered (keyed), as for every Secret.
+		withKey := capture(t, grader.ArtifactConfig{Reader: newReader().put(deployRef, dep).put(refOf("v1", "Secret", "jk-p1", "regcred"), secret("regcred", "1")), InputKey: inputKey}, "", ready)
+		if !strings.Contains(withKey["object:v1/Secret/jk-p1/regcred"], "mac:") {
+			t.Errorf("pull Secret not keyed like other Secrets: %v", withKey)
+		}
+	})
+	t.Run("imagePullSecrets of the pod's ServiceAccount", func(t *testing.T) {
+		dep := withPodSpec(`{"serviceAccountName":"puller","containers":[{"name":"c","image":"registry.example/app:1"}]}`)
+		mk := func(rv string) map[string]string {
+			r := newReader().put(deployRef, dep).
+				put(refOf("v1", "ServiceAccount", "jk-p1", "puller"), obj(t, `{"apiVersion":"v1","kind":"ServiceAccount","metadata":{"name":"puller","namespace":"jk-p1","uid":"sa-1"},"imagePullSecrets":[{"name":"sa-cred"}]}`)).
+				put(refOf("v1", "Secret", "jk-p1", "sa-cred"), secret("sa-cred", rv))
+			return capture(t, grader.ArtifactConfig{Reader: r}, "", ready)
+		}
+		a := mk("1")
+		for _, want := range []string{"object:v1/ServiceAccount/jk-p1/puller", "object:v1/Secret/jk-p1/sa-cred"} {
+			if _, ok := a[want]; !ok {
+				t.Fatalf("%s is not fingerprinted: %v", want, a)
+			}
+		}
+		testutil.Equal(t, reflect.DeepEqual(a, mk("2")), false)
+	})
+	t.Run("the deprecated serviceAccount field", func(t *testing.T) {
+		dep := withPodSpec(`{"serviceAccount":"legacy","containers":[{"name":"c","image":"i"}]}`)
+		r := newReader().put(deployRef, dep).put(refOf("v1", "ServiceAccount", "jk-p1", "legacy"), obj(t, `{"apiVersion":"v1","kind":"ServiceAccount","metadata":{"name":"legacy","namespace":"jk-p1","uid":"sa-2"}}`))
+		a := capture(t, grader.ArtifactConfig{Reader: r}, "", ready)
+		if v := a["object:v1/ServiceAccount/jk-p1/legacy"]; v == "" || v == "absent" {
+			t.Fatalf("serviceAccount is not followed: %v", a)
+		}
+	})
+	t.Run("ephemeral containers", func(t *testing.T) {
+		podRef := refOf("v1", "Pod", "jk-p1", "solo")
+		p := obj(t, `{"apiVersion":"v1","kind":"Pod","metadata":{"name":"solo","namespace":"jk-p1","uid":"p-1"},
+		  "spec":{"containers":[{"name":"c","image":"i"}],
+		  "ephemeralContainers":[{"name":"dbg","image":"busybox:1.37.0","envFrom":[{"secretRef":{"name":"dbg-env"}}],"env":[{"name":"X","valueFrom":{"configMapKeyRef":{"name":"dbg-cm","key":"k"}}}]}]}}`)
+		c := model.Criterion{ID: "r", Kind: model.CriterionResource, Points: 1, Target: podRef}
+		a := capture(t, grader.ArtifactConfig{Reader: newReader().put(podRef, p)}, "", c)
+		for _, want := range []string{"object:v1/Secret/jk-p1/dbg-env", "object:v1/ConfigMap/jk-p1/dbg-cm"} {
+			if _, ok := a[want]; !ok {
+				t.Fatalf("%s is not fingerprinted: %v", want, a)
+			}
+		}
+	})
+	t.Run("more references than the limit make the answer unprovable", func(t *testing.T) {
+		var env []string
+		for i := 0; i < 31; i++ {
+			env = append(env, fmt.Sprintf(`{"name":"V%d","valueFrom":{"configMapKeyRef":{"name":"cm-%02d","key":"k"}}}`, i, i))
+		}
+		dep := withPodSpec(`{"containers":[{"name":"c","image":"i","env":[` + strings.Join(env, ",") + `]}]}`)
+		_, err := grader.NewArtifactChecker(grader.ArtifactConfig{Reader: newReader().put(deployRef, dep)}).CaptureInputs(context.Background(), inputsTarget("", ready))
+		testutil.ErrorIs(t, err, grader.ErrInsufficientEvidence)
+		if !strings.Contains(err.Error(), "30") {
+			t.Fatalf("error should name the limit: %v", err)
+		}
+		// Exactly the limit is still fine.
+		dep = withPodSpec(`{"containers":[{"name":"c","image":"i","env":[` + strings.Join(env[:30], ",") + `]}]}`)
+		_, err = grader.NewArtifactChecker(grader.ArtifactConfig{Reader: newReader().put(deployRef, dep)}).CaptureInputs(context.Background(), inputsTarget("", ready))
+		testutil.NoError(t, err)
+	})
+}
