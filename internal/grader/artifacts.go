@@ -143,7 +143,7 @@ func (c *ArtifactChecker) ValidateCriterion(crit model.Criterion) error {
 		_, err := parseImageArgs(crit, c.set.defaultTimeout)
 		return err
 	case model.CriterionHelm:
-		_, err := parseHelmArgs(crit)
+		_, err := parseHelmArgs(crit, c.set.defaultTimeout)
 		return err
 	case model.CriterionKustomize:
 		_, err := parseKustomizeArgs(crit)

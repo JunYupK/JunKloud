@@ -102,7 +102,7 @@ func TestStaleCertificate(t *testing.T) {
 	testutil.Equal(t, author.CertificateMatches(record, changedHash, engineVersion, envHash), false)
 
 	// Grader semantics changed.
-	testutil.Equal(t, author.CertificateMatches(record, hash, "grader-2", envHash), false)
+	testutil.Equal(t, author.CertificateMatches(record, hash, "grader-999", envHash), false)
 	// Environment versions changed (a different kind release, a new node image).
 	newer := map[string]string{}
 	for k, v := range manifest {

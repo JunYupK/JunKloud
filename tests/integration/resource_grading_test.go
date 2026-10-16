@@ -172,7 +172,7 @@ func TestResourceGrading(t *testing.T) {
 		// reference. A short explicit limit keeps the test fast.
 		apply(gradeDeployment("wrong", malformedImage, nil, 1))
 		start := time.Now()
-		ev := grade(gradeCriteria("wrong", 8*time.Second))
+		ev := grade(gradeCriteria("wrong", 15*time.Second))
 		elapsed := time.Since(start)
 		testutil.Equal(t, statuses(ev), map[string]string{"exists": "PASS", "image": "FAIL", "limits": "PASS", "defaults": "PASS", "ready": "FAIL"})
 		testutil.Equal(t, *ev.Score, 6)
@@ -180,7 +180,7 @@ func TestResourceGrading(t *testing.T) {
 		for _, r := range ev.Results {
 			switch r.CriterionID {
 			case "ready":
-				for _, want := range []string{"8s", "availableReplicas", "cause", "InvalidImageName", "BusyBox"} {
+				for _, want := range []string{"15s", "availableReplicas", "cause", "InvalidImageName", "BusyBox"} {
 					if !strings.Contains(r.Reason, want) {
 						t.Errorf("ready reason lacks %q: %q", want, r.Reason)
 					}
@@ -195,14 +195,14 @@ func TestResourceGrading(t *testing.T) {
 				}
 			}
 		}
-		if elapsed < 8*time.Second || elapsed > 40*time.Second {
-			t.Errorf("grading took %v, want about the 8s limit", elapsed)
+		if elapsed < 15*time.Second || elapsed > 50*time.Second {
+			t.Errorf("grading took %v, want about the 15s limit", elapsed)
 		}
 	})
 
 	t.Run("MissingTagFollowsTheRegistryAnswer", func(t *testing.T) {
 		apply(gradeDeployment("missing", missingTag, nil, "100m")) // small: the node is already busy
-		crits := gradeCriteria("missing", 8*time.Second)
+		crits := gradeCriteria("missing", 15*time.Second)
 		ev := grade([]model.Criterion{crits[0], crits[4]})
 
 		// What did the node's registry pull actually say? Prove the expected
@@ -249,7 +249,7 @@ func TestResourceGrading(t *testing.T) {
 		// the image is one the environment promised to provide.
 		provided := []grader.Option{grader.WithRedactor(redactor), grader.WithPreloadedImages(environment.ProbeImage.Name, missingTag)}
 		e := grader.NewEngine(grader.DefaultCheckers(reader, provided...), provided...)
-		crits := gradeCriteria("missing", 8*time.Second)
+		crits := gradeCriteria("missing", 15*time.Second)
 		ev, err := e.Evaluate(ctx, gradeTarget(id, []model.Criterion{crits[0], crits[4]}))
 		testutil.NoError(t, err)
 		testutil.Equal(t, statuses(ev), map[string]string{"exists": "PASS", "ready": "ERROR"})
@@ -265,7 +265,7 @@ func TestResourceGrading(t *testing.T) {
 		// failure into a learner FAIL.
 		forgot := []grader.Option{grader.WithRedactor(redactor)}
 		e := grader.NewEngine(grader.DefaultCheckers(reader, forgot...), forgot...)
-		crits := gradeCriteria("missing", 8*time.Second)
+		crits := gradeCriteria("missing", 15*time.Second)
 		ev, err := e.Evaluate(ctx, gradeTarget(id, []model.Criterion{crits[0], crits[4]}))
 		testutil.NoError(t, err)
 		testutil.Equal(t, statuses(ev), map[string]string{"exists": "PASS", "ready": "ERROR"})
@@ -278,7 +278,7 @@ func TestResourceGrading(t *testing.T) {
 		// A Deployment that asks for more CPU than the node has: the pods
 		// stay Pending for capacity, which the grader must not call wrong.
 		apply(gradeDeployment("huge", environment.ProbeImage.Name, nil, 64))
-		crits := gradeCriteria("huge", 6*time.Second)
+		crits := gradeCriteria("huge", 15*time.Second)
 		ev := grade([]model.Criterion{crits[0], crits[4]})
 		testutil.Equal(t, statuses(ev), map[string]string{"exists": "PASS", "ready": "ERROR"})
 		testutil.Equal(t, ev.Score, (*int)(nil))
@@ -310,8 +310,31 @@ func TestResourceGrading(t *testing.T) {
 		testutil.Equal(t, statuses(scaleReady(3)), map[string]string{"exists": "PASS", "ready": "FAIL"})
 	})
 
+	t.Run("CrashLoopWithoutProbeIsAlwaysFail", func(t *testing.T) {
+		// R25: a container that exits at once and has no readiness probe is
+		// Ready for a moment after every restart. Graded again and again,
+		// in whatever phase of its back-off it happens to be, it must FAIL
+		// every time, never PASS by luck and never ERROR.
+		crash := gradeDeployment("crashloop", environment.ProbeImage.Name, 1, "50m")
+		containers := crash["spec"].(map[string]any)["template"].(map[string]any)["spec"].(map[string]any)["containers"].([]any)
+		crash["spec"].(map[string]any)["template"].(map[string]any)["spec"].(map[string]any)["containers"] = containers[1:] // no sidecar
+		containers[1].(map[string]any)["command"] = []any{"sh", "-c", "echo starting; exit 1"}
+		apply(crash)
+		crits := gradeCriteria("crashloop", 30*time.Second)
+		for i := 1; i <= 5; i++ {
+			start := time.Now()
+			ev := grade([]model.Criterion{crits[0], crits[4]})
+			t.Logf("grading %d took %v: %s", i, time.Since(start), ev.Results[1].Reason)
+			testutil.Equal(t, statuses(ev), map[string]string{"exists": "PASS", "ready": "FAIL"})
+			r := ev.Results[1].Reason
+			if !strings.Contains(r, "restarted") && !strings.Contains(r, "CrashLoopBackOff") && !strings.Contains(r, "exit code 1") && !strings.Contains(r, "left Ready") {
+				t.Errorf("grading %d: reason does not name the crash loop: %q", i, r)
+			}
+		}
+	})
+
 	t.Run("MissingTargetFailsDependents", func(t *testing.T) {
-		ev := grade(gradeCriteria("ghost", 5*time.Second))
+		ev := grade(gradeCriteria("ghost", 15*time.Second))
 		testutil.Equal(t, statuses(ev), map[string]string{"exists": "FAIL", "image": "FAIL", "limits": "FAIL", "defaults": "FAIL", "ready": "FAIL"})
 		testutil.Equal(t, *ev.Score, 0)
 		testutil.Equal(t, ev.Complete, true)
@@ -351,7 +374,7 @@ func TestResourceGrading(t *testing.T) {
 		testutil.NoError(t, err)
 		fast := []grader.Option{grader.WithPollInterval(50 * time.Millisecond)}
 		e := grader.NewEngine(grader.DefaultCheckers(brokenReader, fast...), fast...)
-		ev, err := e.Evaluate(ctx, gradeTarget(id, gradeCriteria("equiv", 5*time.Second)))
+		ev, err := e.Evaluate(ctx, gradeTarget(id, gradeCriteria("equiv", 15*time.Second)))
 		testutil.NoError(t, err)
 		testutil.Equal(t, ev.Score, (*int)(nil))
 		testutil.Equal(t, ev.Complete, false)

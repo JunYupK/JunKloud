@@ -2,36 +2,52 @@ package grader
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"strings"
+	"time"
 
 	"github.com/JunYupK/JunKloud/internal/model"
 )
 
 // ReadyChecker grades model.CriterionReady: the target workload finished
-// rolling out. It observes, until the criterion's timeout (default 30s):
+// rolling out and stays up. It observes, until the criterion's timeout
+// (default 30s):
 //
 //   - status.observedGeneration >= metadata.generation (the controller has
 //     seen the current spec; counters of an older generation prove nothing)
 //   - the desired replicas are updated, ready and available, and no
 //     surplus old replicas remain
+//   - then, for the stability window (args.stable_for, default
+//     DefaultStableFor, widened to the target's spec.minReadySeconds when
+//     that is larger): every pod of the CURRENT revision stays Ready with
+//     every container running since at least the window, the same pods and
+//     no container restart. A crash-looping container without a readiness
+//     probe is Ready for a moment after each restart; counters alone would
+//     PASS it by luck.
 //
-// If the rollout is not complete when the time is up, the workload's pods
-// decide whose fault that is (spec 8.1): a wrong or unpullable image the
-// learner chose, an invalid image name, a crash loop, a config error, a
-// failing readiness probe or constraints only the pod itself imposes are
-// FAIL (the reason names the cause); cluster capacity, node trouble, a pull
-// failure of an image the environment provides (WithPreloadedImages), a
-// controller that never observed the spec, no pods at all, or any cause the
-// pods do not show are ERROR (ErrInsufficientEvidence).
+// A container that restarts, or a pod that falls out of Ready, while being
+// watched is a crash loop: if the workload is not proven stable by the
+// deadline the result is FAIL with that cause. Otherwise, if the rollout is
+// not complete when the time is up, the current revision's pods decide whose
+// fault that is (spec 8.1): a wrong or unpullable image the learner chose, an
+// invalid image name, a crash loop, a config error, a failing readiness probe
+// or constraints only the pod itself imposes are FAIL (the reason names the
+// cause); cluster capacity, node trouble, a pull failure of an image the
+// environment provides (WithPreloadedImages), a controller that never
+// observed the spec, no pods at all, ready pods not yet observed stable for
+// the whole window, or any cause the pods do not show are ERROR
+// (ErrInsufficientEvidence).
 //
 // Supported targets: Deployment, StatefulSet, DaemonSet, ReplicaSet and Pod
 // (Running and Ready). Any other kind is an author error.
 //
 // Args (strict):
 //
-//	replicas: int >= 0   the rollout target the problem declares; spec.replicas
-//	                     must equal it (not for DaemonSet and Pod)
+//	replicas: int >= 0     the rollout target the problem declares; spec.replicas
+//	                       must equal it (not for DaemonSet and Pod)
+//	stable_for: duration   the stability window ("15s"); must be shorter than
+//	                       the criterion's timeout (as must the default)
 type ReadyChecker struct{ observer }
 
 // NewReadyChecker returns the checker for model.CriterionReady.
@@ -40,7 +56,22 @@ func NewReadyChecker(reader ObjectReader, opts ...Option) *ReadyChecker {
 }
 
 type readyArgs struct {
-	Replicas *int64 `json:"replicas"`
+	Replicas  *int64 `json:"replicas"`
+	StableFor any    `json:"stable_for"`
+
+	stableFor time.Duration // parsed stable_for; 0 = not declared
+}
+
+// window is the stability window for one observation of the target.
+func (a readyArgs) window(obj object) time.Duration {
+	if a.stableFor > 0 {
+		return a.stableFor
+	}
+	d := DefaultStableFor
+	if s, ok := intField(obj, "spec", "minReadySeconds"); ok && time.Duration(s)*time.Second > d {
+		d = time.Duration(s) * time.Second
+	}
+	return d
 }
 
 func readyKind(ref model.ObjectRef) (string, bool) {
@@ -75,6 +106,19 @@ func (c *ReadyChecker) validate(crit model.Criterion) (readyArgs, string, error)
 			return a, "", fmt.Errorf("%w: args.replicas does not apply to a %s", ErrInvalidCriterion, kind)
 		}
 	}
+	window := DefaultStableFor
+	if a.StableFor != nil {
+		str, isString := a.StableFor.(string)
+		d, err := time.ParseDuration(str)
+		if !isString || err != nil || d <= 0 {
+			return a, "", fmt.Errorf("%w: args.stable_for must be a positive duration such as \"15s\", not %v", ErrInvalidCriterion, a.StableFor)
+		}
+		a.stableFor, window = d, d
+	}
+	if timeout := timeoutFor(crit, c.set); window >= timeout {
+		return a, "", fmt.Errorf("%w: the stability window %s (args.stable_for, default %s) must be shorter than the criterion timeout %s",
+			ErrInvalidCriterion, window, DefaultStableFor, timeout)
+	}
 	return a, kind, nil
 }
 
@@ -94,41 +138,111 @@ func (c *ReadyChecker) Check(ctx context.Context, t Target, crit model.Criterion
 	if err != nil {
 		return model.CheckResult{}, err
 	}
-	spec := observeSpec{
-		ref: ref, timeout: timeoutFor(crit, c.set), poll: true, confirm: true,
-		eval: func(obj object) verdict { return evalReady(kind, obj, a) },
+	spec := observeSpec{ref: ref, timeout: timeoutFor(crit, c.set), poll: true}
+	clock := c.set.clock
+	obs := observation{start: clock.Now()}
+	deadline := obs.start.Add(spec.timeout)
+	var base *consistencyKey
+	track := newStability()
+	var pods []object  // the current revision's pods at the last look
+	var unknown string // why the current revision could not be determined
+	for {
+		obj, err := c.get(ctx, ref)
+		obs.polls++
+		switch {
+		case errors.Is(err, ErrNotFound):
+			if base != nil {
+				return model.CheckResult{}, fmt.Errorf("%w: %s %s no longer exists", ErrTargetChanged, ref.Kind, ref.Name)
+			}
+			obs.obj, obs.found, obs.now = nil, false, clock.Now()
+			obs.v = verdict{reason: fmt.Sprintf("%s %q not found", ref.Kind, ref.Name), terminal: true}
+			res := c.result(obs, spec)
+			res.Evidence.Expected = map[string]any{"rolledOut": true}
+			res.Evidence.Actual = map[string]any{"exists": false}
+			return res, nil
+		case err != nil:
+			return model.CheckResult{}, err
+		}
+		if k := keyOf(obj); base == nil {
+			base = &k
+		} else if k != *base {
+			return model.CheckResult{}, fmt.Errorf("%w: %s %s was replaced or edited", ErrTargetChanged, ref.Kind, ref.Name)
+		}
+		obs.obj, obs.found = obj, true
+		obs.v = evalReady(kind, obj, a)
+		now := clock.Now()
+		window := a.window(obj)
+		if !obs.v.undecided && !obs.v.terminal {
+			if pods, unknown, err = currentPods(ctx, c.reader, kind, obj); err != nil {
+				return model.CheckResult{}, err
+			}
+			switch {
+			case unknown != "":
+				if obs.v.ok {
+					obs.v.ok, obs.v.unstable = false, true
+					obs.v.reason = "rollout counters reached, but " + unknown
+				}
+			default:
+				stable, why := track.observe(pods, obs.v.ok, obs.v.wantPods, now, window)
+				if obs.v.ok && !stable {
+					obs.v.ok, obs.v.unstable = false, true
+					obs.v.reason = "rollout counters reached, but " + why
+				}
+			}
+			if exp, ok := obs.v.expected.(map[string]any); ok {
+				exp["stableFor"] = window.String()
+			}
+		}
+		obs.now = now
+		if obs.v.ok || obs.v.terminal || !now.Before(deadline) {
+			break
+		}
+		wait := c.set.pollInterval
+		if remaining := deadline.Sub(now); remaining < wait {
+			wait = remaining
+		}
+		if err := clock.Sleep(ctx, wait); err != nil {
+			return model.CheckResult{}, err
+		}
 	}
-	obs, err := c.observe(ctx, spec)
-	if err != nil {
-		return model.CheckResult{}, err
-	}
+
 	res := c.result(obs, spec)
-	if !obs.found {
-		res.Evidence.Expected = map[string]any{"rolledOut": true}
-		res.Evidence.Actual = map[string]any{"exists": false}
+	switch {
+	case obs.v.ok:
 		return res, nil
-	}
-	if obs.v.ok {
+	case track.crash != nil:
+		// Proven while watching: a container restarted or a pod fell out of
+		// Ready, and the workload was not stable again by the deadline.
+		res.Reason += "; cause: pod " + track.crash.Pod + ": " + track.crash.Reason
+		if act, ok := res.Evidence.Actual.(map[string]any); ok {
+			act["pods"] = rolloutCause{findings: []podFinding{*track.crash}}.summary()
+		}
 		return res, nil
-	}
-	if obs.v.undecided {
+	case obs.v.undecided:
 		return model.CheckResult{}, fmt.Errorf("%w: %s", ErrInsufficientEvidence, obs.v.reason)
-	}
-	if !obs.v.needsPods {
+	case !obs.v.needsPods && !obs.v.unstable:
 		return res, nil // the object itself proves the learner's fault
 	}
-	// The rollout did not complete: find out whose fault that is.
-	pods, err := ownedPods(ctx, c.reader, kind, obs.obj)
-	if err != nil {
-		return model.CheckResult{}, err
+	// The rollout did not complete (or not stably): find out whose fault
+	// that is, from the current revision's pods only.
+	if pods == nil && unknown == "" {
+		if pods, unknown, err = currentPods(ctx, c.reader, kind, obs.obj); err != nil {
+			return model.CheckResult{}, err
+		}
+	}
+	if unknown != "" {
+		return model.CheckResult{}, fmt.Errorf("%w: %s; %s", ErrInsufficientEvidence, obs.v.reason, unknown)
 	}
 	msgs, err := pullMessages(ctx, c.reader, pods)
 	if err != nil {
 		return model.CheckResult{}, err
 	}
-	cause := classifyRollout(pods, obs.v.expectPods, causeConfig{
+	cause := classifyRollout(pods, obs.v.expectPods || obs.v.unstable && obs.v.wantPods > 0, causeConfig{
 		preloaded: c.set.preloaded, configured: c.set.preloadedSet, pullMessages: msgs})
 	if cause.class != faultLearner {
+		if obs.v.unstable && len(cause.findings) == 0 {
+			return model.CheckResult{}, fmt.Errorf("%w: %s (the pods are Ready but were not observed stable for the whole window before the limit)", ErrInsufficientEvidence, res.Reason)
+		}
 		return model.CheckResult{}, fmt.Errorf("%w: %s; %s", ErrInsufficientEvidence, obs.v.reason, cause.text)
 	}
 	res.Reason += "; cause: " + cause.text
@@ -203,6 +317,7 @@ func evalReady(kind string, obj object, a readyArgs) verdict {
 		need("numberReady", intOr(o, 0, "status", "numberReady"), desired)
 		need("numberAvailable", intOr(o, 0, "status", "numberAvailable"), desired)
 		need("numberMisscheduled", intOr(o, 0, "status", "numberMisscheduled"), 0)
+		v.wantPods = desired
 	default:
 		want := intOr(o, 1, "spec", "replicas") // the API defaults an omitted replicas to 1
 		if a.Replicas != nil {
@@ -228,6 +343,7 @@ func evalReady(kind string, obj object, a readyArgs) verdict {
 				return v
 			}
 		}
+		v.wantPods = want
 		need("replicas", intOr(o, 0, "status", "replicas"), want)
 		if kind != "ReplicaSet" {
 			need("updatedReplicas", intOr(o, 0, "status", "updatedReplicas"), want)
@@ -271,6 +387,7 @@ func evalPod(o map[string]any) verdict {
 	v := verdict{
 		expected: map[string]any{"phase": "Running", "ready": true},
 		actual:   map[string]any{"phase": phase, "ready": ready},
+		wantPods: 1,
 	}
 	switch {
 	case phase == "Succeeded":

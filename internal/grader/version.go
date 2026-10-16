@@ -21,4 +21,4 @@ package grader
 // or performance changes that cannot alter a verdict. When in doubt, bump:
 // a needless bump costs one re-validation, a missed one lets a certificate
 // vouch for behaviour it never saw.
-const GraderVersion = "grader-1"
+const GraderVersion = "grader-2"

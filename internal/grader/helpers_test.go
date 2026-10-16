@@ -58,12 +58,24 @@ type fakeReader struct {
 	steps     map[string][]any
 	calls     map[string]int
 	lists     map[string][]map[string]any // "Kind/namespace" -> objects
+	listFns   map[string]func(call int) []map[string]any
+	listCalls map[string]int
 	listQuery []grader.ListQuery
 	listErr   error
 }
 
 func newReader() *fakeReader {
-	return &fakeReader{steps: map[string][]any{}, calls: map[string]int{}, lists: map[string][]map[string]any{}}
+	return &fakeReader{steps: map[string][]any{}, calls: map[string]int{}, lists: map[string][]map[string]any{},
+		listFns: map[string]func(int) []map[string]any{}, listCalls: map[string]int{}}
+}
+
+// putListFn serves List queries of a kind in a namespace from fn, called
+// with the number of earlier List calls for that key (0, 1, 2, ...).
+func (r *fakeReader) putListFn(kind, ns string, fn func(call int) []map[string]any) *fakeReader {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.listFns[kind+"/"+ns] = fn
+	return r
 }
 
 // putList serves objs for List queries of a kind in a namespace.
@@ -81,7 +93,13 @@ func (r *fakeReader) List(_ context.Context, q grader.ListQuery) ([]map[string]a
 	if r.listErr != nil {
 		return nil, r.listErr
 	}
-	return r.lists[q.Kind+"/"+q.Namespace], nil
+	k := q.Kind + "/" + q.Namespace
+	if fn := r.listFns[k]; fn != nil {
+		n := r.listCalls[k]
+		r.listCalls[k]++
+		return fn(n), nil
+	}
+	return r.lists[k], nil
 }
 
 func key(ref model.ObjectRef) string {

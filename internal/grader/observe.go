@@ -26,9 +26,14 @@ type verdict struct {
 	undecided bool
 	// expectPods: with needsPods, the workload should own at least one pod.
 	expectPods bool
-	reason     string
-	expected   any
-	actual     any
+	// unstable: the ready checker's counters were reached but its pods were
+	// not (yet) proven stable; the pods decide whose fault that is.
+	unstable bool
+	// wantPods: how many ready pods the ready checker's counters require.
+	wantPods int64
+	reason   string
+	expected any
+	actual   any
 }
 
 type observeSpec struct {

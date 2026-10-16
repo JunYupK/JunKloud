@@ -9,6 +9,7 @@ import (
 	"regexp"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/JunYupK/JunKloud/internal/model"
 )
@@ -33,7 +34,9 @@ import (
 //	                 exist and be owned by this release (Helm's
 //	                 meta.helm.sh/release-name annotation)
 //	workloads_ready: the release's Deployments, StatefulSets and DaemonSets
-//	                 must have rolled out (the ready checker's rules)
+//	                 must have rolled out and stay stable (the ready
+//	                 checker's rules; the timeout must exceed
+//	                 DefaultStableFor)
 //	wait:            poll up to the criterion timeout for the status
 //
 // Everything is read through `helm list/get values -o json` (and `helm get manifest`) run with the environment's
@@ -73,7 +76,7 @@ var helmStatuses = map[string]bool{
 
 const maxHelmObjects = 100
 
-func parseHelmArgs(crit model.Criterion) (helmArgs, error) {
+func parseHelmArgs(crit model.Criterion, defaultTimeout time.Duration) (helmArgs, error) {
 	var a helmArgs
 	if err := noTarget(crit); err != nil {
 		return a, err
@@ -101,6 +104,15 @@ func parseHelmArgs(crit model.Criterion) (helmArgs, error) {
 	}
 	if a.AllValues && len(a.Values) == 0 {
 		return a, invalidf("args.all_values needs args.values")
+	}
+	if a.WorkloadsReady {
+		timeout := crit.Timeout
+		if timeout <= 0 {
+			timeout = defaultTimeout
+		}
+		if timeout <= DefaultStableFor {
+			return a, invalidf("args.workloads_ready needs a criterion timeout longer than the %s stability window, not %s", DefaultStableFor, timeout)
+		}
 	}
 	if len(a.Values) > 0 {
 		reqs, err := compileRequirements("args.values", a.Values)
@@ -135,7 +147,7 @@ func (c *ArtifactChecker) helm(ctx context.Context, ns string, args ...string) (
 }
 
 func (c *ArtifactChecker) checkHelm(ctx context.Context, t Target, crit model.Criterion) (model.CheckResult, error) {
-	a, err := parseHelmArgs(crit)
+	a, err := parseHelmArgs(crit, c.set.defaultTimeout)
 	if err != nil {
 		return model.CheckResult{}, err
 	}

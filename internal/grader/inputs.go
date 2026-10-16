@@ -535,7 +535,7 @@ func (c *ArtifactChecker) captureImage(ctx context.Context, t Target, crit model
 }
 
 func (c *ArtifactChecker) captureHelm(ctx context.Context, t Target, crit model.Criterion, out map[string]string) error {
-	a, err := parseHelmArgs(crit)
+	a, err := parseHelmArgs(crit, c.set.defaultTimeout)
 	if err != nil {
 		return err
 	}

@@ -28,7 +28,7 @@ criteria:
     target: {api_version: apps/v1, kind: Deployment, namespace: dev-crash, name: api}
     points: 4
     depends_on: [api-exists]
-    timeout: 20s
+    timeout: 30s
     args:
       replicas: 1
 setup:

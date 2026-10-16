@@ -325,10 +325,18 @@ func TestHelmWorkloadsReady(t *testing.T) {
 		return d
 	}
 	run := func(avail int) model.CheckResult {
+		rs := obj(t, `{"apiVersion":"apps/v1","kind":"ReplicaSet","metadata":{"name":"web-1","namespace":"jk-p1","uid":"rs-1",
+		  "ownerReferences":[{"kind":"Deployment","name":"web","uid":"uid-web","controller":true}]}}`)
+		var pods []map[string]any
+		for i := 0; i < avail; i++ {
+			p := pod(t, fmt.Sprintf("web-1-%d", i), readyStatus(oldStart, 0), "web", "nginx:1.27.0")
+			p["metadata"].(map[string]any)["ownerReferences"] = []any{map[string]any{"kind": "ReplicaSet", "name": "web-1", "uid": "rs-1", "controller": true}}
+			pods = append(pods, p)
+		}
 		r := newReader().put(refOf("v1", "Service", "jk-p1", "web"), helmOwned("Service", "v1", "web")).put(deployRef, ready(avail)).
-			putList("ReplicaSet", "jk-p1").putList("Pod", "jk-p1").putList("Event", "jk-p1")
+			putList("ReplicaSet", "jk-p1", rs).putList("Pod", "jk-p1", pods...).putList("Event", "jk-p1")
 		c := helmCrit(map[string]any{"workloads_ready": true})
-		c.Timeout = 5 * time.Second
+		c.Timeout = 15 * time.Second
 		return gradeOne(t, grader.ArtifactConfig{Reader: r, Tools: deployedFixture().tools(), KubeconfigPath: "/k", Context: "c"}, "", c)
 	}
 	testutil.Equal(t, run(2).Status, "PASS")
@@ -348,9 +356,16 @@ func TestHelmArgsAreStrict(t *testing.T) {
 		"negative revision":  {"release": "web", "min_revision": -1},
 		"empty chart":        {"release": "web", "chart": map[string]any{}},
 		"all without values": {"release": "web", "all_values": true},
+		// The ready rules watch a stability window first (default limit 30s).
+		"ready with a short limit": {"release": "web", "workloads_ready": true, "__timeout": "5s"},
 	}
 	for name, args := range bad {
-		if err := ck.ValidateCriterion(model.Criterion{ID: "c", Kind: model.CriterionHelm, Points: 1, Args: args}); !isInvalid(err) {
+		c := model.Criterion{ID: "c", Kind: model.CriterionHelm, Points: 1, Args: args}
+		if d, ok := args["__timeout"].(string); ok {
+			delete(args, "__timeout")
+			c.Timeout, _ = time.ParseDuration(d)
+		}
+		if err := ck.ValidateCriterion(c); !isInvalid(err) {
 			t.Errorf("%s: err = %v", name, err)
 		}
 	}
