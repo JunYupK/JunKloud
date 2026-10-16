@@ -199,7 +199,7 @@ func TestValidationAppliesWithOwnerAndScope(t *testing.T) {
 }
 
 func TestMultipleSeedsAreEachProven(t *testing.T) {
-	p := loadFixture(t)
+	p := loadFullFixture(t)
 	var a, b uint64
 	var fa, fb model.FrozenProblem
 	for seed := uint64(1); seed < 200; seed++ {
@@ -725,4 +725,71 @@ func TestValidateGradesInTheServedWorkspace(t *testing.T) {
 	if !strings.Contains(string(f.Assets["notes.txt"]), "namespace ") || strings.Contains(string(f.Assets["notes.txt"]), "${") {
 		t.Fatalf("the provided file is not rendered: %q", f.Assets["notes.txt"])
 	}
+}
+
+// TestCoveringSeeds: the product helper picks seeds whose frozen parameters
+// together use every allowed value of every parameter.
+func TestCoveringSeeds(t *testing.T) {
+	p := loadFullFixture(t)
+	seeds, err := author.CoveringSeeds(p)
+	testutil.NoError(t, err)
+	used := map[string]map[string]bool{}
+	for _, seed := range seeds {
+		f, err := problem.Freeze(p, seed)
+		testutil.NoError(t, err)
+		for name, v := range f.Parameters {
+			if used[name] == nil {
+				used[name] = map[string]bool{}
+			}
+			used[name][fmt.Sprint(v)] = true
+		}
+	}
+	for name, values := range p.Parameters {
+		testutil.Equal(t, len(used[name]), len(values))
+	}
+	again, err := author.CoveringSeeds(p)
+	testutil.NoError(t, err)
+	testutil.Equal(t, again, seeds) // deterministic
+	missing, err := author.UncoveredValues(p, seeds)
+	testutil.NoError(t, err)
+	testutil.Equal(t, len(missing), 0)
+
+	// Without parameters one seed is enough.
+	none := p
+	none.Parameters = nil
+	one, err := author.CoveringSeeds(none)
+	testutil.NoError(t, err)
+	testutil.Equal(t, len(one), 1)
+}
+
+// TestValidationMustCoverEveryParameterValue (spec 7.1): a certificate vouches
+// for the seeds it validated; a session may freeze any allowed value, so a
+// validation whose seeds leave a value untried is not passed.
+func TestValidationMustCoverEveryParameterValue(t *testing.T) {
+	p := loadFullFixture(t)
+	h := newHarness(t)
+	record, err := h.validate(p, 1)
+	testutil.ErrorIs(t, err, author.ErrNotValid)
+	testutil.Equal(t, record.Passed, false)
+	missing, merr := author.UncoveredValues(p, []uint64{1})
+	testutil.NoError(t, merr)
+	if len(missing) == 0 {
+		t.Fatal("seed 1 alone unexpectedly covers every value")
+	}
+	for _, m := range missing {
+		if !strings.Contains(err.Error(), m) {
+			t.Errorf("the finding does not name %s: %v", m, err)
+		}
+	}
+	if !strings.Contains(err.Error(), "CoveringSeeds") {
+		t.Errorf("the finding should say how to cover the values: %v", err)
+	}
+	// Nothing was applied for an uncovered validation.
+	testutil.Equal(t, len(h.cluster.applies), 0)
+
+	seeds, err := author.CoveringSeeds(p)
+	testutil.NoError(t, err)
+	record, err = newHarness(t).validate(p, seeds...)
+	testutil.NoError(t, err)
+	testutil.Equal(t, record.Passed, true)
 }

@@ -50,7 +50,7 @@ func (s *Service) serve(ctx context.Context, id model.Identity, envHash string, 
 		if !pl.mock && !problem.Matches(p, filter) {
 			continue
 		}
-		r, err := s.staticRefusal(ctx, envHash, p)
+		r, err := s.staticRefusal(ctx, envHash, p, seed)
 		if err != nil {
 			return nil, Report{}, err
 		}
@@ -138,10 +138,11 @@ func refusalError(refusals []refusal) error {
 }
 
 // staticRefusal checks what needs no cluster: that the provided files leave
-// the question's file name alone, and that the problem has a current
-// certificate for this grader version and environment hash. A nil result
-// means servable so far; only a store failure is an error.
-func (s *Service) staticRefusal(ctx context.Context, envHash string, p model.Problem) (*refusal, error) {
+// the question's file name alone, that the problem has a current certificate
+// for this grader version and environment hash, and that the certificate's
+// seeds froze every parameter value the session seed freezes (spec 7.1). A
+// nil result means servable so far; only a store failure is an error.
+func (s *Service) staticRefusal(ctx context.Context, envHash string, p model.Problem, seed uint64) (*refusal, error) {
 	if _, clash := p.Files[path.Join(problem.ProvidedDir, QuestionFile)]; clash {
 		return &refusal{p.ID, "it provides a file named " + QuestionFile + ", which is reserved for the question", ErrReservedAsset}, nil
 	}
@@ -149,12 +150,19 @@ func (s *Service) staticRefusal(ctx context.Context, envHash string, p model.Pro
 	if err != nil {
 		return nil, err
 	}
-	_, ok, err := author.CurrentCertificate(ctx, s.cfg.Store, hash, s.cfg.GraderVersion, envHash)
+	cert, ok, err := author.CurrentCertificate(ctx, s.cfg.Store, hash, s.cfg.GraderVersion, envHash)
 	if err != nil {
 		return nil, fmt.Errorf("session: look up the validation of %q: %w", p.ID, err)
 	}
 	if !ok {
 		return &refusal{p.ID, fmt.Sprintf("no passing validation for this exact package, grader version %s and environment: it was never validated, failed, or the package, grader or environment changed since; validate the bank", s.cfg.GraderVersion), ErrNotCertified}, nil
+	}
+	missing, err := author.UnvalidatedValues(p, cert.Seeds, seed)
+	if err != nil {
+		return nil, fmt.Errorf("session: %w", err)
+	}
+	if len(missing) > 0 {
+		return &refusal{p.ID, fmt.Sprintf("seed %d freezes the parameter values %s, which its validation (seeds %v) never tried; validate the bank with covering seeds", seed, strings.Join(missing, ", "), cert.Seeds), ErrNotCertified}, nil
 	}
 	return nil, nil
 }

@@ -155,9 +155,10 @@ const finalCleanupBudget = 5 * time.Minute
 //
 // It first takes the environment lock and refuses while any session of the
 // environment is active, then freezes p for every seed and statically checks
-// the rendered criteria, that every manifest renders and that setup, the
-// solution and alternative answers use only provided images (no cluster is
-// touched if that fails). For each seed
+// the rendered criteria, that every manifest renders, that setup, the
+// solution and alternative answers use only provided images, and that the
+// seeds together freeze every allowed value of every parameter
+// (CoveringSeeds; spec 7.1) — no cluster is touched if any of that fails. For each seed
 // it uses a fresh temporary namespace bundle (the problem namespace plus its
 // declared scope), owned by SessionID, and the same Apply and engine that
 // sessions use:
@@ -241,6 +242,17 @@ func (v *Validator) Validate(ctx context.Context, p model.Problem, seeds []uint6
 		if len(problems) == before {
 			frozen = append(frozen, f)
 		}
+	}
+	// A session may freeze any allowed value; the seeds must try each one.
+	if missing, err := UncoveredValues(p, seeds); err != nil {
+		problems = append(problems, err.Error())
+	} else if len(missing) > 0 {
+		hint := "author.CoveringSeeds(p) gives seeds that do"
+		if covering, err := CoveringSeeds(p); err == nil {
+			hint = fmt.Sprintf("validate with seeds %v (author.CoveringSeeds)", covering)
+		}
+		problems = append(problems, fmt.Sprintf("the seeds %v never freeze the parameter values %s, which a session may serve; %s",
+			seeds, strings.Join(missing, ", "), hint))
 	}
 	if !slices.ContainsFunc(p.Cases, func(c model.Case) bool { return c.ExpectedScore < maxScore(p) }) {
 		problems = append(problems, "no wrong case: declare at least one case with a planted error that scores below the maximum")

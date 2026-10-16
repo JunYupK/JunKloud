@@ -13,7 +13,23 @@ import (
 	"github.com/JunYupK/JunKloud/internal/testutil"
 )
 
+// loadFixture is the partial-credit fixture with each parameter pinned to the
+// value seed 1 freezes, so one seed covers every allowed value (a validation
+// must cover them all) and the tests stay about what they test.
+// loadFullFixture keeps every allowed value.
 func loadFixture(t *testing.T) model.Problem {
+	t.Helper()
+	p := loadFullFixture(t)
+	f, err := problem.Freeze(p, 1)
+	testutil.NoError(t, err)
+	p.Parameters = map[string][]any{}
+	for name, v := range f.Parameters {
+		p.Parameters[name] = []any{v}
+	}
+	return p
+}
+
+func loadFullFixture(t *testing.T) model.Problem {
 	t.Helper()
 	p, err := problem.Load(filepath.Join("testdata", "partial-credit"))
 	testutil.NoError(t, err)

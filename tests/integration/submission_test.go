@@ -82,7 +82,9 @@ func TestSubmission(t *testing.T) {
 	for _, d := range dirs {
 		p, err := problem.Load(d)
 		testutil.NoError(t, err)
-		record, err := rt.Validator.Validate(ctx, p, coveringSeeds(t, p))
+		seeds, err := author.CoveringSeeds(p)
+		testutil.NoError(t, err)
+		record, err := rt.Validator.Validate(ctx, p, seeds)
 		testutil.NoError(t, err)
 		testutil.Equal(t, record.Passed, true)
 	}

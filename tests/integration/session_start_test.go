@@ -4,7 +4,6 @@ package integration
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
 	"maps"
 	"os"
@@ -32,49 +31,6 @@ var devBank = filepath.Join("..", "fixtures", "dev-bank")
 
 var devExamOrder = []string{"dev-service-001", "dev-config-001", "dev-crashloop-001", "dev-sa-001", "dev-scale-001"}
 
-// coveringSeeds returns seeds whose frozen parameters together use every
-// allowed value of every parameter, so validating with them certifies the
-// problem for whichever seed a session later picks.
-func coveringSeeds(t *testing.T, p model.Problem) []uint64 {
-	t.Helper()
-	covered := map[string]map[string]bool{}
-	seeds := []uint64{}
-	for seed := uint64(1); seed < 500; seed++ {
-		f, err := problem.Freeze(p, seed)
-		testutil.NoError(t, err)
-		fresh := len(seeds) == 0
-		for name, v := range f.Parameters {
-			key := strings.TrimSpace(strings.Join([]string{name, formatValue(v)}, "="))
-			if covered[name] == nil {
-				covered[name] = map[string]bool{}
-			}
-			if !covered[name][key] {
-				covered[name][key] = true
-				fresh = true
-			}
-		}
-		if fresh {
-			seeds = append(seeds, seed)
-		}
-		all := true
-		for name, values := range p.Parameters {
-			if len(covered[name]) != len(values) {
-				all = false
-			}
-		}
-		if all {
-			return seeds
-		}
-	}
-	t.Fatalf("no seeds cover every parameter value of %s", p.ID)
-	return nil
-}
-
-func formatValue(v any) string {
-	b, _ := json.Marshal(v)
-	return string(b)
-}
-
 // TestSessionStart prepares and starts a mock session on a real environment
 // from the five dev fixtures: the fixtures are validated first (so they have
 // certificates), a session is prepared without revealing any question, the
@@ -98,7 +54,8 @@ func TestSessionStart(t *testing.T) {
 	for _, d := range dirs {
 		p, err := problem.Load(d)
 		testutil.NoError(t, err)
-		seeds := coveringSeeds(t, p)
+		seeds, err := author.CoveringSeeds(p)
+		testutil.NoError(t, err)
 		start := time.Now()
 		record, err := rt.Validator.Validate(ctx, p, seeds)
 		t.Logf("validated %s with seeds %v in %v", p.ID, seeds, time.Since(start).Round(time.Second))

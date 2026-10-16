@@ -1007,3 +1007,45 @@ func TestCallersNeverSeeTheGradingDefinition(t *testing.T) {
 	testutil.NoError(t, err)
 	check("Prepare", plain)
 }
+
+// TestServingRefusesAnUnvalidatedParameterValue (spec 7.1): a certificate
+// vouches only for the parameter values its seeds froze. A session whose seed
+// freezes a value no validated seed used is refused, never served on trust.
+func TestServingRefusesAnUnvalidatedParameterValue(t *testing.T) {
+	h := newHarness(t)
+	p := h.loadBankProblem("dev-config-001")
+	byNamespace := map[string]uint64{}
+	for seed := uint64(1); len(byNamespace) < 2; seed++ {
+		f, err := problem.Freeze(p, seed)
+		testutil.NoError(t, err)
+		if _, ok := byNamespace[f.Namespace]; !ok {
+			byNamespace[f.Namespace] = seed
+		}
+	}
+	var validated, other uint64
+	var otherNS string
+	for ns, seed := range byNamespace {
+		if validated == 0 {
+			validated = seed
+		} else {
+			other, otherNS = seed, ns
+		}
+	}
+	// A newer certificate of the same package that only tried one value.
+	h.certifySeeds(p, testGraderVersion, testEnvHash, true, []uint64{validated})
+
+	mock := h.mock()
+	mock.Seed = other
+	_, err := h.svc.Prepare(ctx, mock)
+	testutil.ErrorIs(t, err, session.ErrNotCertified)
+	for _, want := range []string{"dev-config-001", otherNS} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("the refusal lacks %q: %v", want, err)
+		}
+	}
+	testutil.Equal(t, h.env.count("apply"), 0)
+
+	mock.Seed = validated
+	_, err = h.svc.Prepare(ctx, mock)
+	testutil.NoError(t, err)
+}

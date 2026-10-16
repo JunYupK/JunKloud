@@ -37,6 +37,21 @@ func loadValidationFixture(t *testing.T) model.Problem {
 	return p
 }
 
+// pinnedValidationFixture is the fixture with each parameter narrowed to the
+// value seed freezes, so validating with that one seed covers every allowed
+// value (a validation must; author.CoveringSeeds).
+func pinnedValidationFixture(t *testing.T, seed uint64) model.Problem {
+	t.Helper()
+	p := loadValidationFixture(t)
+	f, err := problem.Freeze(p, seed)
+	testutil.NoError(t, err)
+	p.Parameters = map[string][]any{}
+	for name, v := range f.Parameters {
+		p.Parameters[name] = []any{v}
+	}
+	return p
+}
+
 // validationLeftovers lists namespaces and cluster-scoped objects that carry
 // the validation owner's session label, anywhere in the cluster.
 func validationLeftovers(t *testing.T, m *environment.Manager, id model.Identity) []string {
@@ -223,7 +238,7 @@ func TestProblemValidation(t *testing.T) {
 	// without the replicas argument the ready criterion passes the planted
 	// wrong answer too.
 	t.Run("RejectsALaxGrader", func(t *testing.T) {
-		lax := loadValidationFixture(t)
+		lax := pinnedValidationFixture(t, seedA)
 		lax.Criteria = slices.Clone(lax.Criteria)
 		for i := range lax.Criteria {
 			if lax.Criteria[i].ID == "web-ready" {
@@ -249,7 +264,7 @@ func TestProblemValidation(t *testing.T) {
 	// A problem whose setup already contains the answer starts at full marks
 	// and must never be served.
 	t.Run("RejectsAnInitiallyPerfectProblem", func(t *testing.T) {
-		solved := loadValidationFixture(t)
+		solved := pinnedValidationFixture(t, seedA)
 		solved.Setup = append(slices.Clone(solved.Setup), solved.Solution...)
 		solved.Cases = solved.Cases[:1]
 		record, err := rt.Validator.Validate(ctx, solved, []uint64{seedA})
@@ -283,7 +298,7 @@ func TestProblemValidation(t *testing.T) {
 		}, metav1.CreateOptions{})
 		testutil.NoError(t, err)
 
-		other := loadValidationFixture(t)
+		other := pinnedValidationFixture(t, seedA)
 		other.Version = "1.0.1" // a package change: a fresh hash, so no certificate exists
 		_, err = rt.Validator.Validate(ctx, other, []uint64{seedA})
 		testutil.ErrorIs(t, err, environment.ErrNotOwned)
@@ -300,6 +315,70 @@ func TestProblemValidation(t *testing.T) {
 		otherHash, err := problem.Hash(other)
 		testutil.NoError(t, err)
 		testutil.Equal(t, certified(otherHash), false)
+	})
+
+	// Every criterion of the fixture carries its Korean feedback (spec 8.1),
+	// rendered with the seed's parameters like the rest of the definition.
+	t.Run("CriteriaCarryKoreanFeedback", func(t *testing.T) {
+		for _, c := range frozenA.Definition.Criteria {
+			if c.Feedback == "" || strings.Contains(c.Feedback, "${") {
+				t.Errorf("criterion %s feedback = %q", c.ID, c.Feedback)
+			}
+		}
+	})
+
+	// Seeds that never freeze some allowed value certify nothing: a session
+	// could serve that value (spec 7.1). Nothing is applied.
+	t.Run("RefusesSeedsThatMissAParameterValue", func(t *testing.T) {
+		other := loadValidationFixture(t)
+		other.Version = "1.0.2"
+		missing, err := author.UncoveredValues(other, []uint64{seedA})
+		testutil.NoError(t, err)
+		testutil.Equal(t, len(missing) > 0, true)
+		record, err := rt.Validator.Validate(ctx, other, []uint64{seedA})
+		testutil.ErrorIs(t, err, author.ErrNotValid)
+		testutil.Equal(t, record.Passed, false)
+		for _, m := range missing {
+			if !strings.Contains(err.Error(), m) {
+				t.Errorf("the finding does not name %s: %v", m, err)
+			}
+		}
+		testutil.Equal(t, len(record.Cases), 0)
+		testutil.Equal(t, validationLeftovers(t, m, id), []string(nil))
+	})
+
+	// A file criterion is judged in the workspace the session will serve: the
+	// provided files, rendered. Before the fix validation graded without a
+	// workspace and such a problem could never be certified.
+	t.Run("GradesFilesInTheServedWorkspace", func(t *testing.T) {
+		withFile := pinnedValidationFixture(t, seedA)
+		withFile.Version = "1.0.3"
+		withFile.Files = maps.Clone(withFile.Files)
+		withFile.Files["setup/provided/notes.txt"] = []byte("namespace ${namespace}\n")
+		withFile.Criteria = append(slices.Clone(withFile.Criteria), model.Criterion{
+			ID: "notes-provided", Kind: model.CriterionFile, Points: 1, Feedback: "제공된 notes.txt 파일이 그대로 있는지 확인하세요.",
+			Args: map[string]any{"path": "notes.txt", "contains": []any{"namespace ${namespace}"}},
+		})
+		withFile.InitialExpected = maps.Clone(withFile.InitialExpected)
+		withFile.InitialExpected["notes-provided"] = model.StatusPass
+		withFile.InitialScore++
+		withFile.Cases = slices.Clone(withFile.Cases[:1])
+		withFile.Cases[0].Expected = maps.Clone(withFile.Cases[0].Expected)
+		withFile.Cases[0].Expected["notes-provided"] = model.StatusPass
+		withFile.Cases[0].ExpectedScore++
+		record, err := rt.Validator.Validate(ctx, withFile, []uint64{seedA})
+		testutil.NoError(t, err)
+		testutil.Equal(t, record.Passed, true)
+		for _, key := range []string{author.KeyInitial, author.KeySolved, author.KeyReset} {
+			for _, r := range record.Cases[key].Results {
+				if r.CriterionID == "notes-provided" {
+					testutil.Equal(t, r.Status, model.StatusPass)
+				}
+			}
+		}
+		testutil.Equal(t, validationLeftovers(t, m, id), []string(nil))
+		entries, _ := filepath.Glob(filepath.Join(dir, "validate", "*"))
+		testutil.Equal(t, len(entries), 0) // the scratch workspaces are gone
 	})
 
 	// The first, valid problem keeps its certificate through all of the above.

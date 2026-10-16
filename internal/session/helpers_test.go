@@ -480,11 +480,19 @@ func (h *harness) certify(skip ...string) {
 
 func (h *harness) certifyProblem(p model.Problem, graderVersion, envHash string, passed bool) {
 	h.t.Helper()
+	seeds, err := author.CoveringSeeds(p)
+	testutil.NoError(h.t, err)
+	h.certifySeeds(p, graderVersion, envHash, passed, seeds)
+}
+
+// certifySeeds stores a validation of p made with exactly these seeds.
+func (h *harness) certifySeeds(p model.Problem, graderVersion, envHash string, passed bool, seeds []uint64) {
+	h.t.Helper()
 	hash, err := problem.Hash(p)
 	testutil.NoError(h.t, err)
 	testutil.NoError(h.t, h.st.SaveValidation(ctx, model.ValidationRecord{
 		ProblemHash: hash, GraderVersion: graderVersion, EnvironmentHash: envHash,
-		Seeds: []uint64{42}, Passed: passed, Cases: map[string]model.Evaluation{},
+		Seeds: seeds, Passed: passed, Cases: map[string]model.Evaluation{},
 	}))
 }
 
