@@ -1,0 +1,7 @@
+# DEV-CASE-MARKER-SA
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: builder-two
+  namespace: dev-sec
+automountServiceAccountToken: false

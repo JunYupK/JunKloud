@@ -1,0 +1,21 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: web
+  namespace: dev-scale
+spec:
+  replicas: 1
+  selector:
+    matchLabels: {app: web}
+  template:
+    metadata:
+      labels: {app: web}
+    spec:
+      terminationGracePeriodSeconds: 1
+      containers:
+        - name: web
+          image: docker.io/library/busybox:1.37.0
+          imagePullPolicy: IfNotPresent
+          command: ["sleep", "3600"]
+          resources:
+            limits: {cpu: 50m, memory: 16Mi}

@@ -1,0 +1,7 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: notes
+  namespace: dev-svc
+data:
+  hint: the pods are labelled app=web

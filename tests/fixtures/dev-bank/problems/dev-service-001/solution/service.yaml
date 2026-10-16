@@ -1,0 +1,11 @@
+# DEV-SOLUTION-MARKER-SERVICE
+apiVersion: v1
+kind: Service
+metadata:
+  name: web
+  namespace: dev-svc
+spec:
+  selector: {app: web}
+  ports:
+    - port: "${port}"
+      targetPort: 80

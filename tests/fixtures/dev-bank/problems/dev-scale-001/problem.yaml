@@ -1,0 +1,61 @@
+# Development fixture 2 of 5 (not product content): scale a Deployment.
+schema_version: 1
+id: dev-scale-001
+version: 1.0.0
+title: Scale the web Deployment
+domain: deployment
+difficulty: easy
+type: modify
+tags: [deployment, scaling]
+competencies:
+  - "Use Kubernetes primitives to implement common deployment strategies"
+capabilities: []
+parameters:
+  replicas: [2, 3]
+namespace: dev-scale
+budget:
+  cpu: 250m
+  memory: 128Mi
+criteria:
+  - id: web-exists
+    kind: resource
+    target: {api_version: apps/v1, kind: Deployment, namespace: dev-scale, name: web}
+    points: 2
+  - id: web-replicas
+    kind: field
+    target: {api_version: apps/v1, kind: Deployment, namespace: dev-scale, name: web}
+    points: 2
+    depends_on: [web-exists]
+    args:
+      fields:
+        - path: spec.replicas
+          equals: "${replicas}"
+  - id: web-ready
+    kind: ready
+    target: {api_version: apps/v1, kind: Deployment, namespace: dev-scale, name: web}
+    points: 2
+    depends_on: [web-replicas]
+    timeout: 90s
+    args:
+      replicas: "${replicas}"
+setup:
+  - kind: apply
+    args: {path: setup/web.yaml}
+solution:
+  - kind: apply
+    args: {path: solution/web.yaml}
+initial_expected:
+  web-exists: PASS
+  web-replicas: FAIL
+  web-ready: FAIL
+initial_score: 2
+cases:
+  - id: too-many
+    actions:
+      - kind: apply
+        args: {path: cases/too-many.yaml}
+    expected:
+      web-exists: PASS
+      web-replicas: FAIL
+      web-ready: FAIL
+    expected_score: 2

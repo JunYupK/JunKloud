@@ -1,0 +1,11 @@
+# Development exam (not product content): the five dev fixtures. The real
+# exams/mock-01.yaml (Task 18) uses the same format.
+schema_version: 1
+id: dev-mock
+duration: 120m
+problems:
+  - dev-service-001
+  - dev-config-001
+  - dev-crashloop-001
+  - dev-sa-001
+  - dev-scale-001

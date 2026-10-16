@@ -1,0 +1,11 @@
+# DEV-CASE-MARKER-SERVICE
+apiVersion: v1
+kind: Service
+metadata:
+  name: web
+  namespace: dev-svc
+spec:
+  selector: {app: web}
+  ports:
+    - port: 7070
+      targetPort: 80

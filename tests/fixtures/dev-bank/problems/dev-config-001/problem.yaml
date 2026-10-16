@@ -1,0 +1,57 @@
+# Development fixture 1 of 5 (not product content): a ConfigMap to create.
+schema_version: 1
+id: dev-config-001
+version: 1.0.0
+title: Create the app-settings ConfigMap
+domain: design-build
+difficulty: easy
+type: build
+tags: [configmap]
+competencies:
+  - "Define, build and modify container images"
+capabilities: []
+parameters:
+  namespace: [dev-cfg-a, dev-cfg-b]
+namespace: "${namespace}"
+budget:
+  cpu: 50m
+  memory: 32Mi
+criteria:
+  - id: base-exists
+    kind: resource
+    target: {api_version: v1, kind: ConfigMap, namespace: "${namespace}", name: base-settings}
+    points: 1
+  - id: settings-exists
+    kind: resource
+    target: {api_version: v1, kind: ConfigMap, namespace: "${namespace}", name: app-settings}
+    points: 2
+  - id: settings-mode
+    kind: field
+    target: {api_version: v1, kind: ConfigMap, namespace: "${namespace}", name: app-settings}
+    points: 3
+    depends_on: [settings-exists]
+    args:
+      fields:
+        - path: data.mode
+          equals: production
+setup:
+  - kind: apply
+    args: {path: setup/base.yaml}
+solution:
+  - kind: apply
+    args: {path: solution/app-settings.yaml}
+initial_expected:
+  base-exists: PASS
+  settings-exists: FAIL
+  settings-mode: FAIL
+initial_score: 1
+cases:
+  - id: wrong-mode
+    actions:
+      - kind: apply
+        args: {path: cases/wrong-mode.yaml}
+    expected:
+      base-exists: PASS
+      settings-exists: PASS
+      settings-mode: FAIL
+    expected_score: 3

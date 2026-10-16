@@ -1,0 +1,50 @@
+# Development fixture 3 of 5 (not product content): an intentionally broken
+# app. The api Deployment crash-loops in its initial state; that is the
+# declared starting point of the problem, not a platform fault.
+schema_version: 1
+id: dev-crashloop-001
+version: 1.0.0
+title: Repair the crash-looping api Deployment
+domain: observability
+difficulty: medium
+type: troubleshoot
+tags: [troubleshooting, logs]
+competencies:
+  - "Debug in Kubernetes"
+capabilities: []
+namespace: dev-crash
+budget:
+  cpu: 100m
+  memory: 64Mi
+criteria:
+  - id: api-exists
+    kind: resource
+    target: {api_version: apps/v1, kind: Deployment, namespace: dev-crash, name: api}
+    points: 2
+  - id: api-ready
+    kind: ready
+    target: {api_version: apps/v1, kind: Deployment, namespace: dev-crash, name: api}
+    points: 4
+    depends_on: [api-exists]
+    timeout: 90s
+    args:
+      replicas: 1
+setup:
+  - kind: apply
+    args: {path: setup/api.yaml}
+solution:
+  - kind: apply
+    args: {path: solution/api.yaml}
+initial_expected:
+  api-exists: PASS
+  api-ready: FAIL
+initial_score: 2
+cases:
+  - id: still-crashing
+    actions:
+      - kind: apply
+        args: {path: cases/still-crashing.yaml}
+    expected:
+      api-exists: PASS
+      api-ready: FAIL
+    expected_score: 2

@@ -1,0 +1,22 @@
+# DEV-CASE-MARKER-CRASH
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: api
+  namespace: dev-crash
+spec:
+  replicas: 1
+  selector:
+    matchLabels: {app: api}
+  template:
+    metadata:
+      labels: {app: api}
+    spec:
+      terminationGracePeriodSeconds: 1
+      containers:
+        - name: api
+          image: docker.io/library/busybox:1.37.0
+          imagePullPolicy: IfNotPresent
+          command: ["sh", "-c", "echo again; exit 2"]
+          resources:
+            limits: {cpu: 50m, memory: 16Mi}
