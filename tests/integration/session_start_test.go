@@ -107,7 +107,7 @@ func TestSessionStart(t *testing.T) {
 	}
 
 	workspace := t.TempDir()
-	svc := session.New(st, m, rt, cfg, devBank, dir, session.WithWorkspace(workspace))
+	svc := session.New(st, m, rt, devBank, dir, session.WithWorkspace(workspace))
 	mock := session.StartOptions{Mode: model.ModeMock, MockID: "dev-mock", Seed: 7}
 
 	// A bank whose package changed after validation is refused: no
@@ -119,7 +119,7 @@ func TestSessionStart(t *testing.T) {
 		b, err := os.ReadFile(expl)
 		testutil.NoError(t, err)
 		testutil.NoError(t, os.WriteFile(expl, append(b, "\n수정됨\n"...), 0o644))
-		other := session.New(st, m, rt, cfg, edited, dir, session.WithWorkspace(t.TempDir()))
+		other := session.New(st, m, rt, edited, dir, session.WithWorkspace(t.TempDir()))
 		_, err = other.Prepare(ctx, mock)
 		testutil.ErrorIs(t, err, session.ErrNotCertified)
 		if !strings.Contains(err.Error(), "dev-sa-001") {

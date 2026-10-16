@@ -284,6 +284,11 @@ type Runtime struct {
 	// (GraderConfig.EnvironmentHash); sessions must compare against the same
 	// value.
 	EnvironmentHash string
+	// Config is the GraderConfig the runtime was composed with. It is the
+	// one source of the provided images (preload, the grader's provided set,
+	// the environment manifest and hash) for everything built on the
+	// runtime: sessions take it from here, never from a second copy.
+	Config GraderConfig
 }
 
 // NewRuntime composes the Validator on the Manager, Store and grader. The
@@ -313,7 +318,7 @@ func NewRuntime(ctx context.Context, m *environment.Manager, st *store.Store, id
 		g.Close()
 		return nil, err
 	}
-	return &Runtime{Validator: v, Grader: g, Identity: id, EnvironmentHash: envHash}, nil
+	return &Runtime{Validator: v, Grader: g, Identity: id, EnvironmentHash: envHash, Config: cfg}, nil
 }
 
 // Close releases the grader's scratch space.

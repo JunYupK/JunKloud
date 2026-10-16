@@ -254,12 +254,14 @@ func WithWorkspace(dir string) Option { return func(c *Config) { c.Workspace = d
 func WithClock(now func() time.Time) Option { return func(c *Config) { c.Now = now } }
 
 // New composes a Service on the real Manager and Store and on the runtime
-// that author.NewRuntime built (its grader engine and verified identity), so
-// sessions grade with exactly the composition validation used. graderCfg must
-// be the GraderConfig the runtime was built with: its Images complete the
-// environment hash that certificates are compared with. bankDir holds
-// problems/ and exams/; stateDir is the installation's state directory.
-func New(s *store.Store, env *environment.Manager, rt *author.Runtime, graderCfg author.GraderConfig, bankDir, stateDir string, opts ...Option) *Service {
+// that author.NewRuntime built (its grader engine, verified identity and
+// GraderConfig), so sessions grade with exactly the composition validation
+// used. The runtime's Config is the only GraderConfig: its Images complete
+// the environment hash that certificates are compared with and are what
+// PrepareEnvironment preloads. bankDir holds problems/ and exams/; stateDir
+// is the installation's state directory.
+func New(s *store.Store, env *environment.Manager, rt *author.Runtime, bankDir, stateDir string, opts ...Option) *Service {
+	graderCfg := rt.Config
 	cfg := Config{
 		Store: s, Env: env, Engine: rt.Grader.Engine, Inputs: rt.Grader.Artifacts, Identity: rt.Identity,
 		GraderVersion:       grader.GraderVersion,
