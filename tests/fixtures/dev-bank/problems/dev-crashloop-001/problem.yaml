@@ -21,10 +21,12 @@ budget:
 criteria:
   - id: api-exists
     kind: resource
+    feedback: "api Deployment가 있는지 확인하세요."
     target: {api_version: apps/v1, kind: Deployment, namespace: dev-crash, name: api}
     points: 2
   - id: api-ready
     kind: ready
+    feedback: "api 컨테이너가 재시작 없이 Ready 상태를 유지하는지 확인하세요."
     target: {api_version: apps/v1, kind: Deployment, namespace: dev-crash, name: api}
     points: 4
     depends_on: [api-exists]

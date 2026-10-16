@@ -43,6 +43,13 @@ func TestLoadValid(t *testing.T) {
 	testutil.Equal(t, reach.Target, model.ObjectRef{APIVersion: "v1", Kind: "Service", Namespace: "${namespace}", Name: "${service_name}"})
 	// Integer literals in Args decode as int, not float64.
 	testutil.Equal(t, reach.Args["status"], 200)
+	// Every criterion carries its Korean feedback (spec 8.1).
+	testutil.Equal(t, reach.Feedback, "Service가 ${port} 포트로 HTTP 200 응답을 돌려주는지 확인하세요.")
+	for _, c := range p.Criteria {
+		if c.Feedback == "" {
+			t.Errorf("criterion %s has no feedback", c.ID)
+		}
+	}
 
 	testutil.Equal(t, p.Solution, []model.Action{{Kind: model.ActionApply, Args: map[string]any{"path": "solution/answer.yaml"}}})
 	testutil.Equal(t, p.InitialScore, 0)
@@ -90,6 +97,9 @@ func TestInvalidDefinition(t *testing.T) {
 		"bad-timeout":            "/criteria/2/timeout",
 		"bad-quantity":           "memory",
 		"bad-namespace":          "Svc_Bravo",
+		// Each criterion has Korean feedback (spec 8.1).
+		"missing-feedback":    "/criteria/1",
+		"non-korean-feedback": `criterion "service-port": feedback must be written in Korean`,
 		// Resource scope (spec §6.2, ruling R13).
 		"scope-problem-namespace":           `scope namespace "svc-alpha" is the problem namespace`,
 		"scope-duplicate-namespace":         `duplicate scope namespace "svc-alpha-client"`,

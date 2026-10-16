@@ -24,10 +24,12 @@ sources:
 criteria:
   - id: service-exists
     kind: resource
+    feedback: "web Service가 있는지 확인하세요."
     target: {api_version: v1, kind: Service, namespace: "${namespace}", name: "${service_name}"}
     points: 2
   - id: service-exists
     kind: field
+    feedback: "web Service가 있는지 확인하세요."
     target: {api_version: v1, kind: Service, namespace: "${namespace}", name: "${service_name}"}
     points: 3
     depends_on: [service-exists]
@@ -36,6 +38,7 @@ criteria:
       equals: "${port}"
   - id: service-reachable
     kind: http
+    feedback: "Service가 HTTP 200 응답을 돌려주는지 확인하세요."
     target: {api_version: v1, kind: Service, namespace: "${namespace}", name: "${service_name}"}
     points: 5
     depends_on: [service-port]

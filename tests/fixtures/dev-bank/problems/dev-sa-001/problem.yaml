@@ -17,10 +17,12 @@ budget:
 criteria:
   - id: sa-exists
     kind: resource
+    feedback: "builder ServiceAccount가 있는지 확인하세요."
     target: {api_version: v1, kind: ServiceAccount, namespace: dev-sec, name: builder}
     points: 2
   - id: sa-no-automount
     kind: field
+    feedback: "builder ServiceAccount가 토큰을 자동으로 마운트하지 않도록 설정했는지 확인하세요."
     target: {api_version: v1, kind: ServiceAccount, namespace: dev-sec, name: builder}
     points: 3
     depends_on: [sa-exists]

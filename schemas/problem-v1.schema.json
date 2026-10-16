@@ -97,9 +97,13 @@
     "criterion": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["id", "kind", "points"],
+      "required": ["id", "kind", "points", "feedback"],
       "properties": {
         "id": { "$ref": "#/$defs/id" },
+        "feedback": {
+          "description": "Korean feedback for the learner (spec 8.1), shown with the criterion's result where the mode discloses results.",
+          "type": "string", "minLength": 1, "maxLength": 500
+        },
         "kind": {
           "enum": [
             "resource", "field", "ready", "http", "tcp", "network-policy", "file", "image",

@@ -19,14 +19,17 @@ budget:
 criteria:
   - id: base-exists
     kind: resource
+    feedback: "base-settings ConfigMap이 그대로 남아 있는지 확인하세요."
     target: {api_version: v1, kind: ConfigMap, namespace: "${namespace}", name: base-settings}
     points: 1
   - id: settings-exists
     kind: resource
+    feedback: "app-settings ConfigMap을 만들었는지 확인하세요."
     target: {api_version: v1, kind: ConfigMap, namespace: "${namespace}", name: app-settings}
     points: 2
   - id: settings-mode
     kind: field
+    feedback: "app-settings ConfigMap의 mode 값을 확인하세요."
     target: {api_version: v1, kind: ConfigMap, namespace: "${namespace}", name: app-settings}
     points: 3
     depends_on: [settings-exists]

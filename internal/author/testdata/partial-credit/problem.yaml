@@ -23,14 +23,17 @@ budget:
 criteria:
   - id: config-exists
     kind: resource
+    feedback: "settings ConfigMap이 있는지 확인하세요."
     target: {api_version: v1, kind: ConfigMap, namespace: "${namespace}", name: settings}
     points: 2
   - id: web-exists
     kind: resource
+    feedback: "web Deployment가 있는지 확인하세요."
     target: {api_version: apps/v1, kind: Deployment, namespace: "${namespace}", name: web}
     points: 2
   - id: web-image
     kind: field
+    feedback: "web Deployment의 컨테이너 이미지를 확인하세요."
     target: {api_version: apps/v1, kind: Deployment, namespace: "${namespace}", name: web}
     points: 2
     depends_on: [web-exists]
@@ -40,6 +43,7 @@ criteria:
           equals: busybox:1.37.0
   - id: web-replicas
     kind: field
+    feedback: "web Deployment의 replicas 값을 확인하세요."
     target: {api_version: apps/v1, kind: Deployment, namespace: "${namespace}", name: web}
     points: 2
     depends_on: [web-exists]
@@ -49,6 +53,7 @@ criteria:
           equals: "${replicas}"
   - id: web-ready
     kind: ready
+    feedback: "web Deployment가 롤아웃을 마치고 재시작 없이 Ready 상태를 유지하는지 확인하세요."
     target: {api_version: apps/v1, kind: Deployment, namespace: "${namespace}", name: web}
     points: 2
     depends_on: [web-exists]

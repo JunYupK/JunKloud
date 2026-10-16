@@ -17,14 +17,17 @@ budget:
 criteria:
   - id: notes-exists
     kind: resource
+    feedback: "notes ConfigMap이 그대로 남아 있는지 확인하세요."
     target: {api_version: v1, kind: ConfigMap, namespace: dev-svc, name: notes}
     points: 1
   - id: service-exists
     kind: resource
+    feedback: "web Service가 있는지 확인하세요."
     target: {api_version: v1, kind: Service, namespace: dev-svc, name: web}
     points: 2
   - id: service-port
     kind: field
+    feedback: "Service의 포트 설정을 확인하세요."
     target: {api_version: v1, kind: Service, namespace: dev-svc, name: web}
     points: 3
     depends_on: [service-exists]

@@ -108,8 +108,12 @@ type ObjectRef struct {
 
 // Criterion is one graded check. Timeout zero means the grader default.
 type Criterion struct {
-	ID        string         `json:"id"`
-	Kind      string         `json:"kind"`
+	ID   string `json:"id"`
+	Kind string `json:"kind"`
+	// Feedback is the criterion's Korean feedback for the learner (spec
+	// 8.1), shown with its result where the mode discloses results. It is
+	// rendered with the frozen parameters like the rest of the definition.
+	Feedback  string         `json:"feedback"`
 	Target    ObjectRef      `json:"target"`
 	Points    int            `json:"points"`
 	DependsOn []string       `json:"depends_on,omitempty"`

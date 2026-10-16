@@ -18,6 +18,7 @@ import (
 	"strings"
 	"sync"
 	"time"
+	"unicode"
 
 	"github.com/santhosh-tekuri/jsonschema/v6"
 	"k8s.io/apimachinery/pkg/api/resource"
@@ -192,6 +193,7 @@ type rawBudget struct {
 type rawCriterion struct {
 	ID        string          `json:"id"`
 	Kind      string          `json:"kind"`
+	Feedback  string          `json:"feedback"`
 	Target    model.ObjectRef `json:"target"`
 	Points    int             `json:"points"`
 	DependsOn []string        `json:"depends_on"`
@@ -253,13 +255,28 @@ func convert(doc []byte) (model.Problem, error) {
 				return model.Problem{}, fmt.Errorf("criterion %q: timeout %q must be a positive duration", c.ID, c.Timeout)
 			}
 		}
+		if !hasHangul(c.Feedback) {
+			return model.Problem{}, fmt.Errorf("criterion %q: feedback must be written in Korean (spec 8.1), got %q", c.ID, c.Feedback)
+		}
 		args, _ := normalizeNumbers(c.Args).(map[string]any)
 		p.Criteria = append(p.Criteria, model.Criterion{
-			ID: c.ID, Kind: c.Kind, Target: c.Target, Points: c.Points,
+			ID: c.ID, Kind: c.Kind, Feedback: c.Feedback, Target: c.Target, Points: c.Points,
 			DependsOn: c.DependsOn, Timeout: timeout, Args: args,
 		})
 	}
 	return p, nil
+}
+
+// hasHangul reports whether s contains a Hangul syllable or letter: the
+// criterion feedback is Korean text (it may name Kubernetes terms in
+// English around it).
+func hasHangul(s string) bool {
+	for _, r := range s {
+		if unicode.Is(unicode.Hangul, r) {
+			return true
+		}
+	}
+	return false
 }
 
 // parseQuantity parses a Kubernetes quantity ("250m", "1", "128Mi"); it must
