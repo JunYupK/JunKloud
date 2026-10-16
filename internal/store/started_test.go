@@ -92,3 +92,44 @@ func TestMarkStartedRace(t *testing.T) {
 	testutil.NoError(t, err)
 	testutil.Equal(t, *got.StartedAt, t0.Add(time.Duration(winners)*time.Minute).UTC())
 }
+
+// TestSessionEnvironmentManifestRoundTrips: the grader version, environment
+// manifest and its hash are stored with the session (spec 6.3), come back
+// unchanged, and are frozen: nothing can rewrite them afterwards. A session
+// created without them reads back with none.
+func TestSessionEnvironmentManifestRoundTrips(t *testing.T) {
+	s, path := openStore(t)
+	rec := preparing("s1")
+	rec.GraderVersion = "grader-1"
+	rec.EnvironmentHash = "sha256:abc"
+	rec.EnvironmentManifest = map[string]string{"kind": "v0.33.0", "tool:helm": "v4.3.0", "image:busybox:1.37.0": "sha256:def"}
+	testutil.NoError(t, s.CreateSession(ctx, rec))
+
+	got, err := s.LoadSession(ctx, "s1")
+	testutil.NoError(t, err)
+	testutil.Equal(t, got.GraderVersion, "grader-1")
+	testutil.Equal(t, got.EnvironmentHash, "sha256:abc")
+	testutil.Equal(t, got.EnvironmentManifest, rec.EnvironmentManifest)
+
+	// Starting the session leaves them alone.
+	testutil.NoError(t, s.MarkStarted(ctx, "s1", t0))
+	got, err = s.LoadSession(ctx, "s1")
+	testutil.NoError(t, err)
+	testutil.Equal(t, got.EnvironmentHash, "sha256:abc")
+
+	// Frozen at the database level too.
+	db := rawDB(t, path)
+	for _, col := range []string{"grader_version", "environment_hash", "environment_manifest_json"} {
+		if _, err := db.Exec(`UPDATE sessions SET ` + col + ` = 'x' WHERE id = 's1'`); err == nil {
+			t.Errorf("UPDATE of %s succeeded", col)
+		}
+	}
+
+	// Without them: empty, not an error.
+	testutil.NoError(t, s.CreateSession(ctx, preparing("s2")))
+	got, err = s.LoadSession(ctx, "s2")
+	testutil.NoError(t, err)
+	testutil.Equal(t, got.GraderVersion, "")
+	testutil.Equal(t, got.EnvironmentHash, "")
+	testutil.Equal(t, got.EnvironmentManifest, map[string]string(nil))
+}

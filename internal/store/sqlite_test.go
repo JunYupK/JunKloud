@@ -119,7 +119,7 @@ func TestOpenMigratesAndReopens(t *testing.T) {
 	testutil.NoError(t, s.Close())
 
 	db := rawDB(t, path)
-	testutil.Equal(t, count(t, db, `SELECT MAX(version) FROM schema_migrations`), 2)
+	testutil.Equal(t, count(t, db, `SELECT MAX(version) FROM schema_migrations`), 3)
 
 	s2, err := store.Open(path)
 	testutil.NoError(t, err)
@@ -127,7 +127,7 @@ func TestOpenMigratesAndReopens(t *testing.T) {
 	got, err := s2.LoadSession(ctx, "s1")
 	testutil.NoError(t, err)
 	testutil.Equal(t, got.ID, "s1")
-	testutil.Equal(t, count(t, db, `SELECT COUNT(*) FROM schema_migrations`), 2)
+	testutil.Equal(t, count(t, db, `SELECT COUNT(*) FROM schema_migrations`), 3)
 }
 
 func TestSessionRoundTrip(t *testing.T) {

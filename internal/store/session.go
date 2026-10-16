@@ -41,6 +41,14 @@ func (s *Store) CreateSession(ctx context.Context, rec model.SessionRecord) erro
 		}
 		marks = string(b)
 	}
+	var manifest any
+	if rec.EnvironmentManifest != nil {
+		b, err := json.Marshal(rec.EnvironmentManifest)
+		if err != nil {
+			return fmt.Errorf("store: encode environment manifest: %w", err)
+		}
+		manifest = string(b)
+	}
 	var started, parent any
 	if rec.StartedAt != nil {
 		started = encodeTime(*rec.StartedAt)
@@ -59,10 +67,12 @@ func (s *Store) CreateSession(ctx context.Context, rec model.SessionRecord) erro
 
 	return s.inTx(ctx, func(tx *sql.Tx) error {
 		_, err := tx.ExecContext(ctx, `INSERT INTO sessions
-			(id, environment_id, mode, state, parent_id, seed, started_at, duration_limit_ns, marks_json)
-			VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+			(id, environment_id, mode, state, parent_id, seed, started_at, duration_limit_ns, marks_json,
+			 grader_version, environment_hash, environment_manifest_json)
+			VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 			rec.ID, rec.EnvironmentID, rec.Mode, rec.State, parent,
-			int64(rec.Seed), started, int64(rec.DurationLimit), marks)
+			int64(rec.Seed), started, int64(rec.DurationLimit), marks,
+			nullIfEmpty(rec.GraderVersion), nullIfEmpty(rec.EnvironmentHash), manifest)
 		if err != nil {
 			return mapWriteErr(fmt.Errorf("store: insert session %q: %w", rec.ID, err))
 		}
@@ -76,6 +86,13 @@ func (s *Store) CreateSession(ctx context.Context, rec model.SessionRecord) erro
 		}
 		return nil
 	})
+}
+
+func nullIfEmpty(s string) any {
+	if s == "" {
+		return nil
+	}
+	return s
 }
 
 // LoadSession returns the session and its problems in their original order.
@@ -94,10 +111,14 @@ func (s *Store) LoadSession(ctx context.Context, id string) (model.SessionRecord
 		started sql.NullString
 		limit   int64
 		marks   sql.NullString
+
+		graderVersion, envHash, manifest sql.NullString
 	)
 	err = tx.QueryRowContext(ctx, `SELECT id, environment_id, mode, state, parent_id, seed,
-		started_at, duration_limit_ns, marks_json FROM sessions WHERE id = ?`, id).
-		Scan(&rec.ID, &rec.EnvironmentID, &rec.Mode, &rec.State, &parent, &seed, &started, &limit, &marks)
+		started_at, duration_limit_ns, marks_json, grader_version, environment_hash, environment_manifest_json
+		FROM sessions WHERE id = ?`, id).
+		Scan(&rec.ID, &rec.EnvironmentID, &rec.Mode, &rec.State, &parent, &seed, &started, &limit, &marks,
+			&graderVersion, &envHash, &manifest)
 	if errors.Is(err, sql.ErrNoRows) {
 		return model.SessionRecord{}, fmt.Errorf("%w: session %q", ErrNotFound, id)
 	}
@@ -105,6 +126,12 @@ func (s *Store) LoadSession(ctx context.Context, id string) (model.SessionRecord
 		return model.SessionRecord{}, fmt.Errorf("store: load session %q: %w", id, err)
 	}
 	rec.ParentID = parent.String
+	rec.GraderVersion, rec.EnvironmentHash = graderVersion.String, envHash.String
+	if manifest.Valid {
+		if err := json.Unmarshal([]byte(manifest.String), &rec.EnvironmentManifest); err != nil {
+			return model.SessionRecord{}, fmt.Errorf("store: decode environment manifest of %q: %w", id, err)
+		}
+	}
 	rec.Seed = uint64(seed)
 	rec.DurationLimit = time.Duration(limit)
 	if rec.StartedAt, err = decodeNullTime(started); err != nil {
