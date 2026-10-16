@@ -6,7 +6,10 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io/fs"
 	"maps"
+	"os"
+	"path/filepath"
 	"slices"
 	"strings"
 	"time"
@@ -54,11 +57,6 @@ var (
 	// finished (a crash). The message says how to recover (--retry or
 	// --resubmit); there is no confirmed score for it.
 	ErrGradeInterrupted = errors.New("session: an earlier grading did not finish")
-	// ErrSessionStale: the grader version or the environment versions differ
-	// from those the session was prepared with.
-	ErrSessionStale = errors.New("session: the grader or the environment changed since the session was prepared")
-	// ErrWorkspaceMissing: a problem's attempt directory does not exist.
-	ErrWorkspaceMissing = errors.New("session: the problem's attempt directory is missing")
 	// ErrDisclosureLocked: the explanation or solution is not available
 	// yet (a mock exam before a complete submission).
 	ErrDisclosureLocked = errors.New("session: the answer is not available yet")
@@ -90,6 +88,11 @@ const (
 	resultInputsChanged    = "!inputs-changed"
 	resultInputsUnverified = "!inputs-unverified"
 	resultEvaluatePrefix   = "!evaluate-"
+
+	resultEnvironmentUnavailable = "!environment-unavailable"
+	resultEnvironmentStale       = "!environment-stale"
+	resultGraderChanged          = "!grader-changed"
+	resultWorkspaceMissing       = "!workspace-missing-" // + problem
 )
 
 // QualifiedID names a criterion of a problem in the results of a run.
@@ -123,19 +126,27 @@ const savingBudget = time.Minute
 // Grade submits and grades (spec 9.1, 9.2, 11). Under the environment lock
 // (the same lock start, reset and validation take) it:
 //
-//  1. refuses what cannot be done before recording anything: a session that
-//     was not started, a mock problem graded alone, a plain grade of
-//     something already submitted, a retry of a finished submission, a retry
-//     of an answer that changed or whose sameness cannot be proven, a session
-//     whose grader or environment versions are not the ones it was prepared
-//     with;
+//  1. refuses what cannot be done before recording anything, from the
+//     session's own records only: a session that was not started, a mock
+//     problem graded alone, a plain grade of something already submitted, a
+//     retry of a finished submission, a retry of an answer that changed or
+//     whose sameness cannot be proven;
 //  2. fingerprints the answer (grader.CaptureInputs) in each problem's
 //     attempt directory, then records the intent (an operation) and, in ONE
 //     transaction, the submission (time, solving time, overtime, fingerprints,
 //     solutions already seen) together with the move to GRADING. A retry adds
 //     no submission: it records its intent and goes on with the old one;
-//  3. evaluates every problem of the scope with the runtime grader against the
-//     session's FROZEN problems, never the bank;
+//  3. checks that the grading can be trusted and evaluates every problem of
+//     the scope with the runtime grader against the session's FROZEN problems,
+//     never the bank. An unreachable environment, a grader or tool versions
+//     other than those the session was prepared with, or a problem whose
+//     workspace cannot be determined are not refusals (the submission and its
+//     time are already recorded): each is an ERROR result of the run
+//     (`!environment-unavailable`, `!grader-changed`, `!environment-stale`,
+//     `!workspace-missing-<problem>`), so nothing is confirmed and a later
+//     --retry keeps the submission time. A learner who deleted a problem's
+//     attempt directory while the session's workspace exists is graded as an
+//     empty workspace (files absent);
 //  4. fingerprints the answer again. If it changed while it was graded, or the
 //     fingerprints could not be taken, the result is not confirmed: an ERROR
 //     result says why, and the run is incomplete;
@@ -195,40 +206,50 @@ func (s *Service) Grade(ctx context.Context, sessionID string, opts GradeOptions
 	p, err := s.planGrade(rec, hist, opts)
 	if err != nil {
 		var already *alreadyError
-		if errors.As(err, &already) && already.run != nil {
+		var stopped *interruptedError
+		switch {
+		case errors.As(err, &already) && already.run != nil:
 			return s.disclosed(rec, *already.run), err
+		case errors.As(err, &stopped):
+			return model.GradingRun{}, s.interrupted(rec, hist, stopped.scope)
 		}
-		return model.GradingRun{}, err
-	}
-	if err := s.requireCurrent(ctx, rec); err != nil {
 		return model.GradingRun{}, err
 	}
 	return s.execute(ctx, rec, hist, p, at)
 }
 
-// requireCurrent checks, before anything is recorded, that the environment is
-// usable and that the grader and environment versions are the ones the session
-// was prepared with. A session that predates the frozen versions skips the
-// comparison.
-func (s *Service) requireCurrent(ctx context.Context, rec model.SessionRecord) error {
-	if rec.GraderVersion != "" && rec.GraderVersion != s.cfg.GraderVersion {
-		return fmt.Errorf("%w: the session was prepared with grader %s, this program grades with %s; finish or abandon the session with the version it was prepared with",
-			ErrSessionStale, rec.GraderVersion, s.cfg.GraderVersion)
+// environmentProblem checks, once the submission is recorded, that the grading
+// can be trusted: the environment is reachable and usable, the grader is the
+// version the session was prepared with, and the environment and tool versions
+// are those frozen on the session (a session that predates the frozen values
+// skips the comparison). The first problem found becomes an ERROR result of
+// the run: it is recorded, never refused, so the submission keeps its time, and
+// nothing is graded with a grader or environment the problems were not
+// certified on. ok is true when there is none.
+func (s *Service) environmentProblem(ctx context.Context, rec model.SessionRecord) (result model.CheckResult, ok bool) {
+	problem := func(id, reason string) (model.CheckResult, bool) {
+		return s.synthetic(s.cfg.Now().Round(0).UTC(), id, reason), false
 	}
 	if err := s.cfg.Env.Check(ctx, s.cfg.Identity); err != nil {
-		return fmt.Errorf("session: grade %q: the environment is not usable: %w", rec.ID, err)
+		return problem(resultEnvironmentUnavailable, fmt.Sprintf("the environment is not usable, so nothing was graded: %v", err))
+	}
+	if rec.GraderVersion != "" && rec.GraderVersion != s.cfg.GraderVersion {
+		return problem(resultGraderChanged, fmt.Sprintf(
+			"the session was prepared with grader %s and this program grades with %s, so nothing was graded; retry with the version that prepared the session",
+			rec.GraderVersion, s.cfg.GraderVersion))
 	}
 	if rec.EnvironmentHash != "" {
 		manifest, err := s.cfg.EnvironmentManifest(ctx, s.cfg.Identity)
 		if err != nil {
-			return fmt.Errorf("session: grade %q: compute the environment manifest: %w", rec.ID, err)
+			return problem(resultEnvironmentUnavailable, fmt.Sprintf("the environment versions could not be determined, so nothing was graded: %v", err))
 		}
-		if live := author.EnvironmentHash(manifest); live != rec.EnvironmentHash {
-			return fmt.Errorf("%w: the versions of the environment and its tools are not those the session was prepared with (%s)",
-				ErrSessionStale, differingVersions(rec.EnvironmentManifest, manifest))
+		if author.EnvironmentHash(manifest) != rec.EnvironmentHash {
+			return problem(resultEnvironmentStale, fmt.Sprintf(
+				"the versions of the environment and its tools are not those the session was prepared with (%s), so nothing was graded; restore them and retry",
+				differingVersions(rec.EnvironmentManifest, manifest)))
 		}
 	}
-	return nil
+	return model.CheckResult{}, true
 }
 
 // differingVersions names the manifest entries that differ, for a message.
@@ -252,15 +273,27 @@ func differingVersions(frozen, live map[string]string) string {
 
 // execute carries a planned grading out (steps 2 to 5 of Grade).
 func (s *Service) execute(ctx context.Context, rec model.SessionRecord, hist history, p gradePlan, at time.Time) (model.GradingRun, error) {
-	targets, err := s.targets(rec, p.problems)
-	if err != nil {
-		return model.GradingRun{}, err
+	items := s.items(rec, p.problems)
+	var targets []grader.Target
+	var unreadable []string // problems whose workspace cannot be determined
+	for _, it := range items {
+		if it.missing != "" {
+			unreadable = append(unreadable, it.frozen.Definition.ID)
+			continue
+		}
+		targets = append(targets, it.target)
 	}
 
 	// What the learner submitted. A failure to fingerprint does not stop the
-	// submission; it means the result cannot be shown to match it.
+	// submission; it means the result cannot be shown to match it. Nothing
+	// that goes wrong from here on, in the environment or in the workspace,
+	// refuses the request: the submission is recorded first and the problem
+	// becomes an ERROR in its run.
 	baseline, capErr := s.capture(ctx, targets)
-	if capErr == nil && len(baseline) == 0 {
+	switch {
+	case len(unreadable) > 0:
+		baseline, capErr = nil, fmt.Errorf("the attempt directory of %s cannot be determined", strings.Join(unreadable, ", "))
+	case capErr == nil && len(baseline) == 0:
 		capErr = errors.New("no input of the answer was found to fingerprint")
 	}
 	if p.retry {
@@ -282,6 +315,7 @@ func (s *Service) execute(ctx context.Context, rec model.SessionRecord, hist his
 	for _, stale := range p.stale {
 		stale.Phase = GradeSuperseded
 		if err := s.cfg.Store.PutOperation(ctx, stale); err != nil {
+			s.closeOperation(op, GradeSuperseded) // this request does not go ahead either
 			return model.GradingRun{}, fmt.Errorf("session: grade %q: close the interrupted grading %s: %w", rec.ID, stale.ID, err)
 		}
 	}
@@ -310,26 +344,38 @@ func (s *Service) execute(ctx context.Context, rec model.SessionRecord, hist his
 
 	// From here on the session is GRADING (or the problem is being graded):
 	// whatever happens, an incomplete run is recorded.
-	ev := s.evaluate(ctx, targets)
+	var ev model.Evaluation
 	var extra []model.CheckResult
-	switch {
-	case capErr != nil:
-		extra = append(extra, s.synthetic(at, resultInputsUnverified, fmt.Sprintf(
-			"the answer could not be fingerprinted when it was submitted (%v), so the result cannot be shown to match what was submitted", capErr)))
-	case ctx.Err() != nil:
-		extra = append(extra, s.synthetic(at, resultInputsUnverified,
-			"the command was interrupted before the answer could be fingerprinted again, so the result cannot be shown to match what was submitted"))
-	default:
-		after, err := s.capture(ctx, targets)
+	if problem, ok := s.environmentProblem(ctx, rec); !ok {
+		// Nothing is graded: the run says why. Its maximum is still the
+		// scope's, an unknown score is not a zero.
+		for _, f := range p.problems {
+			ev.MaxScore += maxPoints(f)
+		}
+		extra = append(extra, problem)
+	} else {
+		ev = s.evaluate(ctx, items)
 		switch {
-		case err != nil:
+		case len(unreadable) > 0:
+			// Already explained by the workspace results.
+		case capErr != nil:
 			extra = append(extra, s.synthetic(at, resultInputsUnverified, fmt.Sprintf(
-				"the answer could not be fingerprinted again after grading (%v), so the result cannot be shown to match what was submitted", err)))
+				"the answer could not be fingerprinted when it was submitted (%v), so the result cannot be shown to match what was submitted", capErr)))
+		case ctx.Err() != nil:
+			extra = append(extra, s.synthetic(at, resultInputsUnverified,
+				"the command was interrupted before the answer could be fingerprinted again, so the result cannot be shown to match what was submitted"))
 		default:
-			if changed := changedInputs(baseline, after); len(changed) > 0 {
-				extra = append(extra, s.synthetic(at, resultInputsChanged, fmt.Sprintf(
-					"the answer of %s changed while it was graded (%s); stop editing and submit again with --resubmit",
-					strings.Join(changedProblems(changed), ", "), strings.Join(changed, ", "))))
+			after, err := s.capture(ctx, targets)
+			switch {
+			case err != nil:
+				extra = append(extra, s.synthetic(at, resultInputsUnverified, fmt.Sprintf(
+					"the answer could not be fingerprinted again after grading (%v), so the result cannot be shown to match what was submitted", err)))
+			default:
+				if changed := changedInputs(baseline, after); len(changed) > 0 {
+					extra = append(extra, s.synthetic(at, resultInputsChanged, fmt.Sprintf(
+						"the answer of %s changed while it was graded (%s); stop editing and submit again with --resubmit",
+						strings.Join(changedProblems(changed), ", "), strings.Join(changed, ", "))))
+				}
 			}
 		}
 	}
@@ -362,18 +408,47 @@ func (s *Service) execute(ctx context.Context, rec model.SessionRecord, hist his
 	return out, nil
 }
 
-// targets resolves each problem's frozen definition and its latest attempt
-// directory, the workspace its file, image and kustomize criteria read.
-func (s *Service) targets(rec model.SessionRecord, problems []model.FrozenProblem) ([]grader.Target, error) {
-	targets := make([]grader.Target, 0, len(problems))
+// gradeItem is one problem of a grading: its frozen definition and the
+// target the grader reads. missing is not empty when the problem's workspace
+// cannot be determined; such a problem is not graded.
+type gradeItem struct {
+	frozen  model.FrozenProblem
+	target  grader.Target
+	missing string
+}
+
+// items resolves each problem's latest attempt directory, the workspace its
+// file, image and kustomize criteria read. A problem whose attempt directory
+// does not exist is not a reason to refuse the submission:
+//
+//   - if the session's workspace directory still exists, the learner deleted
+//     that attempt (or the problem's directory). The target then names the
+//     first attempt directory, which does not exist, so the problem is graded
+//     as it is: its file criteria find the files absent (the file checker
+//     reports "does not exist", a FAIL with evidence) and the cluster criteria
+//     are unaffected;
+//   - if the session's whole workspace directory is gone nothing says what
+//     happened (an unmounted disk, a moved folder, a wiped home), so the
+//     problem is not graded and becomes an ERROR result.
+func (s *Service) items(rec model.SessionRecord, problems []model.FrozenProblem) []gradeItem {
+	_, statErr := os.Stat(filepath.Join(s.cfg.Workspace, rec.ID))
+	sessionDir := statErr == nil
+	items := make([]gradeItem, 0, len(problems))
 	for _, f := range problems {
-		dir, _, err := LatestAttempt(s.cfg.Workspace, rec.ID, f.Definition.ID)
-		if err != nil {
-			return nil, fmt.Errorf("%w: %s: %v", ErrWorkspaceMissing, f.Definition.ID, err)
+		id := f.Definition.ID
+		it := gradeItem{frozen: f, target: grader.Target{Identity: s.cfg.Identity, Problem: f}}
+		dir, _, err := LatestAttempt(s.cfg.Workspace, rec.ID, id)
+		switch {
+		case err == nil:
+			it.target.Workspace = dir
+		case sessionDir && errors.Is(err, fs.ErrNotExist):
+			it.target.Workspace = AttemptDir(s.cfg.Workspace, rec.ID, id, 1)
+		default:
+			it.missing = fmt.Sprintf("the attempt directory of %s cannot be determined, so it was not graded: %v", id, err)
 		}
-		targets = append(targets, grader.Target{Identity: s.cfg.Identity, Problem: f, Workspace: dir})
+		items = append(items, it)
 	}
-	return targets, nil
+	return items
 }
 
 // capture fingerprints the answer of every target. The keys are qualified with
@@ -437,10 +512,16 @@ func viewedIn(reviews []model.ReviewEvent, problems []model.FrozenProblem) []str
 // problems into one evaluation whose results are named by problem. A problem
 // that could not be evaluated at all is an ERROR result of its own: it never
 // reads as a failed answer.
-func (s *Service) evaluate(ctx context.Context, targets []grader.Target) model.Evaluation {
+func (s *Service) evaluate(ctx context.Context, items []gradeItem) model.Evaluation {
 	merged := model.Evaluation{Complete: true}
-	for _, t := range targets {
-		pid := t.Problem.Definition.ID
+	for _, it := range items {
+		t, pid := it.target, it.frozen.Definition.ID
+		if it.missing != "" {
+			merged.Results = append(merged.Results, s.synthetic(s.cfg.Now().Round(0).UTC(), resultWorkspaceMissing+pid, it.missing))
+			merged.MaxScore += maxPoints(it.frozen)
+			merged.Complete = false
+			continue
+		}
 		ev, err := s.cfg.Engine.Evaluate(ctx, t)
 		if err != nil {
 			reason := fmt.Sprintf("problem %s could not be graded: %v", pid, err)

@@ -134,6 +134,14 @@ type alreadyError struct {
 func (e *alreadyError) Error() string { return e.msg }
 func (e *alreadyError) Unwrap() error { return ErrAlreadySubmitted }
 
+// interruptedError is ErrGradeInterrupted before its message exists: the
+// message names the commands the session accepts, which is worked out by
+// planning, so planning cannot build it itself. Grade completes it.
+type interruptedError struct{ scope string }
+
+func (e *interruptedError) Error() string { return ErrGradeInterrupted.Error() }
+func (e *interruptedError) Unwrap() error { return ErrGradeInterrupted }
+
 // gradeCommand renders a command of the CLI contract (spec 10).
 func gradeCommand(scope string, flags ...string) string {
 	cmd := "ckad grade"
@@ -224,8 +232,9 @@ func (s *Service) planGrade(rec model.SessionRecord, hist history, opts GradeOpt
 			return retry(model.StateRunning, model.StateRunning), nil
 		case opts.Resubmit:
 			return resubmit(model.StateRunning, model.StateRunning), nil
-		case len(p.stale) > 0:
-			return gradePlan{}, s.interrupted(hist, rec, scope)
+		case unresolved && last == nil:
+			// Recorded, never graded: the process died after the submission.
+			return gradePlan{}, &interruptedError{scope: scope}
 		case unresolved:
 			return gradePlan{}, &alreadyError{
 				msg: fmt.Sprintf("%v: the last grade of %s did not complete; %s grades the same answer again, %s submits a changed one",
@@ -260,7 +269,7 @@ func (s *Service) planGrade(rec model.SessionRecord, hist history, opts GradeOpt
 		case opts.Resubmit:
 			return resubmit(model.StateGrading, model.StateGrading), nil
 		}
-		return gradePlan{}, s.interrupted(hist, rec, scope)
+		return gradePlan{}, &interruptedError{scope: scope}
 	case model.StateGradingError:
 		switch {
 		case latest == nil:
@@ -350,12 +359,17 @@ type Pending struct {
 	// Phase is how far the grading got: GradePlanned or GradeRecorded.
 	Phase string
 	// Since is the time of the request.
-	Since    time.Time
+	Since time.Time
+	// Recorded is true when the grading got as far as its submission (or, for a
+	// retry, the move to GRADING): a score for it is unknown. False means only
+	// the intent was recorded: nothing was graded and nothing changed, so it
+	// blocks nothing and the next grade of the scope closes it.
+	Recorded bool
 	Guidance string
 }
 
 // pending describes the grading operations of the session that did not finish.
-func (s *Service) pending(hist history) []Pending {
+func (s *Service) pending(rec model.SessionRecord, hist history) []Pending {
 	var out []Pending
 	for _, op := range hist.unfinished() {
 		runID := strings.TrimPrefix(op.ID, "grade-")
@@ -364,36 +378,63 @@ func (s *Service) pending(hist history) []Pending {
 			subID = runID[:i]
 		}
 		scope := op.Planned.ProblemID
-		p := Pending{OperationID: op.ID, SubmissionID: subID, RunID: runID, ProblemID: scope, Phase: op.Phase, Since: op.CreatedAt}
-		if !hist.hasSubmission(subID) {
-			p.Guidance = fmt.Sprintf("A grading requested at %s stopped before anything was recorded. Nothing was graded and there is no score; run %s again.",
-				op.CreatedAt.Format(time.RFC3339), gradeCommand(scope))
-		} else {
-			p.Guidance = guidance(hist, subID, scope)
-		}
+		recorded := hist.hasSubmission(subID) || op.Phase == GradeRecorded
+		p := Pending{OperationID: op.ID, SubmissionID: subID, RunID: runID, ProblemID: scope, Phase: op.Phase, Since: op.CreatedAt, Recorded: recorded}
+		p.Guidance = s.guidance(rec, hist, scope, subID, recorded, op.CreatedAt)
 		out = append(out, p)
 	}
 	return out
 }
 
-func guidance(hist history, submissionID, scope string) string {
-	var submitted time.Time
-	for _, sub := range hist.subs {
-		if sub.ID == submissionID {
-			submitted = sub.SubmittedAt
+// guidance says what happened and which commands the session accepts now. The
+// commands are not guessed: each of a plain grade, --retry and --resubmit is
+// run through the same planning Grade uses, and only the ones it would accept
+// are named. (--retry additionally needs the answer to be unchanged, which only
+// the grading itself can prove.)
+func (s *Service) guidance(rec model.SessionRecord, hist history, scope, submissionID string, recorded bool, since time.Time) string {
+	var head string
+	if recorded {
+		var submitted time.Time
+		for _, sub := range hist.subs {
+			if sub.ID == submissionID {
+				submitted = sub.SubmittedAt
+			}
 		}
+		head = fmt.Sprintf("The grading of submission %s (submitted %s) did not finish, so it has no confirmed score.", submissionID, submitted.Format(time.RFC3339))
+	} else {
+		head = fmt.Sprintf("A grading requested at %s stopped before it recorded anything: nothing was graded and no score changed.", since.Format(time.RFC3339))
 	}
-	return fmt.Sprintf("The grading of submission %s (submitted %s) did not finish, so it has no confirmed score. If no other terminal is grading, run %s to grade the same answer again (its submission time stays), or %s if you changed your answer.",
-		submissionID, submitted.Format(time.RFC3339), gradeCommand(scope, "--retry"), gradeCommand(scope, "--resubmit"))
+	var accepted []string
+	for _, c := range []struct {
+		flag, does string
+		opts       GradeOptions
+	}{
+		{"", "grades now", GradeOptions{ProblemID: scope}},
+		{"--retry", "grades the same answer again and keeps the submission time, if the answer is unchanged", GradeOptions{ProblemID: scope, Retry: true}},
+		{"--resubmit", "submits the answer as a new submission", GradeOptions{ProblemID: scope, Resubmit: true}},
+	} {
+		if _, err := s.planGrade(rec, hist, c.opts); err != nil {
+			continue
+		}
+		cmd := gradeCommand(scope)
+		if c.flag != "" {
+			cmd = gradeCommand(scope, c.flag)
+		}
+		accepted = append(accepted, cmd+" ("+c.does+")")
+	}
+	if len(accepted) == 0 {
+		return head + " The session accepts no grading command in its present state."
+	}
+	return head + " Accepted now: " + strings.Join(accepted, "; ") + "."
 }
 
-// interrupted is the refusal of a plain grade when the scope has an unfinished
-// grading.
-func (s *Service) interrupted(hist history, rec model.SessionRecord, scope string) error {
+// interrupted is the refusal of a plain grade when the scope's latest
+// submission was recorded and never graded.
+func (s *Service) interrupted(rec model.SessionRecord, hist history, scope string) error {
 	subs := hist.inScope(scope)
 	id := ""
 	if len(subs) > 0 {
 		id = subs[len(subs)-1].ID
 	}
-	return fmt.Errorf("%w: %s", ErrGradeInterrupted, guidance(hist, id, scope))
+	return fmt.Errorf("%w: %s", ErrGradeInterrupted, s.guidance(rec, hist, scope, id, true, time.Time{}))
 }

@@ -130,7 +130,7 @@ func (s *Service) Status(ctx context.Context, sessionID string, now time.Time) (
 	if err != nil {
 		return Status{}, err
 	}
-	st.Pending = s.pending(hist)
+	st.Pending = s.pending(rec, hist)
 	return st, nil
 }
 

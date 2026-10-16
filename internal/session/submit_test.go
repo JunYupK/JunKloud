@@ -6,6 +6,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io/fs"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -16,6 +17,7 @@ import (
 	"github.com/JunYupK/JunKloud/internal/author"
 	"github.com/JunYupK/JunKloud/internal/lock"
 	"github.com/JunYupK/JunKloud/internal/model"
+	"github.com/JunYupK/JunKloud/internal/problem"
 	"github.com/JunYupK/JunKloud/internal/session"
 	"github.com/JunYupK/JunKloud/internal/store"
 	"github.com/JunYupK/JunKloud/internal/testutil"
@@ -562,37 +564,216 @@ func TestGradeRequests(t *testing.T) {
 	testutil.ErrorIs(t, err, session.ErrUnknownProblem)
 }
 
-// TestGradeRefusesAStaleSession: a session graded by another grader version
-// or in an environment with other tool versions is not graded; nothing is
-// recorded.
-func TestGradeRefusesAStaleSession(t *testing.T) {
-	h := newHarness(t)
-	id := h.startedMock()
-	h.answer(nil)
-
-	root := h.root
-	upgraded := newHarness(t, func(o *harnessOption) { o.root = root; o.graderVersion = "grader-next" })
-	_, err := upgraded.svc.Grade(ctx, id, session.GradeOptions{At: at(10, 0)})
-	testutil.ErrorIs(t, err, session.ErrSessionStale)
-
-	newTools := newHarness(t, func(o *harnessOption) {
-		o.root = root
-		o.manifest = func() map[string]string {
-			m := map[string]string{}
-			for k, v := range testManifest {
-				m[k] = v
+// TestEnvironmentProblemsKeepTheSubmissionTime (spec 9.1): a grading that
+// cannot run because of the environment (unreachable, other tool versions, a
+// grader of another version) is still a submission made at its time. It is
+// recorded first and ends as an incomplete run with an ERROR result that says
+// why, never with a score; once the cause is gone a retry keeps the original
+// submission time, so the outage does not become solving time.
+func TestEnvironmentProblemsKeepTheSubmissionTime(t *testing.T) {
+	stateOf := func(h *harness, id string) (model.Submission, model.GradingRun) {
+		t.Helper()
+		subs := h.submissions(id)
+		testutil.Equal(t, len(subs), 1)
+		runs := h.runsOf(subs[0].ID)
+		testutil.Equal(t, len(runs), 1)
+		return subs[0], runs[0]
+	}
+	errorIDs := func(run model.GradingRun) []string {
+		var ids []string
+		for _, r := range run.Evaluation.Results {
+			if r.Status == model.StatusError {
+				ids = append(ids, r.CriterionID)
 			}
-			m["tool:kubectl"] = "v9.9.9"
-			return m
 		}
-	})
-	_, err = newTools.svc.Grade(ctx, id, session.GradeOptions{At: at(10, 0)})
-	testutil.ErrorIs(t, err, session.ErrSessionStale)
+		return ids
+	}
+	// recorded asserts what every case shares: the 10:00 submission exists with
+	// its timing, the run is incomplete without a score, the grader was not
+	// asked, and the session is GRADING_ERROR.
+	recorded := func(t *testing.T, h *harness, id string, run model.GradingRun, evaluations int) (model.Submission, model.GradingRun) {
+		t.Helper()
+		testutil.Equal(t, run.Evaluation.Complete, false)
+		testutil.Equal(t, run.Evaluation.Score, (*int)(nil))
+		testutil.Equal(t, h.state(id), model.StateGradingError)
+		sub, stored := stateOf(h, id)
+		testutil.Equal(t, sub.SubmittedAt, at(10, 0))
+		testutil.Equal(t, sub.SolveDuration, 90*time.Minute)
+		testutil.Equal(t, sub.WithinLimit, true)
+		testutil.Equal(t, stored.Evaluation.Score, (*int)(nil))
+		testutil.Equal(t, h.env.count("evaluate"), evaluations)
+		return sub, stored
+	}
+	// recovered retries at 10:40 (130 minutes after the start: over the limit
+	// if the retry time counted) and checks the original time stayed.
+	recovered := func(t *testing.T, h *harness, id string, sub model.Submission) {
+		t.Helper()
+		h.answer(nil)
+		run, err := h.svc.Grade(ctx, id, session.GradeOptions{Retry: true, At: at(10, 40)})
+		testutil.NoError(t, err)
+		testutil.Equal(t, run.Evaluation.Complete, true)
+		testutil.Equal(t, run.SubmissionID, sub.ID)
+		testutil.Equal(t, h.state(id), model.StateCompleted)
+		again, err := h.st.GetSubmission(ctx, sub.ID)
+		testutil.NoError(t, err)
+		testutil.Equal(t, again, sub)
+		testutil.Equal(t, again.WithinLimit, true)
+	}
 
-	testutil.Equal(t, len(h.submissions(id)), 0)
-	testutil.Equal(t, h.state(id), model.StateRunning)
-	_, err = h.svc.Grade(ctx, id, session.GradeOptions{At: at(10, 0)})
-	testutil.NoError(t, err)
+	t.Run("the cluster is unreachable", func(t *testing.T) {
+		h := newHarness(t)
+		id := h.startedMock()
+		h.answer(nil)
+		evaluations := h.env.count("evaluate")
+		h.env.checkErr = errors.New("docker: cannot connect to the daemon")
+		run, err := h.svc.Grade(ctx, id, session.GradeOptions{At: at(10, 0)})
+		testutil.NoError(t, err)
+		sub, stored := recorded(t, h, id, run, evaluations)
+		testutil.Equal(t, errorIDs(stored), []string{"!environment-unavailable"})
+		testutil.Equal(t, len(sub.InputHashes) > 0, true)
+		testutil.Equal(t, stored.Evaluation.MaxScore > 0, true)
+		h.env.checkErr = nil
+		recovered(t, h, id, sub)
+	})
+
+	t.Run("the cluster is unreachable and the answer cannot be fingerprinted", func(t *testing.T) {
+		h := newHarness(t)
+		id := h.startedMock()
+		h.answer(nil)
+		evaluations := h.env.count("evaluate")
+		h.env.checkErr = errors.New("docker: cannot connect to the daemon")
+		h.inputs.setErr(errors.New("the API server is unreachable"))
+		run, err := h.svc.Grade(ctx, id, session.GradeOptions{At: at(10, 0)})
+		testutil.NoError(t, err)
+		sub, _ := recorded(t, h, id, run, evaluations)
+		// The submission and its time exist, but nothing proves the answer is
+		// unchanged: the only way on is a new submission.
+		testutil.Equal(t, len(sub.InputHashes), 0)
+		h.env.checkErr = nil
+		h.inputs.setErr(nil)
+		h.answer(nil)
+		_, err = h.svc.Grade(ctx, id, session.GradeOptions{Retry: true, At: at(10, 2)})
+		testutil.ErrorIs(t, err, session.ErrRetryNotProvable)
+		again, err := h.svc.Grade(ctx, id, session.GradeOptions{Resubmit: true, At: at(10, 5)})
+		testutil.NoError(t, err)
+		testutil.Equal(t, again.Evaluation.Complete, true)
+	})
+
+	t.Run("the grader is another version", func(t *testing.T) {
+		h := newHarness(t)
+		id := h.startedMock()
+		h.answer(nil)
+		root := h.root
+		upgraded := newHarness(t, func(o *harnessOption) { o.root = root; o.graderVersion = "grader-next" })
+		upgraded.answer(nil)
+		run, err := upgraded.svc.Grade(ctx, id, session.GradeOptions{At: at(10, 0)})
+		testutil.NoError(t, err)
+		sub, stored := recorded(t, h, id, run, h.env.count("evaluate"))
+		testutil.Equal(t, upgraded.env.count("evaluate"), 0)
+		testutil.Equal(t, errorIDs(stored), []string{"!grader-changed"})
+		// The version that prepared the session retries, with the old time.
+		recovered(t, h, id, sub)
+	})
+
+	t.Run("the tools are other versions", func(t *testing.T) {
+		h := newHarness(t)
+		id := h.startedMock()
+		h.answer(nil)
+		root := h.root
+		newTools := newHarness(t, func(o *harnessOption) {
+			o.root = root
+			o.manifest = func() map[string]string {
+				m := map[string]string{}
+				for k, v := range testManifest {
+					m[k] = v
+				}
+				m["tool:kubectl"] = "v9.9.9"
+				return m
+			}
+		})
+		newTools.answer(nil)
+		run, err := newTools.svc.Grade(ctx, id, session.GradeOptions{At: at(10, 0)})
+		testutil.NoError(t, err)
+		sub, stored := recorded(t, h, id, run, h.env.count("evaluate"))
+		testutil.Equal(t, newTools.env.count("evaluate"), 0)
+		testutil.Equal(t, errorIDs(stored), []string{"!environment-stale"})
+		var reason string
+		for _, r := range stored.Evaluation.Results {
+			reason = r.Reason
+		}
+		if !strings.Contains(reason, "tool:kubectl") {
+			t.Errorf("the reason does not name the tool: %q", reason)
+		}
+		recovered(t, h, id, sub)
+	})
+}
+
+// TestMissingAttemptDirectory: a problem whose attempt directory is gone does
+// not refuse the exam. If the session's workspace still exists the learner
+// deleted that problem's directory: it is graded as it is, an empty workspace
+// whose files are absent (the file checker reports "does not exist", a FAIL
+// with evidence). If the session's whole workspace is gone nothing can say what
+// happened (an unmounted disk, a moved directory), so those problems are
+// ERROR, not graded, and the submission is still recorded at its time.
+func TestMissingAttemptDirectory(t *testing.T) {
+	t.Run("the learner deleted one", func(t *testing.T) {
+		h := newHarness(t)
+		id := h.startedMock()
+		h.answer(nil)
+		ids := h.frozenIDs(id)
+		dir, _, err := session.LatestAttempt(h.workspace, id, ids[1])
+		testutil.NoError(t, err)
+		testutil.NoError(t, os.RemoveAll(dir))
+
+		prepared := len(h.eng.targets)
+		run, err := h.svc.Grade(ctx, id, session.GradeOptions{At: at(10, 0)})
+		testutil.NoError(t, err)
+		testutil.Equal(t, run.Evaluation.Complete, true)
+		graded := h.eng.targets[prepared:]
+		testutil.Equal(t, len(graded), len(ids))
+		for _, target := range graded {
+			if target.Problem.Definition.ID != ids[1] {
+				continue
+			}
+			testutil.Equal(t, target.Workspace, session.AttemptDir(h.workspace, id, ids[1], 1))
+			// What the file checker relies on: a file below it is absent.
+			_, err := problem.ResolveAsset(target.Workspace, "answer.yaml")
+			testutil.ErrorIs(t, err, fs.ErrNotExist)
+		}
+		sub, _ := h.st.GetSubmission(ctx, run.SubmissionID)
+		testutil.Equal(t, sub.InputHashes[session.QualifiedID(ids[1], "file:answer.yaml")], "absent")
+	})
+
+	t.Run("the whole workspace is gone", func(t *testing.T) {
+		h := newHarness(t)
+		id := h.startedMock()
+		h.answer(nil)
+		ids := h.frozenIDs(id)
+		testutil.NoError(t, os.RemoveAll(filepath.Join(h.workspace, id)))
+		evaluations := h.env.count("evaluate")
+
+		run, err := h.svc.Grade(ctx, id, session.GradeOptions{At: at(10, 0)})
+		testutil.NoError(t, err)
+		testutil.Equal(t, run.Evaluation.Complete, false)
+		testutil.Equal(t, run.Evaluation.Score, (*int)(nil))
+		testutil.Equal(t, h.state(id), model.StateGradingError)
+		testutil.Equal(t, h.env.count("evaluate"), evaluations)
+		subs := h.submissions(id)
+		testutil.Equal(t, len(subs), 1)
+		testutil.Equal(t, subs[0].SubmittedAt, at(10, 0))
+		stored := h.runsOf(subs[0].ID)[0]
+		var got []string
+		for _, r := range stored.Evaluation.Results {
+			testutil.Equal(t, r.Status, model.StatusError)
+			got = append(got, r.CriterionID)
+		}
+		var want []string
+		for _, p := range ids {
+			want = append(want, "!workspace-missing-"+p)
+		}
+		testutil.Equal(t, got, want)
+		testutil.Equal(t, stored.Evaluation.MaxScore > 0, true)
+	})
 }
 
 // TestGradeLockAndReads: grading takes the environment lock, so it cannot
@@ -663,7 +844,8 @@ func TestCrashHelperProcess(t *testing.T) {
 	if point == "evaluate" {
 		h.eng.beforeReturn = func(model.FrozenProblem) { os.Exit(crashExit) }
 	}
-	_, err := h.svc.Grade(ctx, sid, session.GradeOptions{At: at(10, 0)})
+	opts := session.GradeOptions{ProblemID: os.Getenv("JUNKLOUD_CRASH_PROBLEM"), Resubmit: os.Getenv("JUNKLOUD_CRASH_RESUBMIT") != "", At: at(10, 0)}
+	_, err := h.svc.Grade(ctx, sid, opts)
 	t.Fatalf("the process should have died at %q; Grade returned %v", point, err)
 }
 
@@ -775,4 +957,164 @@ func TestCrashDuringGrade(t *testing.T) {
 		testutil.NoError(t, err)
 		testutil.Equal(t, len(status.Pending), 0)
 	})
+}
+
+// killedGrade runs Grade in a helper process that dies at the injection point.
+func killedGrade(t *testing.T, h *harness, sessionID, point string, extraEnv ...string) {
+	t.Helper()
+	cmd := exec.Command(os.Args[0], "-test.run=^TestCrashHelperProcess$", "-test.count=1")
+	cmd.Env = append(os.Environ(), "JUNKLOUD_CRASH_ROOT="+h.root, "JUNKLOUD_CRASH_POINT="+point, "JUNKLOUD_CRASH_SESSION="+sessionID)
+	cmd.Env = append(cmd.Env, extraEnv...)
+	out, err := cmd.CombinedOutput()
+	var exit *exec.ExitError
+	if !errors.As(err, &exit) || exit.ExitCode() != crashExit {
+		t.Fatalf("the helper did not die at %q: %v\n%s", point, err, out)
+	}
+}
+
+// TestCrashAfterTheIntentOutsideAFirstSubmission: a request killed right after
+// its intent was recorded (nothing else) is harmless wherever it happened. It
+// never blocks the next grade of its scope, never hides a confirmed total, the
+// guidance names the commands that will really be accepted, and the next grade
+// that goes ahead closes it.
+func TestCrashAfterTheIntentOutsideAFirstSubmission(t *testing.T) {
+	t.Run("a practice problem graded again", func(t *testing.T) {
+		h := newHarness(t)
+		id := h.startedPractice()
+		h.answer(nil)
+		p1 := h.frozenIDs(id)[0]
+		first, err := h.svc.Grade(ctx, id, session.GradeOptions{ProblemID: p1, At: at(9, 0)})
+		testutil.NoError(t, err)
+		testutil.Equal(t, first.Evaluation.Complete, true)
+
+		killedGrade(t, h, id, "submit", "JUNKLOUD_CRASH_PROBLEM="+p1)
+		status, err := h.svc.Status(ctx, id, at(10, 1))
+		testutil.NoError(t, err)
+		testutil.Equal(t, len(status.Pending), 1)
+		pending := status.Pending[0]
+		testutil.Equal(t, pending.ProblemID, p1)
+		testutil.Equal(t, pending.Recorded, false)
+		// The plain grade works and is the command named; --retry would be
+		// refused (the last grade is complete), so it is not suggested.
+		if !strings.Contains(pending.Guidance, "`ckad grade --problem "+p1+"`") || strings.Contains(pending.Guidance, "--retry") {
+			t.Errorf("the guidance does not match what the commands do: %q", pending.Guidance)
+		}
+		// The complete grade stays confirmed.
+		review, err := h.svc.Review(ctx, id, p1, false)
+		testutil.NoError(t, err)
+		testutil.Equal(t, review.Confirmed != nil && review.Confirmed.ID == first.ID, true)
+
+		second, err := h.svc.Grade(ctx, id, session.GradeOptions{ProblemID: p1, At: at(9, 10)})
+		testutil.NoError(t, err)
+		testutil.Equal(t, second.Evaluation.Complete, true)
+		status, err = h.svc.Status(ctx, id, at(10, 2))
+		testutil.NoError(t, err)
+		testutil.Equal(t, len(status.Pending), 0)
+	})
+
+	t.Run("a resubmission of a completed exam", func(t *testing.T) {
+		h := newHarness(t)
+		id := h.startedMock()
+		h.answer(nil)
+		first, err := h.svc.Grade(ctx, id, session.GradeOptions{At: at(10, 0)})
+		testutil.NoError(t, err)
+		testutil.Equal(t, h.state(id), model.StateCompleted)
+
+		killedGrade(t, h, id, "submit", "JUNKLOUD_CRASH_RESUBMIT=1")
+		testutil.Equal(t, h.state(id), model.StateCompleted)
+		status, err := h.svc.Status(ctx, id, at(10, 1))
+		testutil.NoError(t, err)
+		testutil.Equal(t, len(status.Pending), 1)
+		pending := status.Pending[0]
+		testutil.Equal(t, pending.Recorded, false)
+		if !strings.Contains(pending.Guidance, "`ckad grade --resubmit`") || strings.Contains(pending.Guidance, "--retry`") {
+			t.Errorf("the guidance does not match what the commands do: %q", pending.Guidance)
+		}
+		// The confirmed total is still shown; the unrecorded request hides nothing.
+		review, err := h.svc.Review(ctx, id, "", false)
+		testutil.NoError(t, err)
+		testutil.Equal(t, review.Confirmed != nil && review.Confirmed.ID == first.ID, true)
+		testutil.Equal(t, len(review.Pending), 1)
+
+		// A plain grade is still "already submitted"; the resubmission goes
+		// ahead and closes the stale request.
+		_, err = h.svc.Grade(ctx, id, session.GradeOptions{At: at(10, 2)})
+		testutil.ErrorIs(t, err, session.ErrAlreadySubmitted)
+		again, err := h.svc.Grade(ctx, id, session.GradeOptions{Resubmit: true, At: at(10, 5)})
+		testutil.NoError(t, err)
+		testutil.Equal(t, again.Evaluation.Complete, true)
+		status, err = h.svc.Status(ctx, id, at(10, 6))
+		testutil.NoError(t, err)
+		testutil.Equal(t, len(status.Pending), 0)
+		testutil.Equal(t, len(h.submissions(id)), 2)
+	})
+
+	t.Run("a recorded grading is described by what recovers it", func(t *testing.T) {
+		h := newHarness(t)
+		id := h.startedMock()
+		killedGrade(t, h, id, "save")
+		status, err := h.svc.Status(ctx, id, at(10, 1))
+		testutil.NoError(t, err)
+		testutil.Equal(t, len(status.Pending), 1)
+		testutil.Equal(t, status.Pending[0].Recorded, true)
+		if !strings.Contains(status.Pending[0].Guidance, "`ckad grade --retry`") || !strings.Contains(status.Pending[0].Guidance, "`ckad grade --resubmit`") {
+			t.Errorf("guidance: %q", status.Pending[0].Guidance)
+		}
+		if strings.Contains(status.Pending[0].Guidance, "`ckad grade`") {
+			t.Errorf("a plain grade is refused in this state but the guidance names it: %q", status.Pending[0].Guidance)
+		}
+	})
+}
+
+// failingPut makes closing one chosen operation fail, as a store that went
+// away at that moment would.
+type failingPut struct {
+	*store.Store
+	failID string
+}
+
+func (f failingPut) PutOperation(ctx2 context.Context, op model.Operation) error {
+	if op.ID == f.failID && op.Phase == session.GradeSuperseded {
+		return errors.New("the store failed")
+	}
+	return f.Store.PutOperation(ctx2, op)
+}
+
+// TestFailedGradeClosesItsOperation: when a grade fails right after recording
+// its intent (here: the earlier stale request cannot be closed), the new
+// request does not stay behind as an unfinished operation.
+func TestFailedGradeClosesItsOperation(t *testing.T) {
+	h := newHarness(t)
+	id := h.startedMock()
+	killedGrade(t, h, id, "submit")
+	status, err := h.svc.Status(ctx, id, at(10, 1))
+	testutil.NoError(t, err)
+	testutil.Equal(t, len(status.Pending), 1)
+	stale := status.Pending[0].OperationID
+
+	root := h.root
+	broken := newHarness(t, func(o *harnessOption) {
+		o.root = root
+		o.records = func(st *store.Store) session.Records { return failingPut{Store: st, failID: stale} }
+	})
+	broken.answer(nil)
+	_, err = broken.svc.Grade(ctx, id, session.GradeOptions{At: at(10, 2)})
+	if err == nil {
+		t.Fatal("the grade went ahead although the stale request could not be closed")
+	}
+	testutil.Equal(t, len(h.submissions(id)), 0)
+	testutil.Equal(t, h.state(id), model.StateRunning)
+	status, err = h.svc.Status(ctx, id, at(10, 3))
+	testutil.NoError(t, err)
+	testutil.Equal(t, len(status.Pending), 1)
+	testutil.Equal(t, status.Pending[0].OperationID, stale)
+
+	// With a healthy store the grade goes through and closes the old request.
+	h.answer(nil)
+	run, err := h.svc.Grade(ctx, id, session.GradeOptions{At: at(10, 4)})
+	testutil.NoError(t, err)
+	testutil.Equal(t, run.Evaluation.Complete, true)
+	status, err = h.svc.Status(ctx, id, at(10, 5))
+	testutil.NoError(t, err)
+	testutil.Equal(t, len(status.Pending), 0)
 }

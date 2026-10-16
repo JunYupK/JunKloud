@@ -110,7 +110,7 @@ func (s *Service) Review(ctx context.Context, sessionID, problemID string, solut
 	}
 
 	open := detailsOpen(rec)
-	rv := Review{State: rec.State, Pending: s.pending(hist)}
+	rv := Review{State: rec.State, Pending: s.pending(rec, hist)}
 	rv.Submissions, rv.Runs = scopeOf(rec, hist, problemID)
 	if !open {
 		for i, r := range rv.Runs {
@@ -224,7 +224,8 @@ func narrow(rec model.SessionRecord, run model.GradingRun, problemID string) mod
 // (see Review).
 func confirmed(rec model.SessionRecord, hist history, pending []Pending, problemID string) *model.GradingRun {
 	for _, p := range pending {
-		if p.ProblemID == "" || p.ProblemID == problemID {
+		// A request that recorded nothing changes no result and hides none.
+		if p.Recorded && (p.ProblemID == "" || p.ProblemID == problemID) {
 			return nil
 		}
 	}
