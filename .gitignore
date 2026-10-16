@@ -2,3 +2,10 @@
 .claude/worktrees/
 .claude/settings.local.json
 .superpowers/
+
+# Go build/test artifacts
+*.test
+*.out
+
+# Local docker compose env overrides (not used by CI/grading)
+runtime/.env

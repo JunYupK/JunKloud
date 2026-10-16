@@ -1,3 +1,18 @@
+
+# Force LF regardless of the checking-out machine's core.autocrlf. Several
+# of these files are built into (or executed inside) Linux containers --
+# shell scripts with CRLF line endings fail there (a CRLF shebang line does
+# not match `#!/usr/bin/env bash`), and Windows checkouts default
+# core.autocrlf to true, which would otherwise silently corrupt them.
+* text=auto eol=lf
+*.sh text eol=lf
+Dockerfile text eol=lf
+Makefile text eol=lf
+go.mod text eol=lf
+go.sum text eol=lf
+*.go text eol=lf
+*.yaml text eol=lf
+*.yml text eol=lf
 # 벤더링한 superpowers 스킬은 LF로 배포된다. core.autocrlf=true인 Windows
 # 체크아웃에서 CRLF로 바뀌면 스킬의 셸 스크립트가 실행되지 않으므로 LF로 고정한다.
 .claude/skills/** text eol=lf
