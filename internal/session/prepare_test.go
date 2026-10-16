@@ -5,6 +5,7 @@ package session_test
 import (
 	"encoding/json"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"slices"
@@ -44,7 +45,7 @@ func TestPrepareHidesQuestions(t *testing.T) {
 	testutil.Equal(t, prepared.DurationLimit, 120*time.Minute)
 	testutil.Equal(t, prepared.EnvironmentID, testEnvID)
 	testutil.Equal(t, prepared.Seed, uint64(42))
-	testutil.Equal(t, problemIDs(prepared), examOrder) // the exam file's order
+	testutil.Equal(t, viewIDs(prepared), examOrder) // the exam file's order
 
 	publicQuestionFilesBeforeStart := countFiles(t, h.workspace)
 	testutil.Equal(t, publicQuestionFilesBeforeStart, 0)
@@ -99,7 +100,7 @@ func TestPrepareFreezesAndSetsUp(t *testing.T) {
 	testutil.Equal(t, h.env.kinds(), wantKinds)
 	testutil.Equal(t, h.env.count("doctor"), 0) // no fixture declares a capability
 
-	for i, f := range prepared.Problems {
+	for i, f := range mustLoad(t, h, prepared.ID).Problems {
 		p := h.loadBankProblem(f.Definition.ID)
 		hash, err := problem.Hash(p)
 		testutil.NoError(t, err)
@@ -515,7 +516,7 @@ func TestPrepareComposesPracticeSessions(t *testing.T) {
 		for _, p := range want {
 			ids = append(ids, p.ID)
 		}
-		testutil.Equal(t, problemIDs(rec), ids)
+		testutil.Equal(t, viewIDs(rec), ids)
 		testutil.Equal(t, rec.Seed, uint64(7))
 		testutil.Equal(t, rec.DurationLimit, time.Duration(0))
 		testutil.Equal(t, rec.Mode, model.ModePractice)
@@ -525,7 +526,7 @@ func TestPrepareComposesPracticeSessions(t *testing.T) {
 		rec, err := h.svc.Prepare(ctx, session.StartOptions{Mode: model.ModePractice, Count: 5})
 		testutil.NoError(t, err)
 		testutil.Equal(t, rec.Seed, uint64(42)) // the harness' NewSeed
-		for _, f := range rec.Problems {
+		for _, f := range mustLoad(t, h, rec.ID).Problems {
 			testutil.Equal(t, f.Seed, uint64(42))
 		}
 	})
@@ -637,7 +638,10 @@ func TestPrepareChecksTheEnvironment(t *testing.T) {
 func TestPrepareFreezesTheEnvironmentManifest(t *testing.T) {
 	h := newHarness(t)
 	prepared := h.prepareMock()
-	for name, rec := range map[string]model.SessionRecord{"returned": prepared, "stored": mustLoad(t, h, prepared.ID)} {
+	testutil.Equal(t, prepared.GraderVersion, testGraderVersion)
+	testutil.Equal(t, prepared.EnvironmentHash, testEnvHash)
+	testutil.Equal(t, prepared.EnvironmentManifest, testManifest)
+	for name, rec := range map[string]model.SessionRecord{"stored": mustLoad(t, h, prepared.ID)} {
 		testutil.Equal(t, rec.GraderVersion, testGraderVersion)
 		testutil.Equal(t, rec.EnvironmentHash, testEnvHash)
 		testutil.Equal(t, rec.EnvironmentManifest, testManifest)
@@ -698,7 +702,7 @@ func TestPracticeDrawsOnlyFromServableProblems(t *testing.T) {
 		h.env.report = npFails()
 		rec, report, err := h.svc.PrepareWithReport(ctx, session.StartOptions{Mode: model.ModePractice, Count: 5, Seed: seed})
 		testutil.NoError(t, err)
-		got := problemIDs(rec)
+		got := viewIDs(rec)
 		slices.Sort(got)
 		testutil.Equal(t, got, servable)
 
@@ -931,4 +935,75 @@ func TestResubmitRefusedWhileAnotherSessionIsActive(t *testing.T) {
 	testutil.NoError(t, h.st.Transition(ctx, "practice-other", model.StateRunning, model.StateAbandoned))
 	_, err = h.svc.Grade(ctx, id, session.GradeOptions{Resubmit: true, At: at(10, 31)})
 	testutil.NoError(t, err)
+}
+
+// TestCallersNeverSeeTheGradingDefinition (spec 6.3, 9.1): what Prepare,
+// PrepareWithReport and Status hand to a caller (the CLI) never carries the
+// grading definition: no criterion, expected value, setup, solution or case
+// action, explanation or reference answer, before or after Start. The
+// question and provided files appear only after Start.
+func TestCallersNeverSeeTheGradingDefinition(t *testing.T) {
+	h := newHarness(t)
+	var secrets []string
+	for _, p := range h.bankProblems() {
+		for _, c := range p.Criteria {
+			secrets = append(secrets, c.ID)
+		}
+		for _, c := range p.Cases {
+			secrets = append(secrets, "cases/"+c.ID)
+		}
+	}
+	secrets = append(secrets, privateMarkers...)
+	secrets = append(secrets, "solution/", "setup/", "initial_expected", "InitialExpected", "Criteria", "criteria")
+	check := func(what string, v any) {
+		t.Helper()
+		requireNone(t, what, fmt.Sprintf("%+v", v), secrets)
+		requireNone(t, what+" (JSON)", asJSON(t, v), secrets)
+	}
+
+	prepared, report, err := h.svc.PrepareWithReport(ctx, h.mock())
+	testutil.NoError(t, err)
+	check("PrepareWithReport", prepared)
+	check("the report", report)
+	before, err := h.svc.Status(ctx, prepared.ID, t0)
+	testutil.NoError(t, err)
+	check("Status before Start", before)
+	if strings.Contains(asJSON(t, before), "# ") {
+		t.Errorf("a question is visible before Start: %s", asJSON(t, before))
+	}
+
+	// What the view does carry, per problem.
+	stored := mustLoad(t, h, prepared.ID)
+	testutil.Equal(t, len(prepared.Problems), len(stored.Problems))
+	for i, f := range stored.Problems {
+		v := prepared.Problems[i]
+		testutil.Equal(t, v.ID, f.Definition.ID)
+		testutil.Equal(t, v.Title, f.Definition.Title)
+		testutil.Equal(t, v.Domain, f.Definition.Domain)
+		testutil.Equal(t, v.Namespace, f.Namespace)
+		testutil.Equal(t, v.Context, testIdentity.Context)
+		points := 0
+		for _, c := range f.Definition.Criteria {
+			points += c.Points
+		}
+		testutil.Equal(t, v.Points, points)
+		testutil.Equal(t, v.Question, "")
+		testutil.Equal(t, len(v.Assets), 0)
+		testutil.Equal(t, before.Session.Problems[i].Question, "")
+	}
+
+	testutil.NoError(t, h.svc.Start(ctx, prepared.ID, t0))
+	after, err := h.svc.Status(ctx, prepared.ID, t0.Add(time.Minute))
+	testutil.NoError(t, err)
+	check("Status after Start", after)
+	for i, f := range stored.Problems {
+		testutil.Equal(t, after.Session.Problems[i].Question, f.Question)
+		testutil.Equal(t, len(after.Session.Problems[i].Assets), len(f.Assets))
+	}
+	testutil.Equal(t, after.Session.StartedAt != nil, true)
+
+	h2 := newHarness(t)
+	plain, err := h2.svc.Prepare(ctx, h2.mock())
+	testutil.NoError(t, err)
+	check("Prepare", plain)
 }

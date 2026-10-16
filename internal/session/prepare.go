@@ -54,20 +54,20 @@ const failureBudget = time.Minute
 //     recovery.
 //
 // Nothing public is written: no question, no provided file, and the clock does
-// not start (StartedAt is nil) until Start. The returned record carries no
-// question text or provided files. On a failure after the session was
-// recorded, the returned record (state SETUP_ERROR) is returned with the
-// error, which wraps ErrSetupFailed.
-func (s *Service) Prepare(ctx context.Context, opts StartOptions) (model.SessionRecord, error) {
-	rec, _, err := s.PrepareWithReport(ctx, opts)
-	return rec, err
+// not start (StartedAt is nil) until Start. The caller gets a SessionView:
+// no grading definition, and no question text or provided files. On a
+// failure after the session was recorded, the view (state SETUP_ERROR) is
+// returned with the error, which wraps ErrSetupFailed.
+func (s *Service) Prepare(ctx context.Context, opts StartOptions) (SessionView, error) {
+	v, _, err := s.PrepareWithReport(ctx, opts)
+	return v, err
 }
 
 // PrepareWithReport is Prepare that also returns what was left out of the
 // draw (Report.Excluded). The report is valid with or without an error.
-func (s *Service) PrepareWithReport(ctx context.Context, opts StartOptions) (model.SessionRecord, Report, error) {
+func (s *Service) PrepareWithReport(ctx context.Context, opts StartOptions) (SessionView, Report, error) {
 	rec, report, err := s.prepare(ctx, opts)
-	return rec, report, err
+	return viewOf(rec), report, err
 }
 
 func (s *Service) prepare(ctx context.Context, opts StartOptions) (model.SessionRecord, Report, error) {
@@ -189,7 +189,7 @@ func (s *Service) record(ctx context.Context, id model.Identity, opts StartOptio
 	if err != nil {
 		return model.SessionRecord{}, fmt.Errorf("session: reload the prepared session: %w", err)
 	}
-	return hidePublic(ready), nil
+	return ready, nil
 }
 
 // requireNoActiveSession refuses a new session while another one still
@@ -392,7 +392,7 @@ func (s *Service) fail(rec model.SessionRecord, op model.Operation, public error
 	if len(notes) > 0 {
 		msg += " (" + strings.Join(notes, "; ") + ")"
 	}
-	return hidePublic(rec), &setupError{msg: msg, cause: append([]error{public}, cause...)}
+	return rec, &setupError{msg: msg, cause: append([]error{public}, cause...)}
 }
 
 func (s *Service) writeDiagnostics(sessionID, detail string) (string, error) {
@@ -402,16 +402,4 @@ func (s *Service) writeDiagnostics(sessionID, detail string) (string, error) {
 	}
 	path := filepath.Join(dir, sessionID+"-prepare.txt")
 	return path, os.WriteFile(path, []byte(detail+"\n"), 0o600)
-}
-
-// hidePublic strips the public content (the English questions and provided
-// files) from a record that has not been started, so that nothing handed to
-// the caller can show a question early.
-func hidePublic(rec model.SessionRecord) model.SessionRecord {
-	rec.Problems = slices.Clone(rec.Problems)
-	for i := range rec.Problems {
-		rec.Problems[i].Question = ""
-		rec.Problems[i].Assets = nil
-	}
-	return rec
 }

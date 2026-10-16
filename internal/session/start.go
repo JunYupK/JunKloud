@@ -114,18 +114,18 @@ func (s *Service) Start(ctx context.Context, sessionID string, at time.Time) err
 // session's limit (mock exams: the exam's duration; practice sessions have no
 // limit and never run overtime). If now is before the start time the clock
 // went backwards: ClockAnomaly is set and Elapsed is zero, never negative.
-// Before the start, Elapsed and Overtime are zero and the record carries no
-// question text or provided files.
+// The session is a SessionView: never the grading definition, and before the
+// start no question text or provided files (Elapsed and Overtime are zero).
 func (s *Service) Status(ctx context.Context, sessionID string, now time.Time) (Status, error) {
 	rec, err := s.cfg.Store.LoadSession(ctx, sessionID)
 	if err != nil {
 		return Status{}, fmt.Errorf("session: status of %q: %w", sessionID, err)
 	}
 	if rec.StartedAt == nil {
-		return Status{Session: hidePublic(rec)}, nil
+		return Status{Session: viewOf(rec)}, nil
 	}
 	elapsed, overtime, anomaly := wallClock(rec, now)
-	st := Status{Session: rec, Elapsed: elapsed, Overtime: overtime, ClockAnomaly: anomaly}
+	st := Status{Session: viewOf(rec), Elapsed: elapsed, Overtime: overtime, ClockAnomaly: anomaly}
 	hist, err := s.loadHistory(ctx, sessionID)
 	if err != nil {
 		return Status{}, err

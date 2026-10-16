@@ -130,7 +130,7 @@ func TestSessionStart(t *testing.T) {
 		testutil.Equal(t, len(active), 0)
 	})
 
-	var prepared model.SessionRecord
+	var prepared session.SessionView
 	t.Run("PrepareHidesQuestions", func(t *testing.T) {
 		start := time.Now()
 		var err error
@@ -142,7 +142,7 @@ func TestSessionStart(t *testing.T) {
 		testutil.Equal(t, prepared.DurationLimit, 120*time.Minute)
 		var ids []string
 		for _, f := range prepared.Problems {
-			ids = append(ids, f.Definition.ID)
+			ids = append(ids, f.ID)
 			testutil.Equal(t, f.Question, "")
 		}
 		testutil.Equal(t, ids, devExamOrder)
@@ -173,11 +173,11 @@ func TestSessionStart(t *testing.T) {
 			ns, err := cs.CoreV1().Namespaces().Get(ctx, f.Namespace, metav1.GetOptions{})
 			testutil.NoError(t, err)
 			testutil.Equal(t, ns.Labels[environment.LabelSessionID], prepared.ID)
-			testutil.Equal(t, ns.Labels[environment.LabelProblemID], f.Definition.ID)
-			inv, err := st.GetInventory(ctx, id.ID, prepared.ID, f.Definition.ID)
+			testutil.Equal(t, ns.Labels[environment.LabelProblemID], f.ID)
+			inv, err := st.GetInventory(ctx, id.ID, prepared.ID, f.ID)
 			testutil.NoError(t, err)
 			if len(inv.Resources) < 2 {
-				t.Errorf("%s: inventory has %d resources", f.Definition.ID, len(inv.Resources))
+				t.Errorf("%s: inventory has %d resources", f.ID, len(inv.Resources))
 			}
 		}
 	})
@@ -218,11 +218,11 @@ func TestSessionStart(t *testing.T) {
 
 		// The learner now has the English question and the provided files.
 		for _, f := range status.Session.Problems {
-			attempt := session.AttemptDir(workspace, prepared.ID, f.Definition.ID, 1)
+			attempt := session.AttemptDir(workspace, prepared.ID, f.ID, 1)
 			q, err := os.ReadFile(filepath.Join(attempt, session.QuestionFile))
 			testutil.NoError(t, err)
 			if !strings.HasPrefix(string(q), "# ") || f.Question != string(q) {
-				t.Errorf("%s: question = %q", f.Definition.ID, q)
+				t.Errorf("%s: question = %q", f.ID, q)
 			}
 			for _, name := range slices.Sorted(maps.Keys(f.Assets)) {
 				got, err := os.ReadFile(filepath.Join(attempt, name))

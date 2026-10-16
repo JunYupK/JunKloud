@@ -137,7 +137,8 @@ type Report struct {
 
 // Status is a session and its clock.
 type Status struct {
-	Session model.SessionRecord
+	// Session is the learner-safe view (never the grading definition).
+	Session SessionView
 	// Elapsed is the wall-clock time since the session started (zero before
 	// the start). Overtime is Elapsed beyond the session's DurationLimit
 	// (zero without a limit: practice sessions have none).

@@ -22,9 +22,16 @@ func validState(state string) error {
 }
 
 // CreateSession stores a new session and its frozen problems in one
-// transaction. Each problem's definition and public content are saved as
-// JSON; the private package files (FrozenProblem.Definition.Files) are not
-// persisted here and are keyed elsewhere by FrozenProblem.Hash.
+// transaction. Each problem's frozen definition and public content are saved
+// as JSON (session_problems.frozen_json). Note: the comment on that table in
+// migration 001 says "public content only", which is not accurate and is not
+// edited (applied migrations stay as they are): frozen_json holds the whole
+// FrozenProblem, including the grading definition (criteria with their
+// expected values, the declared initial state, setup, solution and case
+// actions). It is private; the session package hands callers only its
+// learner-safe SessionView. Only the private package files
+// (FrozenProblem.Definition.Files) are not persisted here; they are keyed
+// elsewhere by FrozenProblem.Hash.
 //
 // It returns ErrAlreadyExists for a duplicate session ID or a repeated
 // problem ID, ErrNotFound for an unknown ParentID, and ErrInvalidState for an

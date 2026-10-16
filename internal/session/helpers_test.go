@@ -512,7 +512,7 @@ func (h *harness) mock() session.StartOptions {
 	return session.StartOptions{Mode: model.ModeMock, MockID: "dev-mock"}
 }
 
-func (h *harness) prepareMock() model.SessionRecord {
+func (h *harness) prepareMock() session.SessionView {
 	h.t.Helper()
 	rec, err := h.svc.Prepare(ctx, h.mock())
 	testutil.NoError(h.t, err)
@@ -559,6 +559,14 @@ func problemIDs(rec model.SessionRecord) []string {
 	var ids []string
 	for _, p := range rec.Problems {
 		ids = append(ids, p.Definition.ID)
+	}
+	return ids
+}
+
+func viewIDs(v session.SessionView) []string {
+	var ids []string
+	for _, p := range v.Problems {
+		ids = append(ids, p.ID)
 	}
 	return ids
 }
