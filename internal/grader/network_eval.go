@@ -20,13 +20,26 @@ const (
 	maxProbes    = 16
 )
 
+// outcomeState is the judgement of one expectation. The zero value is
+// stateUnknown, so an outcome that no judging code assigned can never read as
+// holding (and PASS a criterion).
 type outcomeState int
 
 const (
-	stateHolds outcomeState = iota
+	stateUnknown outcomeState = iota
+	stateHolds
 	stateFails
-	stateUnknown
 )
+
+func (s outcomeState) String() string {
+	switch s {
+	case stateHolds:
+		return "holds"
+	case stateFails:
+		return "fails"
+	}
+	return "unknown"
+}
 
 // probeJob is one probe of a criterion.
 //
@@ -98,7 +111,7 @@ type netOutcome struct {
 
 func (o netOutcome) evidence() map[string]any {
 	m := map[string]any{"expectation": o.exp.name, "expect": map[bool]string{true: "allow", false: "deny"}[o.exp.allow],
-		"port": o.exp.port, "state": [...]string{"holds", "fails", "unknown"}[o.state]}
+		"port": o.exp.port, "state": o.state.String()}
 	var probes []any
 	if o.main != nil {
 		probes = append(probes, o.main.evidence())
@@ -545,6 +558,10 @@ func classOrUnknown(class string) string {
 // is the policy). A refusal is not accepted as a block: a pod answers it
 // itself when nothing listens, and kind's policy enforcement drops instead.
 func (c *NetworkChecker) judgeDenyOutcome(o *netOutcome, jobs []*probeJob, n *neutralDNS, d destination) {
+	if len(o.pods) == 0 {
+		o.state, o.text = stateUnknown, "no ready pod was probed, so nothing shows the block"
+		return
+	}
 	var fails, unknowns []string
 	for _, pc := range o.pods {
 		for _, j := range []*probeJob{pc.deny, pc.ctrl} {
@@ -596,6 +613,8 @@ func (c *NetworkChecker) judgeDenyOutcome(o *netOutcome, jobs []*probeJob, n *ne
 		o.state, o.text = stateFails, strings.Join(fails, "; ")
 	case len(unknowns) > 0:
 		o.state, o.text = stateUnknown, strings.Join(unknowns, "; ")
+	default:
+		o.state = stateHolds // every pod: denied source silent, allowed control answered
 	}
 }
 
