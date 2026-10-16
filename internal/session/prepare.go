@@ -297,14 +297,13 @@ func (s *Service) verifyInitialStates(ctx context.Context, id model.Identity, re
 	scratch := filepath.Join(s.cfg.StateDir, "prepare", rec.ID)
 	defer os.RemoveAll(scratch)
 	for _, f := range rec.Problems {
-		dir := filepath.Join(scratch, f.Definition.ID)
-		if err := os.MkdirAll(dir, 0o700); err != nil {
-			return fmt.Errorf("prepare the scratch workspace of %q: %w", f.Definition.ID, err)
-		}
-		if err := writeFiles(dir, f.Assets, 0o600); err != nil {
+		// The same scratch workspace validation evaluates every stage in.
+		dir, remove, err := author.ScratchWorkspace(scratch, f)
+		if err != nil {
 			return fmt.Errorf("prepare the scratch workspace of %q: %w", f.Definition.ID, err)
 		}
 		ev, err := s.cfg.Engine.Evaluate(ctx, grader.Target{Identity: id, Problem: f, Workspace: dir})
+		remove()
 		if err != nil {
 			return fmt.Errorf("evaluate the initial state of %q: %w", f.Definition.ID, err)
 		}

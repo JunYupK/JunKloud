@@ -6,6 +6,8 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"maps"
+	"os"
 	"path/filepath"
 	"slices"
 	"strings"
@@ -677,4 +679,50 @@ func TestImagesMustBeProvided(t *testing.T) {
 		_, err := h.validate(loadFixture(t), 1)
 		notValid(t, err, `solution: image "docker.io/library/busybox:1.37.0"`)
 	})
+}
+
+// TestValidateGradesInTheServedWorkspace: every stage is evaluated with a
+// scratch workspace holding the frozen problem's provided files, exactly what
+// a session's preparation and the learner get, so file, kustomize and archive
+// criteria are judged on the same files that are certified and served. Each
+// stage gets a fresh one, and none is left behind.
+func TestValidateGradesInTheServedWorkspace(t *testing.T) {
+	h := newHarness(t)
+	p := loadFixture(t)
+	p.Files = maps.Clone(p.Files)
+	p.Files["setup/provided/notes.txt"] = []byte("namespace ${namespace}\n")
+	f, err := problem.Freeze(p, 1)
+	testutil.NoError(t, err)
+	var dirs []string
+	h.cluster.onEvaluate = func(tgt grader.Target) {
+		dirs = append(dirs, tgt.Workspace)
+		if tgt.Workspace == "" {
+			t.Errorf("a stage was evaluated without a workspace")
+			return
+		}
+		b, err := os.ReadFile(filepath.Join(tgt.Workspace, "notes.txt"))
+		if err != nil {
+			t.Errorf("the provided file is missing from the workspace: %v", err)
+			return
+		}
+		testutil.Equal(t, string(b), string(f.Assets["notes.txt"]))
+		entries, _ := os.ReadDir(tgt.Workspace)
+		testutil.Equal(t, len(entries), len(f.Assets))
+	}
+	_, err = h.validate(p, 1)
+	testutil.NoError(t, err)
+	testutil.Equal(t, len(dirs), 3+len(p.Cases)) // initial, solved, each case, reset
+	seen := map[string]bool{}
+	for _, d := range dirs {
+		if seen[d] {
+			t.Errorf("workspace %s reused across stages", d)
+		}
+		seen[d] = true
+		if _, err := os.Stat(d); !errors.Is(err, os.ErrNotExist) {
+			t.Errorf("scratch workspace %s left behind (%v)", d, err)
+		}
+	}
+	if !strings.Contains(string(f.Assets["notes.txt"]), "namespace ") || strings.Contains(string(f.Assets["notes.txt"]), "${") {
+		t.Fatalf("the provided file is not rendered: %q", f.Assets["notes.txt"])
+	}
 }

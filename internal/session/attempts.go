@@ -6,14 +6,12 @@ import (
 	"errors"
 	"fmt"
 	"io/fs"
-	"maps"
 	"os"
 	"path/filepath"
-	"slices"
 	"strconv"
 	"strings"
 
-	"github.com/JunYupK/JunKloud/internal/problem"
+	"github.com/JunYupK/JunKloud/internal/author"
 )
 
 // QuestionFile is the file Start writes the English question into, beside the
@@ -85,29 +83,5 @@ func newAttemptDir(workspace, sessionID, problemID string) (string, error) {
 // replacing anything: a path that exists, or that would leave dir, is an
 // error. Directories are created as needed.
 func writeFiles(dir string, files map[string][]byte, mode os.FileMode) error {
-	dirMode := os.FileMode(0o755)
-	if mode&0o044 == 0 {
-		dirMode = 0o700
-	}
-	for _, name := range slices.Sorted(maps.Keys(files)) {
-		target, err := problem.ResolveAsset(dir, name)
-		if err != nil {
-			return fmt.Errorf("file %q: %w", name, err)
-		}
-		if err := os.MkdirAll(filepath.Dir(target), dirMode); err != nil {
-			return err
-		}
-		f, err := os.OpenFile(target, os.O_WRONLY|os.O_CREATE|os.O_EXCL, mode)
-		if err != nil {
-			return fmt.Errorf("file %q: %w", name, err)
-		}
-		_, werr := f.Write(files[name])
-		if cerr := f.Close(); werr == nil {
-			werr = cerr
-		}
-		if werr != nil {
-			return fmt.Errorf("file %q: %w", name, werr)
-		}
-	}
-	return nil
+	return author.WriteFiles(dir, files, mode)
 }

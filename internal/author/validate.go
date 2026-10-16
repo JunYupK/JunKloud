@@ -125,6 +125,9 @@ type Config struct {
 	// session is active, before the first step: EnsurePlatform and image
 	// preloading (PrepareEnvironment), which need the lock too.
 	Prepare func(ctx context.Context) error
+	// ScratchDir holds the scratch workspaces stages are evaluated in
+	// (ScratchWorkspace); "" means the system temporary directory.
+	ScratchDir string
 }
 
 // Validator proves authored problems with the runtime grader.
@@ -170,8 +173,11 @@ const finalCleanupBudget = 5 * time.Minute
 //  4. Reset: reset, setup, evaluate: the initial result again, proving that
 //     nothing of the solved and wrong runs leaked.
 //
-// Any ERROR result anywhere means the problem is not valid; the evaluations
-// stay in the record. The bundle is removed after every step and at the end.
+// Every stage is evaluated with a fresh scratch workspace holding the
+// problem's provided files (ScratchWorkspace), as a session's preparation
+// does. Any ERROR result anywhere means the problem is not valid; the
+// evaluations stay in the record. The bundle is removed after every step and
+// at the end.
 //
 // A problem that fails any rule returns the record (Passed false, stored)
 // and a *ValidationError (ErrNotValid). Infrastructure failures return a
@@ -415,7 +421,15 @@ func (s *seedRun) stage(ctx context.Context, st stageSpec) error {
 		s.finding(label, "%s", finding)
 		return nil
 	}
-	ev, err := s.v.cfg.Engine.Evaluate(ctx, grader.Target{Identity: s.v.cfg.Identity, Problem: s.f})
+	// The workspace a learner has right after Start: the provided files,
+	// rendered, and nothing else (the same helper a session's preparation
+	// uses), fresh for every stage.
+	ws, remove, err := ScratchWorkspace(s.v.cfg.ScratchDir, s.f)
+	if err != nil {
+		return err
+	}
+	defer remove()
+	ev, err := s.v.cfg.Engine.Evaluate(ctx, grader.Target{Identity: s.v.cfg.Identity, Problem: s.f, Workspace: ws})
 	if errors.Is(err, grader.ErrInvalidCriteria) {
 		s.finding(label, "%v", err)
 		return nil

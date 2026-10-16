@@ -355,6 +355,7 @@ func NewRuntime(ctx context.Context, m *environment.Manager, st *store.Store, id
 		LockPath: LockPath(cfg.StateDir), GraderVersion: grader.GraderVersion, EnvironmentHash: envHash,
 		ProvidedImages: cfg.providedNames(),
 		Prepare:        func(ctx context.Context) error { return PrepareEnvironment(ctx, m, id, cfg.Images) },
+		ScratchDir:     filepath.Join(cfg.StateDir, "validate"),
 	})
 	if err != nil {
 		g.Close()

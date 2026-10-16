@@ -33,6 +33,7 @@ type fakeCluster struct {
 	applyErr   func(n int, o environment.Owner) error // error for the n-th Apply (1-based)
 	cleanupErr error
 	onApply    func(n int)
+	onEvaluate func(t grader.Target) // runs inside Evaluate (the lock is held)
 
 	// Observations.
 	applies  []applyCall
@@ -133,6 +134,9 @@ func (c *fakeCluster) Evaluate(ctx context.Context, t grader.Target) (model.Eval
 	c.evals++
 	if err := ctx.Err(); err != nil {
 		return model.Evaluation{}, err
+	}
+	if c.onEvaluate != nil {
+		c.onEvaluate(t)
 	}
 	statuses := map[string]string{}
 	ev := model.Evaluation{Complete: true}
