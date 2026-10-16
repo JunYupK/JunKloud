@@ -16,6 +16,17 @@
 // workspace and stores the start time. Both take the environment lock
 // (author.LockPath), the same one validation, reset and grading take.
 //
+// Grade (submit.go, retry.go) submits and grades: it records the intent and
+// the submission before it evaluates the session's frozen problems with the
+// runtime grader, tells a technical retry from a resubmission by input
+// fingerprints, never confirms a result with an ERROR in it or one whose
+// answer changed while it was graded, and commits the run and the new state in
+// one transaction. A grading the process never finished stays visible as a
+// pending operation (Status, Review) with the way to recover. Review
+// (review.go) shows the results and, only when the mode allows it, the
+// explanation and the reference solution from the frozen package, recording
+// the view.
+//
 // Layout of the files this package writes:
 //
 //	<stateDir>/packages/<sha256 hex>/definition.json, files/...   private package, keyed by content hash
@@ -130,6 +141,10 @@ type Status struct {
 	// moved backwards. Elapsed is then zero rather than negative, and the
 	// result must say so.
 	ClockAnomaly bool
+	// Pending lists grading operations that were recorded but never
+	// finished (spec 11). While one is listed there is no confirmed score
+	// for what it was grading; each entry says how to recover.
+	Pending []Pending
 }
 
 // Environment is the part of *environment.Manager a Service drives.
@@ -155,14 +170,31 @@ type Records interface {
 	MarkStarted(ctx context.Context, id string, at time.Time) error
 	PutOperation(ctx context.Context, op model.Operation) error
 	GetOperation(ctx context.Context, id string) (model.Operation, error)
+	ListOperations(ctx context.Context, kind string) ([]model.Operation, error)
 	GetValidation(ctx context.Context, problemHash, graderVersion, environmentHash string) (model.ValidationRecord, error)
+
+	// Submissions, grading runs and review events (grading and review).
+	SubmitAndTransition(ctx context.Context, sub model.Submission, from, to string) error
+	SaveRunAndTransition(ctx context.Context, run model.GradingRun, sessionID, from, to string) error
+	GetRun(ctx context.Context, id string) (model.GradingRun, error)
+	ListSubmissions(ctx context.Context, sessionID string) ([]model.Submission, error)
+	ListRuns(ctx context.Context, submissionID string) ([]model.GradingRun, error)
+	RecordReview(ctx context.Context, sessionID, problemID string, at time.Time) error
+	ListReviews(ctx context.Context, sessionID string) ([]model.ReviewEvent, error)
 }
 
 var (
 	_ Environment = (*environment.Manager)(nil)
 	_ Evaluator   = (*grader.Engine)(nil)
 	_ Records     = (*store.Store)(nil)
+	_ Inputs      = (*grader.ArtifactChecker)(nil)
 )
+
+// Inputs fingerprints what the learner submitted
+// (grader.InputCapturer; *grader.ArtifactChecker, composed with the
+// installation's input key). Grading compares fingerprints to tell a technical
+// retry from a resubmission and to notice an answer changing under the grader.
+type Inputs = grader.InputCapturer
 
 // Config wires a Service. New builds one from the composed runtime;
 // NewService takes it directly (unit tests use fakes for the cluster).
@@ -170,6 +202,9 @@ type Config struct {
 	Store  Records
 	Env    Environment
 	Engine Evaluator
+	// Inputs fingerprints the learner's answer when it is submitted
+	// (author.Runtime.Grader.Artifacts).
+	Inputs Inputs
 	// Identity is the verified environment the Engine was composed for.
 	Identity model.Identity
 	// GraderVersion is grader.GraderVersion.
@@ -197,7 +232,7 @@ type Config struct {
 	NewSeed      func() (uint64, error)
 }
 
-// Service prepares and starts sessions.
+// Service prepares, starts, grades and reviews sessions.
 type Service struct{ cfg Config }
 
 // Option adjusts the Config New builds.
@@ -217,7 +252,7 @@ func WithClock(now func() time.Time) Option { return func(c *Config) { c.Now = n
 // problems/ and exams/; stateDir is the installation's state directory.
 func New(s *store.Store, env *environment.Manager, rt *author.Runtime, graderCfg author.GraderConfig, bankDir, stateDir string, opts ...Option) *Service {
 	cfg := Config{
-		Store: s, Env: env, Engine: rt.Grader.Engine, Identity: rt.Identity,
+		Store: s, Env: env, Engine: rt.Grader.Engine, Inputs: rt.Grader.Artifacts, Identity: rt.Identity,
 		GraderVersion:       grader.GraderVersion,
 		EnvironmentManifest: graderCfg.EnvironmentManifest,
 		PrepareEnvironment: func(ctx context.Context, id model.Identity) error {
@@ -238,8 +273,8 @@ func New(s *store.Store, env *environment.Manager, rt *author.Runtime, graderCfg
 // NewService checks that cfg is complete and fills the defaults.
 func NewService(cfg Config) (*Service, error) {
 	switch {
-	case cfg.Store == nil, cfg.Env == nil, cfg.Engine == nil:
-		return nil, errors.New("session: a service needs a Store, Env and Engine")
+	case cfg.Store == nil, cfg.Env == nil, cfg.Engine == nil, cfg.Inputs == nil:
+		return nil, errors.New("session: a service needs a Store, Env, Engine and Inputs")
 	case cfg.Identity.ID == "":
 		return nil, errors.New("session: a service needs the verified environment identity")
 	case cfg.GraderVersion == "", cfg.EnvironmentManifest == nil, cfg.PrepareEnvironment == nil:

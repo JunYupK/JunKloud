@@ -192,8 +192,14 @@ type fakeEngine struct {
 	mu       sync.Mutex
 	env      *fakeEnv
 	override map[string]func(model.FrozenProblem) model.Evaluation
-	targets  []grader.Target
-	seen     map[string][]string // problem ID -> workspace files at evaluation time
+	// errs makes Evaluate fail for a problem (no evaluation at all).
+	errs    map[string]error
+	targets []grader.Target
+	seen    map[string][]string // problem ID -> workspace files at evaluation time
+	// beforeReturn runs inside Evaluate, after the evaluation is chosen and
+	// before it is returned: tests use it to move the clock, change the
+	// learner's answer mid-grading or kill the process.
+	beforeReturn func(model.FrozenProblem)
 }
 
 func initialEvaluation(f model.FrozenProblem) model.Evaluation {
@@ -232,11 +238,92 @@ func (g *fakeEngine) Evaluate(ctx context.Context, t grader.Target) (model.Evalu
 	}
 	g.seen[t.Problem.Definition.ID] = files
 	fn := g.override[t.Problem.Definition.ID]
+	evalErr := g.errs[t.Problem.Definition.ID]
+	hook := g.beforeReturn
 	g.mu.Unlock()
+	if hook != nil {
+		hook(t.Problem)
+	}
+	if evalErr != nil {
+		return model.Evaluation{}, evalErr
+	}
 	if fn != nil {
 		return fn(t.Problem), nil
 	}
 	return initialEvaluation(t.Problem), nil
+}
+
+// solvedEvaluation is a fully correct answer: every criterion PASSes.
+func solvedEvaluation(f model.FrozenProblem) model.Evaluation {
+	ev := model.Evaluation{Complete: true}
+	score := 0
+	for _, c := range f.Definition.Criteria {
+		ev.Results = append(ev.Results, model.CheckResult{CriterionID: c.ID, Status: model.StatusPass, Points: c.Points, Reason: "observed PASS"})
+		ev.MaxScore += c.Points
+		score += c.Points
+	}
+	ev.Score = &score
+	return ev
+}
+
+// erroredEvaluation is a solved answer whose last criterion could not be
+// judged: the platform failed, so the evaluation is incomplete.
+func erroredEvaluation(f model.FrozenProblem) model.Evaluation {
+	ev := solvedEvaluation(f)
+	last := len(ev.Results) - 1
+	ev.Results[last].Status, ev.Results[last].Points = model.StatusError, 0
+	ev.Results[last].Reason = "the checking environment failed"
+	ev.Complete, ev.Score = false, nil
+	return ev
+}
+
+// fakeInputs fingerprints an answer the way the real capturer does in
+// spirit: one object per problem whose version the test can bump, and the
+// learner's answer.yaml in the attempt directory.
+type fakeInputs struct {
+	mu      sync.Mutex
+	version map[string]int // problem ID -> object generation
+	err     error
+	calls   int
+	onCall  func(n int)
+}
+
+func (f *fakeInputs) CaptureInputs(_ context.Context, t grader.Target) (map[string]string, error) {
+	f.mu.Lock()
+	f.calls++
+	n, hook, err := f.calls, f.onCall, f.err
+	version := f.version[t.Problem.Definition.ID]
+	f.mu.Unlock()
+	if hook != nil {
+		hook(n)
+	}
+	if err != nil {
+		return nil, err
+	}
+	out := map[string]string{
+		"object:apps/v1/Deployment/" + t.Problem.Namespace + "/web": fmt.Sprintf("uid=uid-1;gen=%d;input=sha256:aaa", version+1),
+		"file:answer.yaml": "absent",
+	}
+	if b, err := os.ReadFile(filepath.Join(t.Workspace, "answer.yaml")); err == nil {
+		out["file:answer.yaml"] = "mac:" + string(b)
+	}
+	return out, nil
+}
+
+// change simulates the learner editing an object of the problem.
+func (f *fakeInputs) change(problemID string) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if f.version == nil {
+		f.version = map[string]int{}
+	}
+	f.version[problemID]++
+}
+
+func (f *fakeInputs) setErr(err error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.err = err
 }
 
 // harness is a Service on a real SQLite store with a fake cluster.
@@ -252,6 +339,9 @@ type harness struct {
 	stateDir  string
 	workspace string
 
+	inputs *fakeInputs
+	root   string
+
 	graderVersion string
 	prepared      int
 }
@@ -261,6 +351,13 @@ type harnessOption struct {
 	uncertified  []string // problem IDs left without a certificate
 	records      func(*store.Store) session.Records
 	graderForSvc string
+	// root reuses an existing test directory (database, bank, state, workspace)
+	// instead of making a new one: a second process attaches to the first
+	// one's installation.
+	root string
+	// manifest and graderVersion override what the service believes is live.
+	manifest      func() map[string]string
+	graderVersion string
 }
 
 func newHarness(t *testing.T, opts ...func(*harnessOption)) *harness {
@@ -269,16 +366,21 @@ func newHarness(t *testing.T, opts ...func(*harnessOption)) *harness {
 	for _, f := range opts {
 		f(&o)
 	}
-	root := t.TempDir()
+	root, attach := o.root, o.root != ""
+	if !attach {
+		root = t.TempDir()
+	}
 	h := &harness{
 		t: t, clock: &fakeClock{t: t0}, bank: filepath.Join(root, "bank"),
 		stateDir: filepath.Join(root, "state"), workspace: filepath.Join(root, "workspace"),
-		graderVersion: testGraderVersion,
+		graderVersion: testGraderVersion, root: root, inputs: &fakeInputs{},
 	}
 	testutil.NoError(t, os.MkdirAll(h.stateDir, 0o700))
-	copyTree(t, devBank, h.bank)
-	if o.mutateBank != nil {
-		o.mutateBank(t, h.bank)
+	if !attach {
+		copyTree(t, devBank, h.bank)
+		if o.mutateBank != nil {
+			o.mutateBank(t, h.bank)
+		}
 	}
 
 	var err error
@@ -290,15 +392,20 @@ func newHarness(t *testing.T, opts ...func(*harnessOption)) *harness {
 		h.rec = o.records(h.st)
 	}
 
-	h.certify(o.uncertified...)
+	if !attach {
+		h.certify(o.uncertified...)
+	}
 
 	h.env = &fakeEnv{st: h.st, identity: testIdentity}
 	h.eng = &fakeEngine{env: h.env}
 	n := 0
 	h.svc, err = session.NewService(session.Config{
 		Store: h.rec, Env: h.env, Engine: h.eng, Identity: testIdentity,
-		GraderVersion: testGraderVersion,
+		GraderVersion: cmpOr(o.graderVersion, testGraderVersion), Inputs: h.inputs,
 		EnvironmentManifest: func(context.Context, model.Identity) (map[string]string, error) {
+			if o.manifest != nil {
+				return o.manifest(), nil
+			}
 			return maps.Clone(testManifest), nil
 		},
 		PrepareEnvironment: func(context.Context, model.Identity) error {
@@ -315,6 +422,13 @@ func newHarness(t *testing.T, opts ...func(*harnessOption)) *harness {
 	})
 	testutil.NoError(t, err)
 	return h
+}
+
+func cmpOr(v, fallback string) string {
+	if v != "" {
+		return v
+	}
+	return fallback
 }
 
 // certify stores a passing validation for every bank problem except skip.

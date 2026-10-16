@@ -124,17 +124,31 @@ func (s *Service) Status(ctx context.Context, sessionID string, now time.Time) (
 	if rec.StartedAt == nil {
 		return Status{Session: hidePublic(rec)}, nil
 	}
-	// Strip monotonic readings: the monotonic clock may stand still while the
-	// host sleeps, wall time does not.
-	elapsed := now.Round(0).Sub(rec.StartedAt.Round(0))
-	st := Status{Session: rec}
-	if elapsed < 0 {
-		st.ClockAnomaly = true
-		return st, nil
+	elapsed, overtime, anomaly := wallClock(rec, now)
+	st := Status{Session: rec, Elapsed: elapsed, Overtime: overtime, ClockAnomaly: anomaly}
+	hist, err := s.loadHistory(ctx, sessionID)
+	if err != nil {
+		return Status{}, err
 	}
-	st.Elapsed = elapsed
-	if limit := rec.DurationLimit; limit > 0 && elapsed > limit {
-		st.Overtime = elapsed - limit
-	}
+	st.Pending = s.pending(hist)
 	return st, nil
+}
+
+// wallClock is the session's clock at `now`: plain wall time since the stored
+// start, with monotonic readings stripped (the monotonic clock may stand still
+// while the host sleeps, wall time does not), the part beyond the session's
+// limit, and whether now lies before the start (the clock ran backwards: the
+// elapsed time is then zero, never negative).
+func wallClock(rec model.SessionRecord, now time.Time) (elapsed, overtime time.Duration, anomaly bool) {
+	if rec.StartedAt == nil {
+		return 0, 0, false
+	}
+	elapsed = now.Round(0).Sub(rec.StartedAt.Round(0))
+	if elapsed < 0 {
+		return 0, 0, true
+	}
+	if limit := rec.DurationLimit; limit > 0 && elapsed > limit {
+		overtime = elapsed - limit
+	}
+	return elapsed, overtime, false
 }

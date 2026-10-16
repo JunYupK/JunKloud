@@ -124,7 +124,7 @@ func TestWallClockAfterSleep(t *testing.T) {
 	// "The terminal was closed and the host slept": a new Service on the same
 	// state, three and a half hours of wall time later.
 	reopened, err := session.NewService(session.Config{
-		Store: h.st, Env: h.env, Engine: h.eng, Identity: testIdentity, GraderVersion: testGraderVersion,
+		Store: h.st, Env: h.env, Engine: h.eng, Inputs: h.inputs, Identity: testIdentity, GraderVersion: testGraderVersion,
 		EnvironmentManifest: func(context.Context, model.Identity) (map[string]string, error) { return testManifest, nil },
 		PrepareEnvironment:  func(context.Context, model.Identity) error { return nil },
 		BankDir:             h.bank, StateDir: h.stateDir, Workspace: h.workspace,
