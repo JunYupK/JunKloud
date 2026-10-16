@@ -131,7 +131,7 @@ func (s *Service) Review(ctx context.Context, sessionID, problemID string, solut
 	}
 
 	if !open {
-		return rv, fmt.Errorf("%w: %s", ErrDisclosureLocked, lockedReason(rec))
+		return rv, fmt.Errorf("%w: %s", ErrDisclosureLocked, lockedReason(rec, hist))
 	}
 	pkg, err := LoadPackage(s.cfg.StateDir, frozen.Hash)
 	if err != nil {
@@ -149,10 +149,15 @@ func (s *Service) Review(ctx context.Context, sessionID, problemID string, solut
 }
 
 // lockedReason says why a mock exam does not open its answers yet.
-func lockedReason(rec model.SessionRecord) string {
+func lockedReason(rec model.SessionRecord, hist history) string {
 	switch rec.State {
 	case model.StateGradingError:
-		return "the submission still has an ERROR, so it is incomplete; grade it again with `ckad grade --retry` (or `--resubmit` after changing the answer)"
+		// --retry is named only if it can be accepted (the same test as the
+		// guidance uses): a submission without fingerprints cannot be retried.
+		if subs := hist.inScope(""); len(subs) == 0 || retryable(subs[len(subs)-1]) {
+			return "the submission still has an ERROR, so it is incomplete; grade it again with `ckad grade --retry` (or `--resubmit` after changing the answer)"
+		}
+		return "the submission still has an ERROR, so it is incomplete, and no fingerprint of the answer was recorded so it cannot be retried; submit the answer again with `ckad grade --resubmit`"
 	case model.StateGrading:
 		return "the grading has not finished; if it was interrupted, `ckad status` says how to recover"
 	}

@@ -1200,3 +1200,31 @@ func TestGuidanceDoesNotOfferARetryItWouldRefuse(t *testing.T) {
 		}
 	})
 }
+
+// TestLockedReviewOffersOnlyWhatIsAccepted: the reason a mock exam keeps its
+// answers back names --retry only when the submission can be retried.
+func TestLockedReviewOffersOnlyWhatIsAccepted(t *testing.T) {
+	for _, tc := range []struct {
+		name        string
+		fingerprint bool
+	}{{"with fingerprints", true}, {"without fingerprints", false}} {
+		t.Run(tc.name, func(t *testing.T) {
+			h := newHarness(t)
+			id := h.startedMock()
+			ids := h.frozenIDs(id)
+			h.answerOnly(ids[0], erroredEvaluation)
+			if !tc.fingerprint {
+				h.inputs.setErr(errors.New("the API server is unreachable"))
+			}
+			_, err := h.svc.Grade(ctx, id, session.GradeOptions{At: at(10, 0)})
+			testutil.NoError(t, err)
+			h.inputs.setErr(nil)
+			testutil.Equal(t, h.state(id), model.StateGradingError)
+
+			_, err = h.svc.Review(ctx, id, ids[0], true)
+			testutil.ErrorIs(t, err, session.ErrDisclosureLocked)
+			testutil.Equal(t, strings.Contains(err.Error(), "--retry"), tc.fingerprint)
+			testutil.Equal(t, strings.Contains(err.Error(), "--resubmit"), true)
+		})
+	}
+}
