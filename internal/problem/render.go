@@ -122,8 +122,11 @@ func chooseParameters(p model.Problem, seed uint64) map[string]any {
 	return out
 }
 
-// render returns a deep copy of p with every string value rendered, and the
-// rendered question. Map keys, IDs, kinds and points are never rendered.
+// render returns a deep copy of p with every string value rendered (criterion
+// targets, args and Korean feedback included), and the rendered question.
+// Map keys, IDs, kinds and points are never rendered. Load renders the
+// definition with every allowed value (checkEveryParameterValue), so an
+// undefined reference anywhere, feedback included, fails at load time.
 func render(p model.Problem, params map[string]any) (model.Problem, string, error) {
 	var firstErr error
 	keep := func(err error) {
@@ -183,6 +186,7 @@ func render(p model.Problem, params map[string]any) (model.Problem, string, erro
 			Namespace:  text(c.Target.Namespace),
 			Name:       text(c.Target.Name),
 		}
+		c.Feedback = text(c.Feedback)
 		c.DependsOn = slices.Clone(c.DependsOn)
 		c.Args = object(c.Args)
 		d.Criteria[i] = c

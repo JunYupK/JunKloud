@@ -1,6 +1,7 @@
 package problem_test
 
 import (
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -172,3 +173,24 @@ const (
 	goldenServiceName = "frontend"
 	goldenPort        = 9090
 )
+
+// TestFreezeRendersFeedback: a criterion's Korean feedback is rendered with
+// the frozen parameters like the rest of the definition.
+func TestFreezeRendersFeedback(t *testing.T) {
+	p, err := problem.Load(validFixture)
+	testutil.NoError(t, err)
+	for _, seed := range []uint64{1, 2, 3, 4} {
+		f, err := problem.Freeze(p, seed)
+		testutil.NoError(t, err)
+		for _, c := range f.Definition.Criteria {
+			if strings.Contains(c.Feedback, "${") {
+				t.Fatalf("seed %d: criterion %s feedback not rendered: %q", seed, c.ID, c.Feedback)
+			}
+		}
+		testutil.Equal(t, f.Definition.Criteria[1].Feedback, fmt.Sprintf("Service의 첫 번째 포트가 %v인지 확인하세요.", f.Parameters["port"]))
+		testutil.Equal(t, f.Definition.Criteria[0].Feedback,
+			fmt.Sprintf("Service %v이(가) %v namespace에 있는지 확인하세요.", f.Parameters["service_name"], f.Parameters["namespace"]))
+	}
+	// The unrendered problem keeps the references (it is what is hashed).
+	testutil.Equal(t, strings.Contains(p.Criteria[1].Feedback, "${port}"), true)
+}

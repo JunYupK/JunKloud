@@ -98,8 +98,9 @@ func TestInvalidDefinition(t *testing.T) {
 		"bad-quantity":           "memory",
 		"bad-namespace":          "Svc_Bravo",
 		// Each criterion has Korean feedback (spec 8.1).
-		"missing-feedback":    "/criteria/1",
-		"non-korean-feedback": `criterion "service-port": feedback must be written in Korean`,
+		"missing-feedback":          "/criteria/1",
+		"non-korean-feedback":       `criterion "service-port": feedback must be written in Korean`,
+		"undefined-ref-in-feedback": `undefined parameter "nope"`,
 		// Resource scope (spec §6.2, ruling R13).
 		"scope-problem-namespace":           `scope namespace "svc-alpha" is the problem namespace`,
 		"scope-duplicate-namespace":         `duplicate scope namespace "svc-alpha-client"`,
