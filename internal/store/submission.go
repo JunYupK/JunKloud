@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"time"
 
 	"github.com/JunYupK/JunKloud/internal/model"
 )
@@ -14,53 +15,116 @@ import (
 // existing ID is never changed and yields ErrAlreadyExists. An unknown
 // session or parent submission yields ErrNotFound.
 func (s *Store) CreateSubmission(ctx context.Context, sub model.Submission) error {
-	var hashes, parent any
+	args, err := submissionArgs(sub)
+	if err != nil {
+		return err
+	}
+	return s.inTx(ctx, func(tx *sql.Tx) error { return insertSubmission(ctx, tx, sub.ID, args) })
+}
+
+// SubmitAndTransition stores a submission and moves its session from one
+// state to another (compare-and-swap, as Transition) in ONE transaction: a
+// submission is never recorded for a session that was not in the expected
+// state, and the session never moves without its submission. from == to is a
+// pure guard (a practice problem is graded without ending the session).
+// Errors are those of CreateSubmission and Transition.
+func (s *Store) SubmitAndTransition(ctx context.Context, sub model.Submission, from, to string) error {
+	if err := checkTransition(from, to); err != nil {
+		return err
+	}
+	args, err := submissionArgs(sub)
+	if err != nil {
+		return err
+	}
+	return s.inTx(ctx, func(tx *sql.Tx) error {
+		if err := insertSubmission(ctx, tx, sub.ID, args); err != nil {
+			return err
+		}
+		return transitionTx(ctx, tx, sub.SessionID, from, to)
+	})
+}
+
+const submissionColumns = `id, session_id, kind, problem_id, parent_submission_id, submitted_at,
+	solve_duration_ns, overtime_ns, within_limit, clock_anomaly, viewed_solutions_json, input_hashes_json`
+
+// submissionArgs encodes a submission for submissionColumns.
+func submissionArgs(sub model.Submission) ([]any, error) {
+	var hashes, viewed, parent, problemID any
 	if sub.InputHashes != nil {
 		b, err := json.Marshal(sub.InputHashes)
 		if err != nil {
-			return fmt.Errorf("store: encode input hashes: %w", err)
+			return nil, fmt.Errorf("store: encode input hashes: %w", err)
 		}
 		hashes = string(b)
+	}
+	if len(sub.ViewedSolutions) > 0 {
+		b, err := json.Marshal(sub.ViewedSolutions)
+		if err != nil {
+			return nil, fmt.Errorf("store: encode viewed solutions: %w", err)
+		}
+		viewed = string(b)
 	}
 	if sub.ParentSubmissionID != "" {
 		parent = sub.ParentSubmissionID
 	}
-	return s.inTx(ctx, func(tx *sql.Tx) error {
-		_, err := tx.ExecContext(ctx, `INSERT INTO submissions
-			(id, session_id, kind, parent_submission_id, submitted_at, input_hashes_json)
-			VALUES (?, ?, ?, ?, ?, ?)`,
-			sub.ID, sub.SessionID, sub.Kind, parent, encodeTime(sub.SubmittedAt), hashes)
-		if err != nil {
-			return mapWriteErr(fmt.Errorf("store: insert submission %q: %w", sub.ID, err))
-		}
-		return nil
-	})
+	if sub.ProblemID != "" {
+		problemID = sub.ProblemID
+	}
+	return []any{sub.ID, sub.SessionID, sub.Kind, problemID, parent, encodeTime(sub.SubmittedAt),
+		int64(sub.SolveDuration), int64(sub.Overtime), boolInt(sub.WithinLimit), boolInt(sub.ClockAnomaly), viewed, hashes}, nil
+}
+
+func insertSubmission(ctx context.Context, tx *sql.Tx, id string, args []any) error {
+	_, err := tx.ExecContext(ctx, `INSERT INTO submissions (`+submissionColumns+`)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`, args...)
+	if err != nil {
+		return mapWriteErr(fmt.Errorf("store: insert submission %q: %w", id, err))
+	}
+	return nil
 }
 
 // GetSubmission returns a stored submission or ErrNotFound.
 func (s *Store) GetSubmission(ctx context.Context, id string) (model.Submission, error) {
-	var (
-		sub       model.Submission
-		parent    sql.NullString
-		submitted string
-		hashes    sql.NullString
-	)
-	err := s.r.QueryRowContext(ctx, `SELECT id, session_id, kind, parent_submission_id,
-		submitted_at, input_hashes_json FROM submissions WHERE id = ?`, id).
-		Scan(&sub.ID, &sub.SessionID, &sub.Kind, &parent, &submitted, &hashes)
+	sub, err := scanSubmission(s.r.QueryRowContext(ctx, `SELECT `+submissionColumns+` FROM submissions WHERE id = ?`, id))
 	if errors.Is(err, sql.ErrNoRows) {
 		return model.Submission{}, fmt.Errorf("%w: submission %q", ErrNotFound, id)
 	}
-	if err != nil {
-		return model.Submission{}, fmt.Errorf("store: load submission %q: %w", id, err)
+	return sub, err
+}
+
+// scanSubmission decodes one row of submissionColumns. sql.ErrNoRows is
+// returned as is.
+func scanSubmission(row interface{ Scan(...any) error }) (model.Submission, error) {
+	var (
+		sub               model.Submission
+		problemID, parent sql.NullString
+		submitted         string
+		solve, overtime   int64
+		within, anomaly   int
+		viewed, hashes    sql.NullString
+	)
+	err := row.Scan(&sub.ID, &sub.SessionID, &sub.Kind, &problemID, &parent, &submitted,
+		&solve, &overtime, &within, &anomaly, &viewed, &hashes)
+	if errors.Is(err, sql.ErrNoRows) {
+		return model.Submission{}, err
 	}
-	sub.ParentSubmissionID = parent.String
+	if err != nil {
+		return model.Submission{}, fmt.Errorf("store: load submission: %w", err)
+	}
+	sub.ProblemID, sub.ParentSubmissionID = problemID.String, parent.String
+	sub.SolveDuration, sub.Overtime = time.Duration(solve), time.Duration(overtime)
+	sub.WithinLimit, sub.ClockAnomaly = within == 1, anomaly == 1
 	if sub.SubmittedAt, err = decodeTime(submitted); err != nil {
 		return model.Submission{}, err
 	}
+	if viewed.Valid {
+		if err := json.Unmarshal([]byte(viewed.String), &sub.ViewedSolutions); err != nil {
+			return model.Submission{}, fmt.Errorf("store: decode viewed solutions of %q: %w", sub.ID, err)
+		}
+	}
 	if hashes.Valid {
 		if err := json.Unmarshal([]byte(hashes.String), &sub.InputHashes); err != nil {
-			return model.Submission{}, fmt.Errorf("store: decode input hashes of %q: %w", id, err)
+			return model.Submission{}, fmt.Errorf("store: decode input hashes of %q: %w", sub.ID, err)
 		}
 	}
 	return sub, nil

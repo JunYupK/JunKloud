@@ -64,12 +64,45 @@ type SessionRecord struct {
 	EnvironmentManifest map[string]string `json:"environment_manifest,omitempty"`
 }
 
+// Submission kinds. A whole-session submission covers every problem of the
+// session (a mock exam's only kind); a problem submission covers one problem
+// of a practice session and does not end the session.
+const (
+	SubmissionSession = "session"
+	SubmissionProblem = "problem"
+)
+
 // Submission is one grading request and the hashes of the inputs it saw.
+//
+// SolveDuration is the learner's time from the session start to SubmittedAt;
+// the time the grader then takes is a property of the grading runs and is
+// never part of it. Overtime is the part of SolveDuration beyond the session's
+// limit, WithinLimit says whether the submission met the limit (always true
+// for a session without one), and ClockAnomaly is true when SubmittedAt lies
+// before the session start, i.e. the wall clock ran backwards (SolveDuration is
+// then zero). ProblemID is empty for a whole-session submission.
+// ViewedSolutions lists the problems whose solution the learner had already
+// opened when this submission was made, so a repeated attempt is never shown
+// as a first look (spec 9.2).
 type Submission struct {
 	ID                 string            `json:"id"`
 	SessionID          string            `json:"session_id"`
 	Kind               string            `json:"kind"`
+	ProblemID          string            `json:"problem_id,omitempty"`
 	ParentSubmissionID string            `json:"parent_submission_id,omitempty"`
 	SubmittedAt        time.Time         `json:"submitted_at"`
+	SolveDuration      time.Duration     `json:"solve_duration,omitempty"`
+	Overtime           time.Duration     `json:"overtime,omitempty"`
+	WithinLimit        bool              `json:"within_limit"`
+	ClockAnomaly       bool              `json:"clock_anomaly,omitempty"`
+	ViewedSolutions    []string          `json:"viewed_solutions,omitempty"`
 	InputHashes        map[string]string `json:"input_hashes,omitempty"`
+}
+
+// ReviewEvent records that the learner opened the explanation and solution of
+// one problem.
+type ReviewEvent struct {
+	SessionID  string    `json:"session_id"`
+	ProblemID  string    `json:"problem_id"`
+	ReviewedAt time.Time `json:"reviewed_at"`
 }
