@@ -841,6 +841,9 @@ func TestCrashHelperProcess(t *testing.T) {
 		o.records = func(st *store.Store) session.Records { return crashRecords{Store: st, point: point} }
 	})
 	h.answer(nil)
+	if os.Getenv("JUNKLOUD_CRASH_INPUTS_ERR") != "" {
+		h.inputs.setErr(errors.New("the API server is unreachable"))
+	}
 	if point == "evaluate" {
 		h.eng.beforeReturn = func(model.FrozenProblem) { os.Exit(crashExit) }
 	}
@@ -1117,4 +1120,83 @@ func TestFailedGradeClosesItsOperation(t *testing.T) {
 	status, err = h.svc.Status(ctx, id, at(10, 5))
 	testutil.NoError(t, err)
 	testutil.Equal(t, len(status.Pending), 0)
+}
+
+// TestIntentOnlyRequestOfOneProblemIsNotRecordedByAnother: submission IDs are
+// session-wide, so a request that only recorded its intent must not look
+// recorded because another problem's grade later took the submission ID the
+// request would have used.
+func TestIntentOnlyRequestOfOneProblemIsNotRecordedByAnother(t *testing.T) {
+	h := newHarness(t)
+	id := h.startedPractice()
+	h.answer(nil)
+	ids := h.frozenIDs(id)
+	p1, p2 := ids[0], ids[1]
+	first, err := h.svc.Grade(ctx, id, session.GradeOptions{ProblemID: p1, At: at(9, 0)})
+	testutil.NoError(t, err)
+
+	killedGrade(t, h, id, "submit", "JUNKLOUD_CRASH_PROBLEM="+p1)
+	status, err := h.svc.Status(ctx, id, at(9, 1))
+	testutil.NoError(t, err)
+	testutil.Equal(t, len(status.Pending), 1)
+	stale := status.Pending[0]
+
+	other, err := h.svc.Grade(ctx, id, session.GradeOptions{ProblemID: p2, At: at(9, 5)})
+	testutil.NoError(t, err)
+	testutil.Equal(t, other.Evaluation.Complete, true)
+	testutil.Equal(t, other.SubmissionID == stale.SubmissionID, false)
+
+	status, err = h.svc.Status(ctx, id, at(9, 6))
+	testutil.NoError(t, err)
+	testutil.Equal(t, len(status.Pending), 1)
+	testutil.Equal(t, status.Pending[0].OperationID, stale.OperationID)
+	testutil.Equal(t, status.Pending[0].Recorded, false)
+	if strings.Contains(status.Pending[0].Guidance, other.SubmissionID) {
+		t.Errorf("the guidance names another problem's submission: %q", status.Pending[0].Guidance)
+	}
+	review, err := h.svc.Review(ctx, id, p1, false)
+	testutil.NoError(t, err)
+	testutil.Equal(t, review.Confirmed != nil && review.Confirmed.ID == first.ID, true)
+}
+
+// TestGuidanceDoesNotOfferARetryItWouldRefuse: a submission without recorded
+// fingerprints cannot be retried (the answer cannot be shown unchanged), so no
+// message offers --retry for it.
+func TestGuidanceDoesNotOfferARetryItWouldRefuse(t *testing.T) {
+	t.Run("an interrupted grading", func(t *testing.T) {
+		h := newHarness(t)
+		id := h.startedMock()
+		killedGrade(t, h, id, "evaluate", "JUNKLOUD_CRASH_INPUTS_ERR=1")
+		subs := h.submissions(id)
+		testutil.Equal(t, len(subs), 1)
+		testutil.Equal(t, len(subs[0].InputHashes), 0)
+
+		status, err := h.svc.Status(ctx, id, at(10, 1))
+		testutil.NoError(t, err)
+		testutil.Equal(t, len(status.Pending), 1)
+		g := status.Pending[0].Guidance
+		if strings.Contains(g, "--retry") || !strings.Contains(g, "`ckad grade --resubmit`") {
+			t.Errorf("guidance: %q", g)
+		}
+		_, err = h.svc.Grade(ctx, id, session.GradeOptions{At: at(10, 2)})
+		testutil.ErrorIs(t, err, session.ErrGradeInterrupted)
+		if strings.Contains(err.Error(), "--retry") {
+			t.Errorf("the refusal offers --retry: %v", err)
+		}
+	})
+
+	t.Run("an incomplete submission", func(t *testing.T) {
+		h := newHarness(t)
+		id := h.startedMock()
+		h.answerOnly(h.frozenIDs(id)[0], erroredEvaluation)
+		h.inputs.setErr(errors.New("the API server is unreachable"))
+		_, err := h.svc.Grade(ctx, id, session.GradeOptions{At: at(10, 0)})
+		testutil.NoError(t, err)
+		h.inputs.setErr(nil)
+		_, err = h.svc.Grade(ctx, id, session.GradeOptions{At: at(10, 1)})
+		testutil.ErrorIs(t, err, session.ErrAlreadySubmitted)
+		if strings.Contains(err.Error(), "--retry") || !strings.Contains(err.Error(), "--resubmit") {
+			t.Errorf("the message: %v", err)
+		}
+	})
 }

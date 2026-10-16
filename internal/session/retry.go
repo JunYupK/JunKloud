@@ -90,13 +90,35 @@ func (h history) unfinished() []model.Operation {
 	return out
 }
 
+// nextSubmissionID is an ID no submission and no grading operation used
+// before. Submission IDs are session-wide, so without the second condition a
+// request that only recorded its intent (an operation named after the ID it
+// meant to use) would look recorded once another problem's grade took that ID.
 func (h history) nextSubmissionID(sessionID string) string {
 	for n := len(h.subs) + 1; ; n++ {
-		if id := fmt.Sprintf("%s-sub-%d", sessionID, n); !h.hasSubmission(id) {
+		id := fmt.Sprintf("%s-sub-%d", sessionID, n)
+		reserved := slices.ContainsFunc(h.ops, func(op model.Operation) bool {
+			return strings.HasPrefix(op.ID, GradeOperationID(id+"-run-"))
+		})
+		if !h.hasSubmission(id) && !reserved {
 			return id
 		}
 	}
 }
+
+// submission returns the submission with the ID.
+func (h history) submission(id string) (model.Submission, bool) {
+	for _, sub := range h.subs {
+		if sub.ID == id {
+			return sub, true
+		}
+	}
+	return model.Submission{}, false
+}
+
+// retryable reports whether a retry of the submission can ever be accepted: it
+// recorded fingerprints, so the answer can be shown unchanged.
+func retryable(sub model.Submission) bool { return len(sub.InputHashes) > 0 }
 
 // nextRunID is a run ID no run and no operation used before, so an interrupted
 // grading and the retry that recovers it are different operations.
@@ -141,6 +163,17 @@ type interruptedError struct{ scope string }
 
 func (e *interruptedError) Error() string { return ErrGradeInterrupted.Error() }
 func (e *interruptedError) Unwrap() error { return ErrGradeInterrupted }
+
+// incompleteMessage is the ErrAlreadySubmitted text for an incomplete
+// submission. It offers --retry only if a retry can be accepted.
+func incompleteMessage(what, scope string, latest model.Submission) string {
+	if !retryable(latest) {
+		return fmt.Sprintf("%v: %s, and no fingerprint of the answer was recorded, so it cannot be shown unchanged; %s submits the answer again",
+			ErrAlreadySubmitted, what, gradeCommand(scope, "--resubmit"))
+	}
+	return fmt.Sprintf("%v: %s; %s grades the same answer again, %s submits a changed one",
+		ErrAlreadySubmitted, what, gradeCommand(scope, "--retry"), gradeCommand(scope, "--resubmit"))
+}
 
 // gradeCommand renders a command of the CLI contract (spec 10).
 func gradeCommand(scope string, flags ...string) string {
@@ -236,11 +269,7 @@ func (s *Service) planGrade(rec model.SessionRecord, hist history, opts GradeOpt
 			// Recorded, never graded: the process died after the submission.
 			return gradePlan{}, &interruptedError{scope: scope}
 		case unresolved:
-			return gradePlan{}, &alreadyError{
-				msg: fmt.Sprintf("%v: the last grade of %s did not complete; %s grades the same answer again, %s submits a changed one",
-					ErrAlreadySubmitted, scope, gradeCommand(scope, "--retry"), gradeCommand(scope, "--resubmit")),
-				run: last,
-			}
+			return gradePlan{}, &alreadyError{msg: incompleteMessage("the last grade of "+scope+" did not complete", scope, *latest), run: last}
 		}
 		return resubmit(model.StateRunning, model.StateRunning), nil
 	}
@@ -282,11 +311,7 @@ func (s *Service) planGrade(rec model.SessionRecord, hist history, opts GradeOpt
 		case opts.Resubmit:
 			return resubmit(model.StateGradingError, model.StateGrading), nil
 		}
-		return gradePlan{}, &alreadyError{
-			msg: fmt.Sprintf("%v: the submission was graded incompletely and has no total; %s grades the same answer again, %s submits a changed one",
-				ErrAlreadySubmitted, gradeCommand("", "--retry"), gradeCommand("", "--resubmit")),
-			run: last,
-		}
+		return gradePlan{}, &alreadyError{msg: incompleteMessage("the submission was graded incompletely and has no total", "", *latest), run: last}
 	case model.StateCompleted:
 		switch {
 		case opts.Retry:
@@ -378,7 +403,13 @@ func (s *Service) pending(rec model.SessionRecord, hist history) []Pending {
 			subID = runID[:i]
 		}
 		scope := op.Planned.ProblemID
-		recorded := hist.hasSubmission(subID) || op.Phase == GradeRecorded
+		// Recorded is judged from this operation's own evidence: it got as far as
+		// its recorded phase, or the submission it names exists in the same scope
+		// (a new submission its transaction stored, or the one a retry grades
+		// again). IDs are reserved by nextSubmissionID, so another request never
+		// takes this operation's submission ID.
+		sub, found := hist.submission(subID)
+		recorded := op.Phase == GradeRecorded || (found && sub.ProblemID == scope)
 		p := Pending{OperationID: op.ID, SubmissionID: subID, RunID: runID, ProblemID: scope, Phase: op.Phase, Since: op.CreatedAt, Recorded: recorded}
 		p.Guidance = s.guidance(rec, hist, scope, subID, recorded, op.CreatedAt)
 		out = append(out, p)
@@ -404,6 +435,14 @@ func (s *Service) guidance(rec model.SessionRecord, hist history, scope, submiss
 	} else {
 		head = fmt.Sprintf("A grading requested at %s stopped before it recorded anything: nothing was graded and no score changed.", since.Format(time.RFC3339))
 	}
+	// The submission a retry would grade again: the one named, else the latest
+	// of the scope.
+	retrySub, haveSub := hist.submission(submissionID)
+	if !haveSub {
+		if subs := hist.inScope(scope); len(subs) > 0 {
+			retrySub, haveSub = subs[len(subs)-1], true
+		}
+	}
 	var accepted []string
 	for _, c := range []struct {
 		flag, does string
@@ -415,6 +454,9 @@ func (s *Service) guidance(rec model.SessionRecord, hist history, scope, submiss
 	} {
 		if _, err := s.planGrade(rec, hist, c.opts); err != nil {
 			continue
+		}
+		if c.opts.Retry && haveSub && !retryable(retrySub) {
+			continue // execution would refuse it: nothing shows the answer unchanged
 		}
 		cmd := gradeCommand(scope)
 		if c.flag != "" {
