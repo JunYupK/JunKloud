@@ -287,17 +287,17 @@ Task 2에서 `internal/model`에 아래 타입을 정의한다. 패키지 간에
 
 **Interfaces:** Adds Service methods `Grade(ctx,sessionID string,opts GradeOptions) (model.GradingRun,error)`, `Review(ctx,sessionID,problemID string,solution bool) (Review,error)`; `GradeOptions{ProblemID string; Retry,Resubmit bool; At time.Time}`; `Review{Runs []model.GradingRun; Explanation,ReferenceSolution string; SolutionViewed bool}`. Uses CaptureInputs from Task 8.
 
-- [ ] **실패 테스트 작성:** `TestExamDisclosure`, `TestPracticeDisclosure`, `TestRetryPreservesSubmissionTime`, `TestChangedAnswerRequiresResubmit`, `TestResubmitAppendOnly`, `TestErrorNoFinalScore`, `TestCrashDuringGrade`. 최초 제출 10:00, retry 10:02, 새 제출 10:05의 고정 시각을 사용한다.
+- [x] **실패 테스트 작성:** `TestExamDisclosure`, `TestPracticeDisclosure`, `TestRetryPreservesSubmissionTime`, `TestChangedAnswerRequiresResubmit`, `TestResubmitAppendOnly`, `TestErrorNoFinalScore`, `TestCrashDuringGrade`. 최초 제출 10:00, retry 10:02, 새 제출 10:05의 고정 시각을 사용한다.
   ```go
   testutil.Equal(t, retrySubmission.SubmittedAt, originalSubmission.SubmittedAt)
   testutil.Equal(t, resubmission.SubmittedAt, originalSubmission.SubmittedAt.Add(5*time.Minute))
   testutil.Equal(t, incomplete.Evaluation.Score, (*int)(nil))
   testutil.Equal(t, strings.Contains(examBeforeSubmit, referenceAnswer), false)
   ```
-- [ ] **실패 확인:** `go test ./internal/session -run 'TestExam|TestPractice|TestRetry|TestChanged|TestResubmit|TestError|TestCrash' -v` 실패 확인.
-- [ ] **최소 구현:** 전환 잠금·제출 intent·입력 fingerprint 저장·grader 호출·원자적 완료. retry는 새 run, resubmit은 새 submission. 최초 제출 시 input capture가 불가능했다면 unchanged를 증명할 수 없으므로 resubmit만 안내한다. input spec/UID·파일·image 변경 시 retry 거부. 종료 전후 state 확인으로 stale 결과를 확정하지 않는다. 훈련 개별 채점은 세션을 끝내지 않고 결과와 시각을 저장한다.
-- [ ] **통과 확인:** integration submission 테스트 PASS. ERROR 상태의 시험 해설 비공개, 포기 후 공개, 제출 후 열린 해설은 재제출 기록에 반영. 최고 점수 합산 없음. clock 역행 flag와 채점시간 제외 확인.
-- [ ] **커밋:** `feat: preserve submissions and enforce feedback timing`.
+- [x] **실패 확인:** `go test ./internal/session -run 'TestExam|TestPractice|TestRetry|TestChanged|TestResubmit|TestError|TestCrash' -v` 실패 확인.
+- [x] **최소 구현:** 전환 잠금·제출 intent·입력 fingerprint 저장·grader 호출·원자적 완료. retry는 새 run, resubmit은 새 submission. 최초 제출 시 input capture가 불가능했다면 unchanged를 증명할 수 없으므로 resubmit만 안내한다. input spec/UID·파일·image 변경 시 retry 거부. 종료 전후 state 확인으로 stale 결과를 확정하지 않는다. 훈련 개별 채점은 세션을 끝내지 않고 결과와 시각을 저장한다.
+- [ ] **통과 확인:** (미완: 포기 후 공개는 Task 13 — 현재 `ErrReviewUnsupported`; 나머지는 검증됨) integration submission 테스트 PASS. ERROR 상태의 시험 해설 비공개, 포기 후 공개, 제출 후 열린 해설은 재제출 기록에 반영. 최고 점수 합산 없음. clock 역행 flag와 채점시간 제외 확인.
+- [x] **커밋:** `feat: preserve submissions and enforce feedback timing`.
 
 ### Task 12: CLI 전체 학습 흐름과 한국어 피드백
 
