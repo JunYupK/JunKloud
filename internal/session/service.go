@@ -71,8 +71,13 @@ var (
 	// ErrReservedAsset: a chosen problem provides a file whose name the
 	// session reserves for the question.
 	ErrReservedAsset = errors.New("session: a problem provides a file named like the question")
-	// ErrNamespaceClash: two chosen problems would own the same namespace.
+	// ErrNamespaceClash: two chosen problems would own the same namespace
+	// or declare the same cluster-scoped object.
 	ErrNamespaceClash = errors.New("session: two problems would use the same namespace")
+	// ErrEnvironmentOccupied: a namespace or cluster-scoped object a chosen
+	// problem needs still exists in the environment (left by an earlier
+	// session that was not reset). Nothing was recorded or changed.
+	ErrEnvironmentOccupied = errors.New("session: the environment still holds resources of an earlier session")
 	// ErrEnvironmentChanged: the live environment is not the one this
 	// service was composed for.
 	ErrEnvironmentChanged = errors.New("session: the environment is not the one this service was composed for")
@@ -153,6 +158,9 @@ type Environment interface {
 	Check(ctx context.Context, id model.Identity) error
 	Doctor(ctx context.Context, id model.Identity) (environment.DoctorReport, error)
 	Apply(ctx context.Context, id model.Identity, owner environment.Owner, actions []environment.Action) (model.Inventory, error)
+	// Occupied lists the given namespaces and cluster-scoped objects that
+	// already exist (read-only; environment.Manager.Occupied).
+	Occupied(ctx context.Context, id model.Identity, namespaces []string, cluster []model.ObjectRef) ([]string, error)
 }
 
 // Evaluator grades a frozen problem; *grader.Engine, the same engine

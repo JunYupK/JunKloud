@@ -354,8 +354,9 @@ func TestSecondSessionRejected(t *testing.T) {
 	testutil.NoError(t, err)
 	testutil.Equal(t, len(active), 1)
 
-	// Once it is over, a new one can be prepared.
+	// Once it is over and its resources are reset, a new one can be prepared.
 	testutil.NoError(t, h.st.Transition(ctx, first.ID, model.StateRunning, model.StateAbandoned))
+	h.env.reset(first.ID)
 	second, err := h.svc.Prepare(ctx, session.StartOptions{Mode: model.ModePractice, Count: 5})
 	testutil.NoError(t, err)
 	if second.ID == first.ID {
@@ -821,4 +822,113 @@ func TestPrepareRefusesAReservedAssetName(t *testing.T) {
 	testutil.NoError(t, aerr)
 	testutil.Equal(t, len(active), 0)
 	testutil.Equal(t, countFiles(t, h.workspace), 0)
+}
+
+// TestPrepareRefusesAnOccupiedEnvironment: a session that is over (COMPLETED,
+// ABANDONED) does not occupy the environment as a session, but until it is
+// reset its namespaces and cluster-scoped objects are still there. A new
+// session that needs any of them is refused before anything is recorded,
+// with a read-only check, instead of failing half-way into SETUP_ERROR.
+func TestPrepareRefusesAnOccupiedEnvironment(t *testing.T) {
+	h := newHarness(t)
+	id := h.startedPractice()
+	h.answer(nil)
+	_, err := h.svc.Grade(ctx, id, session.GradeOptions{At: at(9, 0)})
+	testutil.NoError(t, err)
+	testutil.Equal(t, h.state(id), model.StateCompleted)
+	applies := h.env.count("apply")
+
+	_, err = h.svc.Prepare(ctx, h.mock())
+	testutil.ErrorIs(t, err, session.ErrEnvironmentOccupied)
+	for _, want := range []string{"reset", id, "dev-svc"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("the refusal lacks %q: %v", want, err)
+		}
+	}
+	testutil.Equal(t, h.env.count("apply"), applies)
+	active, err := h.st.ActiveSessions(ctx, testEnvID)
+	testutil.NoError(t, err)
+	testutil.Equal(t, len(active), 0) // no SETUP_ERROR session was created
+	_, err = h.st.LoadSession(ctx, "mock-2")
+	testutil.ErrorIs(t, err, store.ErrNotFound)
+
+	// After the reset the environment is free again.
+	h.env.reset(id)
+	h.answer(initialEvaluation) // a fresh setup is in its starting state
+	_, err = h.svc.Prepare(ctx, h.mock())
+	testutil.NoError(t, err)
+
+	t.Run("a failing check refuses too", func(t *testing.T) {
+		h := newHarness(t)
+		h.env.occupiedErr = errors.New("apiserver busy")
+		_, err := h.svc.Prepare(ctx, h.mock())
+		testutil.ErrorIs(t, err, h.env.occupiedErr)
+		testutil.Equal(t, h.env.count("apply"), 0)
+		active, err := h.st.ActiveSessions(ctx, testEnvID)
+		testutil.NoError(t, err)
+		testutil.Equal(t, len(active), 0)
+	})
+}
+
+// TestPrepareRefusesSharedClusterResources: two problems of one session must
+// not both declare the same cluster-scoped object, and one left by an earlier
+// session blocks a new one like a namespace does.
+func TestPrepareRefusesSharedClusterResources(t *testing.T) {
+	declare := func(t *testing.T, bank, problemID string) {
+		path := filepath.Join(bank, "problems", problemID, "problem.yaml")
+		editFile(t, path, "budget:\n", "scope:\n  cluster_resources:\n    - {api_version: rbac.authorization.k8s.io/v1, kind: ClusterRole, name: dev-shared-reader}\nbudget:\n")
+	}
+	h := newHarness(t, func(o *harnessOption) {
+		o.mutateBank = func(t *testing.T, bank string) {
+			declare(t, bank, "dev-sa-001")
+			declare(t, bank, "dev-scale-001")
+		}
+	})
+	_, err := h.svc.Prepare(ctx, h.mock())
+	testutil.ErrorIs(t, err, session.ErrNamespaceClash)
+	if !strings.Contains(err.Error(), "dev-shared-reader") {
+		t.Errorf("error does not name the object: %v", err)
+	}
+	testutil.Equal(t, h.env.count("apply"), 0)
+
+	h2 := newHarness(t, func(o *harnessOption) {
+		o.mutateBank = func(t *testing.T, bank string) { declare(t, bank, "dev-sa-001") }
+	})
+	h2.env.owners = append(h2.env.owners, environment.Owner{Inventory: model.Inventory{SessionID: "practice-old"},
+		Namespace: "elsewhere", Scope: model.ResourceScope{ClusterResources: []model.ObjectRef{
+			{APIVersion: "rbac.authorization.k8s.io/v1", Kind: "ClusterRole", Name: "dev-shared-reader"}}}})
+	_, err = h2.svc.Prepare(ctx, h2.mock())
+	testutil.ErrorIs(t, err, session.ErrEnvironmentOccupied)
+	if !strings.Contains(err.Error(), "dev-shared-reader") {
+		t.Errorf("error does not name the object: %v", err)
+	}
+}
+
+// TestResubmitRefusedWhileAnotherSessionIsActive: resubmitting a COMPLETED
+// session makes it active again (GRADING over its namespaces); that must not
+// happen while another session of the environment is active.
+func TestResubmitRefusedWhileAnotherSessionIsActive(t *testing.T) {
+	h := newHarness(t)
+	id := h.startedMock()
+	h.answer(nil)
+	_, err := h.svc.Grade(ctx, id, session.GradeOptions{At: at(10, 0)})
+	testutil.NoError(t, err)
+	testutil.Equal(t, h.state(id), model.StateCompleted)
+
+	other := mustLoad(t, h, id)
+	other.ID, other.State, other.StartedAt = "practice-other", model.StateRunning, nil
+	testutil.NoError(t, h.st.CreateSession(ctx, other))
+
+	_, err = h.svc.Grade(ctx, id, session.GradeOptions{Resubmit: true, At: at(10, 30)})
+	testutil.ErrorIs(t, err, session.ErrSessionActive)
+	if !strings.Contains(err.Error(), "practice-other") {
+		t.Errorf("error does not name the active session: %v", err)
+	}
+	testutil.Equal(t, len(h.submissions(id)), 1)
+	testutil.Equal(t, h.state(id), model.StateCompleted)
+
+	// Without the other session it goes ahead.
+	testutil.NoError(t, h.st.Transition(ctx, "practice-other", model.StateRunning, model.StateAbandoned))
+	_, err = h.svc.Grade(ctx, id, session.GradeOptions{Resubmit: true, At: at(10, 31)})
+	testutil.NoError(t, err)
 }

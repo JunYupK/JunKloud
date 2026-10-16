@@ -115,6 +115,42 @@ type fakeEnv struct {
 	events []event
 	owners []environment.Owner
 	acts   map[string][]environment.Action
+
+	occupiedErr   error
+	occupiedCalls int
+}
+
+// Occupied reports, like a cluster that keeps what setups created until a
+// reset, every asked namespace or cluster-scoped object that an earlier
+// owner's setup created (and reset did not remove).
+func (e *fakeEnv) Occupied(_ context.Context, _ model.Identity, namespaces []string, cluster []model.ObjectRef) ([]string, error) {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	e.occupiedCalls++
+	if e.occupiedErr != nil {
+		return nil, e.occupiedErr
+	}
+	var out []string
+	for _, o := range e.owners {
+		for _, ns := range append([]string{o.Namespace}, o.Scope.Namespaces...) {
+			if slices.Contains(namespaces, ns) {
+				out = append(out, fmt.Sprintf("namespace %q (session %s)", ns, o.Inventory.SessionID))
+			}
+		}
+		for _, r := range o.Scope.ClusterResources {
+			if slices.Contains(cluster, r) {
+				out = append(out, fmt.Sprintf("%s %q (session %s)", r.Kind, r.Name, o.Inventory.SessionID))
+			}
+		}
+	}
+	return out, nil
+}
+
+// reset forgets what a session's setups created, as the reset task will.
+func (e *fakeEnv) reset(sessionID string) {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	e.owners = slices.DeleteFunc(e.owners, func(o environment.Owner) bool { return o.Inventory.SessionID == sessionID })
 }
 
 func (e *fakeEnv) log(ev event) {

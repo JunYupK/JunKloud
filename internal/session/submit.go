@@ -215,7 +215,34 @@ func (s *Service) Grade(ctx context.Context, sessionID string, opts GradeOptions
 		}
 		return model.GradingRun{}, err
 	}
+	// A session that is over (COMPLETED) is not active; a resubmission makes
+	// it active again over its namespaces, which another active session may
+	// be using by now.
+	if !slices.Contains(model.ActiveSessionStates(), rec.State) && slices.Contains(model.ActiveSessionStates(), p.to) {
+		if err := s.requireNoOtherActiveSession(ctx, rec.ID); err != nil {
+			return model.GradingRun{}, err
+		}
+	}
 	return s.execute(ctx, rec, hist, p, at)
+}
+
+// requireNoOtherActiveSession refuses while a session other than this one is
+// active on the environment. The caller holds the lock.
+func (s *Service) requireNoOtherActiveSession(ctx context.Context, sessionID string) error {
+	active, err := s.cfg.Store.ActiveSessions(ctx, s.cfg.Identity.ID)
+	if err != nil {
+		return fmt.Errorf("session: look for active sessions: %w", err)
+	}
+	var list []string
+	for _, a := range active {
+		if a.ID != sessionID {
+			list = append(list, fmt.Sprintf("%s (%s, %s)", a.ID, a.Mode, a.State))
+		}
+	}
+	if len(list) == 0 {
+		return nil
+	}
+	return fmt.Errorf("%w: %s; finish or abandon it before resubmitting this session", ErrSessionActive, strings.Join(list, ", "))
 }
 
 // environmentProblem checks, once the submission is recorded, that the grading

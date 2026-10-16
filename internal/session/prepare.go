@@ -39,8 +39,12 @@ const failureBudget = time.Minute
 //     is refused with every reason if any of its problems is not servable;
 //     a practice session draws with problem.Select from the servable
 //     problems only and PrepareWithReport says which were left out;
-//  3. freezes every problem with the session seed, stores the private package
-//     under its content hash and records the session as PREPARING;
+//  3. freezes every problem with the session seed (two problems may not share
+//     a namespace or a declared cluster-scoped object), checks read-only that
+//     none of their namespaces and declared cluster-scoped objects exists yet
+//     (an earlier COMPLETED or ABANDONED session keeps its resources until it
+//     is reset: ErrEnvironmentOccupied, nothing recorded), stores the private
+//     package under its content hash and records the session as PREPARING;
 //  4. applies every problem's setup (scope enforced, the inventory recorded by
 //     the Manager) and evaluates each initial state with the runtime grader,
 //     comparing it with the problem's declared starting state. An
@@ -118,6 +122,9 @@ func (s *Service) prepare(ctx context.Context, opts StartOptions) (model.Session
 func (s *Service) record(ctx context.Context, id model.Identity, opts StartOptions, seed uint64, limit time.Duration, chosen []model.Problem, manifest map[string]string, envHash string) (model.SessionRecord, error) {
 	frozen, setups, err := s.freeze(id, chosen, seed)
 	if err != nil {
+		return model.SessionRecord{}, err
+	}
+	if err := s.requireFreeResources(ctx, id, frozen); err != nil {
 		return model.SessionRecord{}, err
 	}
 	for _, p := range chosen {
@@ -203,13 +210,38 @@ func (s *Service) requireNoActiveSession(ctx context.Context) error {
 	return fmt.Errorf("%w: finish or abandon %s first", ErrSessionActive, strings.Join(list, ", "))
 }
 
+// requireFreeResources refuses a session whose problems need a namespace or a
+// declared cluster-scoped object that already exists: a COMPLETED or
+// ABANDONED session is not active, but until it is reset its resources stay,
+// and the setup would fail half-way with ErrNotOwned (a sticky SETUP_ERROR).
+// The check is read-only and runs before the session is recorded.
+func (s *Service) requireFreeResources(ctx context.Context, id model.Identity, frozen []model.FrozenProblem) error {
+	var namespaces []string
+	var cluster []model.ObjectRef
+	for _, f := range frozen {
+		namespaces = append(namespaces, f.Namespace)
+		namespaces = append(namespaces, f.Definition.Scope.Namespaces...)
+		cluster = append(cluster, f.Definition.Scope.ClusterResources...)
+	}
+	taken, err := s.cfg.Env.Occupied(ctx, id, namespaces, cluster)
+	if err != nil {
+		return fmt.Errorf("session: check that the problems' resources are free: %w", err)
+	}
+	if len(taken) > 0 {
+		return fmt.Errorf("%w: %s still exist; reset the previous session first", ErrEnvironmentOccupied, strings.Join(taken, ", "))
+	}
+	return nil
+}
+
 // freeze fixes every problem with the session seed and renders its setup
 // actions, before anything is recorded or applied. Two problems may not own
-// the same namespace: problems never depend on each other's resources.
+// the same namespace or declare the same cluster-scoped object: problems
+// never depend on each other's resources.
 func (s *Service) freeze(id model.Identity, problems []model.Problem, seed uint64) ([]model.FrozenProblem, [][]environment.Action, error) {
 	frozen := make([]model.FrozenProblem, 0, len(problems))
 	setups := make([][]environment.Action, 0, len(problems))
 	owner := map[string]string{}
+	clusterOwner := map[model.ObjectRef]string{}
 	for _, p := range problems {
 		f, err := problem.Freeze(p, seed)
 		if err != nil {
@@ -221,6 +253,12 @@ func (s *Service) freeze(id model.Identity, problems []model.Problem, seed uint6
 				return nil, nil, fmt.Errorf("%w: %q and %q both use namespace %q with this seed", ErrNamespaceClash, other, p.ID, ns)
 			}
 			owner[ns] = p.ID
+		}
+		for _, r := range f.Definition.Scope.ClusterResources {
+			if other, taken := clusterOwner[r]; taken {
+				return nil, nil, fmt.Errorf("%w: %q and %q both declare %s %q", ErrNamespaceClash, other, p.ID, r.Kind, r.Name)
+			}
+			clusterOwner[r] = p.ID
 		}
 		actions, err := author.BuildActions(p.Files, f.Parameters, p.Setup)
 		if err != nil {
