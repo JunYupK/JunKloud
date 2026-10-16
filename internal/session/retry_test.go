@@ -122,10 +122,11 @@ func TestChangedAnswerRequiresResubmit(t *testing.T) {
 		h.inputs.change(h.frozenIDs(id)[3])
 		assertRefused(t, h, id, session.ErrAnswerChanged, 1)
 
-		// The refusal names what changed, by fingerprint key.
+		// The refusal names the problem whose answer changed; a mock exam
+		// whose details are not open names no fingerprint key (spec 9.2).
 		_, err := h.svc.Grade(ctx, id, session.GradeOptions{Retry: true, At: at(10, 2)})
-		if !strings.Contains(err.Error(), "Deployment") {
-			t.Errorf("the refusal does not say what changed: %v", err)
+		if !strings.Contains(err.Error(), h.frozenIDs(id)[3]) || strings.Contains(err.Error(), "Deployment") {
+			t.Errorf("the refusal should name the problem and no key: %v", err)
 		}
 		_ = failed
 	})
@@ -235,8 +236,9 @@ func TestResubmitAppendOnly(t *testing.T) {
 	testutil.Equal(t, h.runsOf(second.SubmissionID), storedSecond)
 	testutil.Equal(t, h.state(id), model.StateCompleted)
 
-	// A resubmission that fails: back to GRADING_ERROR, nothing earlier lost,
-	// and the session no longer counts as completed.
+	// A resubmission that fails: back to GRADING_ERROR, nothing earlier lost.
+	// The exam's result stays the first complete run (the second
+	// submission); the later ones are review submissions (spec 9.2).
 	ids := h.frozenIDs(id)
 	h.answerOnly(ids[0], erroredEvaluation)
 	fourth, err := h.svc.Grade(ctx, id, session.GradeOptions{Resubmit: true, At: at(10, 25)})
@@ -245,7 +247,10 @@ func TestResubmitAppendOnly(t *testing.T) {
 	testutil.Equal(t, h.state(id), model.StateGradingError)
 	review, err := h.svc.Review(ctx, id, "", false)
 	testutil.NoError(t, err)
-	testutil.Equal(t, review.Confirmed == nil, true)
-	testutil.Equal(t, len(review.Runs), 4)
-	testutil.Equal(t, len(review.Submissions), 4)
+	testutil.Equal(t, review.Confirmed != nil && review.Confirmed.ID == second.ID, true)
+	testutil.Equal(t, len(review.Runs), 2)
+	testutil.Equal(t, len(review.Submissions), 2)
+	testutil.Equal(t, len(review.ReviewRuns), 2)
+	testutil.Equal(t, len(review.ReviewSubmissions), 2)
+	testutil.Equal(t, review.ReviewSubmissions[1].ID, fourth.SubmissionID)
 }

@@ -59,6 +59,21 @@ func (h history) inScope(scope string) []model.Submission {
 	return out
 }
 
+// split divides the history at a submission index: the submissions before it
+// with their runs, and the rest with theirs. Reviews and operations stay with
+// the first part.
+func (h history) split(at int) (history, history) {
+	a := history{subs: h.subs[:at], runs: map[string][]model.GradingRun{}, reviews: h.reviews, ops: h.ops}
+	b := history{subs: h.subs[at:], runs: map[string][]model.GradingRun{}}
+	for _, sub := range a.subs {
+		a.runs[sub.ID] = h.runs[sub.ID]
+	}
+	for _, sub := range b.subs {
+		b.runs[sub.ID] = h.runs[sub.ID]
+	}
+	return a, b
+}
+
 func (h history) hasRun(runID string) bool {
 	for _, runs := range h.runs {
 		for _, r := range runs {
@@ -349,18 +364,27 @@ func findProblem(rec model.SessionRecord, id string) (model.FrozenProblem, bool)
 // retryProvable decides whether a retry may go on: only if the submission
 // recorded fingerprints and the answer still has exactly those (spec 9.1:
 // retry is a technical retry of an unchanged answer; anything else is a new
-// submission). Nothing is recorded by a refusal.
-func retryProvable(sub model.Submission, now map[string]string, nowErr error, p gradePlan) error {
+// submission). Nothing is recorded by a refusal. With open false (a mock exam
+// whose details are not open) the messages name no fingerprint key and no
+// cause: keys and capture errors name the objects, files and criteria that
+// are graded (spec 9.2), so only the problems are named.
+func retryProvable(sub model.Submission, now map[string]string, nowErr error, p gradePlan, open bool) error {
 	resubmit := gradeCommand(p.scope, "--resubmit")
 	switch {
 	case len(sub.InputHashes) == 0:
 		return fmt.Errorf("%w: no fingerprint of the answer was recorded with the submission, so nothing can show it is unchanged; run %s to submit again", ErrRetryNotProvable, resubmit)
+	case nowErr != nil && !open:
+		return fmt.Errorf("%w: the answer cannot be fingerprinted now (the cluster or the workspace did not answer); retry when it does, or run %s", ErrRetryNotProvable, resubmit)
 	case nowErr != nil:
 		return fmt.Errorf("%w: the answer cannot be fingerprinted now (%v); retry when the cluster answers, or run %s", ErrRetryNotProvable, nowErr, resubmit)
 	}
 	changed := changedInputs(sub.InputHashes, now)
 	if len(changed) == 0 {
 		return nil
+	}
+	if !open {
+		return fmt.Errorf("%w: the answer of %s differs from the submission; a retry only grades an unchanged answer again, run %s to submit the changed one",
+			ErrAnswerChanged, strings.Join(changedProblems(changed), ", "), resubmit)
 	}
 	shown := changed
 	if len(shown) > 5 {

@@ -29,10 +29,17 @@ const solutionDir = "solution/"
 // later submission also records the problems that had been seen
 // (Submission.ViewedSolutions).
 //
-// Confirmed is the one result a total may be shown for: the newest run of the
-// scope, only if it is complete, no grading of the scope is unfinished, and,
-// for a whole session or a mock exam, the session is COMPLETED. It is nil
-// while anything is incomplete or pending, whatever Runs holds.
+// Confirmed is the one result a total may be shown for. For a mock exam it is
+// the exam result: the first complete run of a whole-exam submission (narrowed
+// to the asked problem), whatever happened after it; submissions made after
+// it are review submissions (ReviewSubmissions, ReviewRuns) and never replace
+// it (spec 9.2). For practice it is the newest run of the scope, only if it is
+// complete, no grading of the scope is unfinished, and, for the whole session,
+// the session is COMPLETED. It is nil while anything is incomplete or pending,
+// whatever Runs holds.
+//
+// While a mock exam's details are not open, Submissions carry no
+// InputHashes: their keys name the objects and files the criteria read.
 type Review struct {
 	State                          string
 	Runs                           []model.GradingRun
@@ -43,18 +50,45 @@ type Review struct {
 	// Pending is every unfinished grading of the session, with how to
 	// recover.
 	Pending []Pending
+	// ReviewSubmissions and ReviewRuns are, for a mock exam, the
+	// submissions made after the exam already had its complete result, and
+	// their runs: review attempts made with the results (and possibly the
+	// solutions) in view. They are shown apart and never become the exam
+	// total. Empty for practice sessions.
+	ReviewSubmissions []model.Submission
+	ReviewRuns        []model.GradingRun
 }
 
 // detailsOpen reports whether criterion details and the answer may be shown
 // (spec 9.2). A mock exam shows neither until the whole exam is submitted and
-// graded without an ERROR, i.e. the session is COMPLETED (a COMPLETED session
-// always has a complete result: the store refuses anything else). Practice
-// shows them whenever they are asked for.
-func detailsOpen(rec model.SessionRecord) bool {
+// graded without an ERROR, i.e. it has an exam result (examResult); from then
+// on they stay open, whatever a later review submission does to the session's
+// state. Practice shows them whenever they are asked for.
+func detailsOpen(rec model.SessionRecord, hist history) bool {
 	if rec.Mode == model.ModeMock {
-		return rec.State == model.StateCompleted
+		_, run := examResult(hist)
+		return run != nil
 	}
 	return true
+}
+
+// examResult is a mock exam's result: the first complete run of a
+// whole-exam submission, in recording order, and the index of its submission
+// in hist.subs (-1 and nil while there is none). A submission after that
+// index is a review submission.
+func examResult(hist history) (int, *model.GradingRun) {
+	for i, sub := range hist.subs {
+		if sub.ProblemID != "" {
+			continue
+		}
+		for _, r := range hist.runs[sub.ID] {
+			if r.Evaluation.Complete {
+				r := r
+				return i, &r
+			}
+		}
+	}
+	return -1, nil
 }
 
 // withheld is a run without the parts that reveal what was checked: results,
@@ -109,12 +143,22 @@ func (s *Service) Review(ctx context.Context, sessionID, problemID string, solut
 		return Review{}, err
 	}
 
-	open := detailsOpen(rec)
+	open := detailsOpen(rec, hist)
 	rv := Review{State: rec.State, Pending: s.pending(rec, hist)}
-	rv.Submissions, rv.Runs = scopeOf(rec, hist, problemID)
+	examHist, reviewHist := hist, history{}
+	if rec.Mode == model.ModeMock {
+		if i, run := examResult(hist); run != nil {
+			examHist, reviewHist = hist.split(i + 1)
+		}
+	}
+	rv.Submissions, rv.Runs = scopeOf(rec, examHist, problemID)
+	rv.ReviewSubmissions, rv.ReviewRuns = scopeOf(rec, reviewHist, problemID)
 	if !open {
 		for i, r := range rv.Runs {
 			rv.Runs[i] = withheld(r)
+		}
+		for i := range rv.Submissions {
+			rv.Submissions[i].InputHashes = nil
 		}
 	}
 	rv.Confirmed = confirmed(rec, hist, rv.Pending, problemID)
@@ -225,9 +269,17 @@ func narrow(rec model.SessionRecord, run model.GradingRun, problemID string) mod
 	return run
 }
 
-// confirmed is the newest run of the scope if a total may be shown for it
-// (see Review).
+// confirmed is the result a total may be shown for (see Review): a mock
+// exam's exam result, else the newest run of the scope.
 func confirmed(rec model.SessionRecord, hist history, pending []Pending, problemID string) *model.GradingRun {
+	if rec.Mode == model.ModeMock {
+		_, run := examResult(hist)
+		if run != nil && problemID != "" {
+			narrowed := narrow(rec, *run, problemID)
+			run = &narrowed
+		}
+		return run
+	}
 	for _, p := range pending {
 		// A request that recorded nothing changes no result and hides none.
 		if p.Recorded && (p.ProblemID == "" || p.ProblemID == problemID) {

@@ -209,7 +209,7 @@ func (s *Service) Grade(ctx context.Context, sessionID string, opts GradeOptions
 		var stopped *interruptedError
 		switch {
 		case errors.As(err, &already) && already.run != nil:
-			return s.disclosed(rec, *already.run), err
+			return s.disclosed(rec, hist, *already.run), err
 		case errors.As(err, &stopped):
 			return model.GradingRun{}, s.interrupted(rec, hist, stopped.scope)
 		}
@@ -297,7 +297,7 @@ func (s *Service) execute(ctx context.Context, rec model.SessionRecord, hist his
 		capErr = errors.New("no input of the answer was found to fingerprint")
 	}
 	if p.retry {
-		if err := retryProvable(p.sub, baseline, capErr, p); err != nil {
+		if err := retryProvable(p.sub, baseline, capErr, p, detailsOpen(rec, hist)); err != nil {
 			return model.GradingRun{}, err
 		}
 	}
@@ -401,7 +401,7 @@ func (s *Service) execute(ctx context.Context, rec model.SessionRecord, hist his
 	_ = s.cfg.Store.PutOperation(saveCtx, op) // the run exists, so the grading counts as finished either way
 
 	rec.State = to
-	out := s.disclosed(rec, run)
+	out := s.disclosed(rec, hist, run)
 	if err := ctx.Err(); err != nil {
 		return out, fmt.Errorf("session: grading was interrupted and is recorded as incomplete: %w", err)
 	}
@@ -603,10 +603,10 @@ func solveTiming(rec model.SessionRecord, at time.Time) (solve, overtime time.Du
 }
 
 // disclosed is the run as the learner may see it now: a mock exam's
-// incomplete run shows no criterion detail (spec 9.2), everything else is as
-// stored.
-func (s *Service) disclosed(rec model.SessionRecord, run model.GradingRun) model.GradingRun {
-	if detailsOpen(rec) || run.Evaluation.Complete {
+// incomplete run shows no criterion detail (spec 9.2) until the exam has its
+// complete result, everything else is as stored.
+func (s *Service) disclosed(rec model.SessionRecord, hist history, run model.GradingRun) model.GradingRun {
+	if detailsOpen(rec, hist) || run.Evaluation.Complete {
 		return run
 	}
 	return withheld(run)

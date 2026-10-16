@@ -175,3 +175,148 @@ func TestReviewNotYetSupported(t *testing.T) {
 	_, err = h.svc.Grade(ctx, id, session.GradeOptions{At: at(10, 0)})
 	testutil.ErrorIs(t, err, session.ErrNotRunning)
 }
+
+// TestMockExamResultIsTheFirstCompleteRun (spec 9.2): a mock exam's result is
+// the first whole-exam submission that was graded completely. A submission
+// after it (made once the results and solutions could be seen) is a review
+// submission: listed apart, never the exam total, and an ERROR in it hides
+// nothing that was already open.
+func TestMockExamResultIsTheFirstCompleteRun(t *testing.T) {
+	h := newHarness(t)
+	id := h.startedMock()
+	ids := h.frozenIDs(id)
+
+	h.answer(initialEvaluation) // a partial answer
+	exam, err := h.svc.Grade(ctx, id, session.GradeOptions{At: at(10, 0)})
+	testutil.NoError(t, err)
+	testutil.Equal(t, exam.Evaluation.Complete, true)
+	testutil.Equal(t, *exam.Evaluation.Score < exam.Evaluation.MaxScore, true)
+
+	// The learner opens a solution, fixes everything and submits again.
+	_, err = h.svc.Review(ctx, id, ids[0], true)
+	testutil.NoError(t, err)
+	h.answer(nil)
+	fixed, err := h.svc.Grade(ctx, id, session.GradeOptions{Resubmit: true, At: at(10, 30)})
+	testutil.NoError(t, err)
+	testutil.Equal(t, fixed.Evaluation.Complete, true)
+	testutil.Equal(t, *fixed.Evaluation.Score, fixed.Evaluation.MaxScore)
+
+	review, err := h.svc.Review(ctx, id, "", false)
+	testutil.NoError(t, err)
+	testutil.Equal(t, review.Confirmed != nil && review.Confirmed.ID == exam.ID, true)
+	testutil.Equal(t, *review.Confirmed.Evaluation.Score, *exam.Evaluation.Score)
+	testutil.Equal(t, len(review.Submissions), 1)
+	testutil.Equal(t, review.Submissions[0].ID, exam.SubmissionID)
+	testutil.Equal(t, len(review.Runs), 1)
+	testutil.Equal(t, len(review.ReviewSubmissions), 1)
+	testutil.Equal(t, review.ReviewSubmissions[0].ID, fixed.SubmissionID)
+	testutil.Equal(t, len(review.ReviewRuns), 1)
+	testutil.Equal(t, review.ReviewRuns[0].ID, fixed.ID)
+
+	// One problem: the exam's own result for it.
+	one, err := h.svc.Review(ctx, id, ids[1], false)
+	testutil.NoError(t, err)
+	testutil.Equal(t, one.Confirmed != nil && one.Confirmed.ID == exam.ID, true)
+
+	// A review submission that ends in ERROR re-hides nothing.
+	h.answerOnly(ids[2], erroredEvaluation)
+	broken, err := h.svc.Grade(ctx, id, session.GradeOptions{Resubmit: true, At: at(10, 40)})
+	testutil.NoError(t, err)
+	testutil.Equal(t, broken.Evaluation.Complete, false)
+	testutil.Equal(t, len(broken.Evaluation.Results) > 0, true) // details stay open
+	testutil.Equal(t, h.state(id), model.StateGradingError)
+	review, err = h.svc.Review(ctx, id, "", false)
+	testutil.NoError(t, err)
+	testutil.Equal(t, review.Confirmed != nil && review.Confirmed.ID == exam.ID, true)
+	testutil.Equal(t, len(review.ReviewSubmissions), 2)
+	for _, r := range append(review.Runs, review.ReviewRuns...) {
+		testutil.Equal(t, len(r.Evaluation.Results) > 0, true)
+	}
+	opened, err := h.svc.Review(ctx, id, ids[1], true)
+	testutil.NoError(t, err)
+	testutil.Equal(t, opened.Explanation != "", true)
+}
+
+// TestMockExamSubmissionChainBeforeCompletion: before the exam has a complete
+// result, a resubmission (after an ERROR) is still the exam: the first
+// complete run of the chain is the exam result.
+func TestMockExamSubmissionChainBeforeCompletion(t *testing.T) {
+	h := newHarness(t)
+	id := h.startedMock()
+	ids := h.frozenIDs(id)
+	h.answerOnly(ids[0], erroredEvaluation)
+	first, err := h.svc.Grade(ctx, id, session.GradeOptions{At: at(10, 0)})
+	testutil.NoError(t, err)
+	testutil.Equal(t, first.Evaluation.Complete, false)
+	h.answer(nil)
+	second, err := h.svc.Grade(ctx, id, session.GradeOptions{Resubmit: true, At: at(10, 5)})
+	testutil.NoError(t, err)
+	testutil.Equal(t, second.Evaluation.Complete, true)
+	review, err := h.svc.Review(ctx, id, "", false)
+	testutil.NoError(t, err)
+	testutil.Equal(t, review.Confirmed != nil && review.Confirmed.ID == second.ID, true)
+	testutil.Equal(t, len(review.Submissions), 2)
+	testutil.Equal(t, len(review.ReviewSubmissions), 0)
+}
+
+// TestMockHidesWhatIsGradedUntilDetailsOpen (spec 9.2): the fingerprint keys
+// of a submission name the objects and files the criteria read. A mock exam
+// shows none of them, in a review or in a refused retry, before its result is
+// open.
+func TestMockHidesWhatIsGradedUntilDetailsOpen(t *testing.T) {
+	keyish := []string{"object:", "file:", "Deployment/", "answer.yaml"}
+	h := newHarness(t)
+	id := h.startedMock()
+	ids := h.frozenIDs(id)
+	h.answerOnly(ids[2], erroredEvaluation)
+	_, err := h.svc.Grade(ctx, id, session.GradeOptions{At: at(10, 0)})
+	testutil.NoError(t, err)
+	testutil.Equal(t, h.state(id), model.StateGradingError)
+
+	review, err := h.svc.Review(ctx, id, "", false)
+	testutil.NoError(t, err)
+	testutil.Equal(t, len(review.Submissions), 1)
+	testutil.Equal(t, len(review.Submissions[0].InputHashes), 0)
+	for _, p := range ids {
+		r, _ := h.svc.Review(ctx, id, p, false)
+		requireNone(t, "a locked review", fmt.Sprintf("%+v", r), keyish)
+	}
+
+	// The answer changed: the refusal says so without naming what is graded.
+	h.inputs.change(ids[0])
+	_, err = h.svc.Grade(ctx, id, session.GradeOptions{Retry: true, At: at(10, 2)})
+	testutil.ErrorIs(t, err, session.ErrAnswerChanged)
+	requireNone(t, "the changed-answer refusal", err.Error(), keyish)
+	if !strings.Contains(err.Error(), ids[0]) {
+		t.Errorf("the refusal should name the changed problem: %v", err)
+	}
+	// The answer cannot be fingerprinted now: the cause (which names a
+	// criterion and an object) is not shown either.
+	h.inputs.setErr(fmt.Errorf("fingerprint inputs of criterion %q: object:apps/v1/Deployment/ns/web: etcd timeout", "web-replicas"))
+	_, err = h.svc.Grade(ctx, id, session.GradeOptions{Retry: true, At: at(10, 3)})
+	testutil.ErrorIs(t, err, session.ErrRetryNotProvable)
+	requireNone(t, "the unprovable-retry refusal", err.Error(), append(keyish, "web-replicas"))
+
+	// Once the exam has a complete result, its details (and the keys) open.
+	h.inputs.setErr(nil)
+	h.answer(nil)
+	_, err = h.svc.Grade(ctx, id, session.GradeOptions{Resubmit: true, At: at(10, 5)})
+	testutil.NoError(t, err)
+	review, err = h.svc.Review(ctx, id, "", false)
+	testutil.NoError(t, err)
+	testutil.Equal(t, len(review.Submissions[len(review.Submissions)-1].InputHashes) > 0, true)
+
+	// Practice shows the keys: its details are open on request.
+	hp := newHarness(t)
+	pid := hp.startedPractice()
+	pids := hp.frozenIDs(pid)
+	hp.answerOnly(pids[0], erroredEvaluation)
+	_, err = hp.svc.Grade(ctx, pid, session.GradeOptions{ProblemID: pids[0], At: at(9, 0)})
+	testutil.NoError(t, err)
+	hp.inputs.change(pids[0])
+	_, err = hp.svc.Grade(ctx, pid, session.GradeOptions{ProblemID: pids[0], Retry: true, At: at(9, 1)})
+	testutil.ErrorIs(t, err, session.ErrAnswerChanged)
+	if !strings.Contains(err.Error(), "object:") {
+		t.Errorf("practice should name the changed input: %v", err)
+	}
+}
