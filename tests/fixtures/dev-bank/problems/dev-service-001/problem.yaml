@@ -1,0 +1,58 @@
+# Development fixture 4 of 5 (not product content): a Service to create.
+schema_version: 1
+id: dev-service-001
+version: 1.0.0
+title: Expose the web app with a Service
+domain: networking
+difficulty: easy
+type: build
+tags: [service]
+competencies:
+  - "Provide and troubleshoot access to applications via services"
+capabilities: []
+namespace: dev-svc
+budget:
+  cpu: 50m
+  memory: 32Mi
+criteria:
+  - id: notes-exists
+    kind: resource
+    feedback: "notes ConfigMap이 그대로 남아 있는지 확인하세요."
+    target: {api_version: v1, kind: ConfigMap, namespace: dev-svc, name: notes}
+    points: 1
+  - id: service-exists
+    kind: resource
+    feedback: "web Service가 있는지 확인하세요."
+    target: {api_version: v1, kind: Service, namespace: dev-svc, name: web}
+    points: 2
+  - id: service-port
+    kind: field
+    feedback: "Service의 포트 설정을 확인하세요."
+    target: {api_version: v1, kind: Service, namespace: dev-svc, name: web}
+    points: 3
+    depends_on: [service-exists]
+    args:
+      fields:
+        - path: spec.ports[0].port
+          equals: 8080
+setup:
+  - kind: apply
+    args: {path: setup/notes.yaml}
+solution:
+  - kind: apply
+    args: {path: solution/service.yaml}
+initial_expected:
+  notes-exists: PASS
+  service-exists: FAIL
+  service-port: FAIL
+initial_score: 1
+cases:
+  - id: wrong-port
+    actions:
+      - kind: apply
+        args: {path: cases/wrong-port.yaml}
+    expected:
+      notes-exists: PASS
+      service-exists: PASS
+      service-port: FAIL
+    expected_score: 3

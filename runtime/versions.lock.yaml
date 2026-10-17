@@ -26,6 +26,14 @@ tools:
     version: "v0.33.0"
     # kind v0.33.0 defaults its node image to this Kubernetes release.
     kubernetes_node_version: "v1.37.0"
+    # Node image pinned by digest (multi-arch index). Provenance, checked on
+    # 2026-10-15: identical to kind v0.33.0's built-in default
+    # (pkg/apis/config/defaults/image.go at tag v0.33.0, and the string
+    # embedded in the checksum-verified kind binary above), and to the
+    # RepoDigest of the image pulled on the dev host. JunKloud always passes
+    # this exact reference to `kind create cluster --image`;
+    # internal/environment.DefaultNodeImage must equal it (unit-tested).
+    node_image: "kindest/node:v1.37.0@sha256:a1ed56cfb0e7b93589bdf97c8cd566405a265939e3620fc4f5de89adff580ae5"
     source: "https://github.com/kubernetes-sigs/kind/releases/download/v0.33.0/kind-linux-{arch}"
     checksums:
       linux/amd64: "aee6151561422756b764a4ae28e7f44cda5af5a9eead3cc9985112b1de8d8e0d"
@@ -78,3 +86,83 @@ tools:
     checksums:
       linux/amd64: "4fe4cc38adf48169132749b6ca22a990928db0118e3407584ee553723115d287"
       linux/arm64: "38e890e1a162bfdbf32fbe91404991dc4fc28e55b0de901b34374a061bab4d2c"
+
+# Shared platform components the environment installs and the doctor
+# verifies (internal/environment; capabilities dns, service, network-policy,
+# ingress, storage, metrics, image-build). Every image is pinned by tag AND
+# by the digest of its multi-arch index; `platforms` lists the per-platform
+# manifest digests read from that index on 2026-10-15 with
+# `docker buildx imagetools inspect --raw <tag>@<digest>` (both linux/amd64
+# and linux/arm64 are published natively; JunKloud never relies on
+# emulation). On the same day `docker buildx imagetools inspect <tag>`
+# resolved every tag to the digest recorded here.
+#
+# Node images (`runs_on: node`) are preloaded into the kind node, because
+# nodes never pull: `docker pull --platform linux/<arch> <tag>@<digest>`,
+# `docker tag <tag>@<digest> <tag>`, `docker save --platform linux/<arch>
+# <tag>`, `kind load image-archive`. Host images (`runs_on: host`) run on
+# the shared Docker engine and are pulled the same way (by digest, then
+# tagged). internal/environment mirrors these values in Go constants; a unit
+# test keeps them equal.
+#
+# Built into the pinned kind node image (tools.kind.node_image) and so pinned
+# transitively by its digest, not listed separately: CoreDNS (dns), kindnetd
+# with its kube-network-policies engine (network-policy), and the
+# local-path-provisioner with its default StorageClass `standard` (storage).
+platform:
+  cloud_provider_kind:
+    # Ingress (and LoadBalancer/Gateway) for kind, per kind's documented
+    # cloud-provider-kind (v0.9+) path. Runs as a JunKloud-managed container
+    # on the `kind` network with the Docker socket mounted.
+    version: "v0.12.0"
+    image: "registry.k8s.io/cloud-provider-kind/cloud-controller-manager:v0.12.0"
+    digest: "sha256:1b97632e5dfec8f83c7e970cf18cedb9e6b707e272011d712cabf6ab59d323c9"
+    runs_on: host
+    platforms:
+      linux/amd64: "sha256:4473e552af41f382509bed64561f710451b932a33c90843ae9b4c13237db3ed9"
+      linux/arm64: "sha256:934ae659abe557c98ed42a353703a33421e7d8ef119d8c8b832434b41167ae3a"
+  envoy_proxy:
+    # The proxy image cloud-provider-kind v0.12.0 starts for each Gateway /
+    # Ingress (pkg/constants DefaultProxyImageName at tag v0.12.0, and the
+    # output of `cloud-provider-kind list-images`). Pre-pulled so that
+    # cloud-provider-kind never pulls an unpinned image itself.
+    version: "v1.33.2"
+    image: "docker.io/envoyproxy/envoy:v1.33.2"
+    digest: "sha256:e2baf0b155d0f54881b54621fdd997e3ec81dc6454f299d4e590afe18256a176"
+    runs_on: host
+    platforms:
+      linux/amd64: "sha256:76b95f99699e19dee39c263bdec895322424e4fc0ac8abafc6a4d0f3b234422a"
+      linux/arm64: "sha256:088e1dc146db8d3f04d0b0b5b148546c32fa4701ac0fab3c082d0dedc16a847b"
+  metrics_server:
+    # Manifest vendored byte-for-byte at runtime/platform/metrics-server/
+    # components.yaml from the release asset below; its container args equal
+    # manifests/base/deployment.yaml at tag v0.9.0 (checked 2026-10-15). The
+    # file stays unmodified; when applying it JunKloud adds ownership labels
+    # and keeps TLS verified on both hops: kubelet TLS (no
+    # --kubelet-insecure-tls; kubelets get CA-signed serving certificates
+    # through serverTLSBootstrap and JunKloud approves only its own nodes'
+    # kubelet-serving CSRs), and API server -> metrics-server TLS (the
+    # upstream APIService's insecureSkipTLSVerify is replaced by a caBundle;
+    # metrics-server serves a certificate from a JunKloud-generated CA,
+    # stored in kube-system/junkloud-metrics-server-tls).
+    version: "v0.9.0"
+    manifest: "runtime/platform/metrics-server/components.yaml"
+    manifest_source: "https://github.com/kubernetes-sigs/metrics-server/releases/download/v0.9.0/components.yaml"
+    manifest_sha256: "1cec29a5267809306a2c6ec74a3e449abbb705b4a8beed0c8a1963910f72c79b"
+    image: "registry.k8s.io/metrics-server/metrics-server:v0.9.0"
+    digest: "sha256:d9862115e7c7881280d3d75ca26bda8ffc0fc213315979575bf23ce9826205c0"
+    runs_on: node
+    platforms:
+      linux/amd64: "sha256:25d291fde59974547bac6f07fa9d6cf6f5bedd1f19d60c893311c5e741e0a42f"
+      linux/arm64/v8: "sha256:d0341e07a1cf2b751e684cba68e2a0c62d3c5d2d23501fd67dc384d517ec65de"
+  probe_image:
+    # Image of every doctor probe pod (HTTP server, DNS/HTTP clients, PVC
+    # writer/reader) and the base of the image-build probe
+    # (runtime/platform/probes/image-build/Dockerfile).
+    version: "1.37.0"
+    image: "docker.io/library/busybox:1.37.0"
+    digest: "sha256:bdf57e528e45e4433820e045b29b4597825a1c9e38353532d90a01445013f82e"
+    runs_on: node
+    platforms:
+      linux/amd64: "sha256:66a6306db78bf2dbf3487f293aa8d6990d8e506fdffab9cc43fe422becf886e4"
+      linux/arm64/v8: "sha256:d82c2ab94640ded77cf76514ce6a84870761105058a4a9e51b05a8a79be97a6c"

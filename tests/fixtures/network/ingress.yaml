@@ -1,0 +1,15 @@
+# Ingress routing /web to Service web (served by the environment's default
+# ingress controller).
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: web
+spec:
+  rules:
+  - host: web.jk.test
+    http:
+      paths:
+      - path: /
+        pathType: Prefix
+        backend:
+          service: {name: web, port: {number: 80}}

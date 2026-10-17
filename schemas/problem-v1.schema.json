@@ -1,0 +1,148 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/JunYupK/JunKloud/schemas/problem-v1.schema.json",
+  "title": "JunKloud problem definition, schema version 1",
+  "description": "problem.yaml after strict YAML-to-JSON conversion. Parameter references are written ${name} inside string values. Per-kind args are validated by the checker or action that owns the kind.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version", "id", "version", "title", "domain", "difficulty", "type",
+    "competencies", "namespace", "budget", "criteria", "solution",
+    "initial_expected", "initial_score"
+  ],
+  "properties": {
+    "schema_version": { "const": 1 },
+    "id": { "$ref": "#/$defs/id" },
+    "version": { "type": "string", "pattern": "^[0-9]+\\.[0-9]+\\.[0-9]+$" },
+    "title": { "type": "string", "minLength": 1, "maxLength": 200 },
+    "domain": {
+      "enum": ["design-build", "deployment", "observability", "environment-security", "networking"]
+    },
+    "difficulty": { "enum": ["easy", "medium", "hard"] },
+    "type": { "enum": ["build", "modify", "troubleshoot", "behavioral"] },
+    "tags": { "type": "array", "uniqueItems": true, "items": { "$ref": "#/$defs/id" } },
+    "competencies": {
+      "type": "array", "minItems": 1, "uniqueItems": true,
+      "items": { "type": "string", "minLength": 1 }
+    },
+    "capabilities": { "type": "array", "uniqueItems": true, "items": { "$ref": "#/$defs/id" } },
+    "parameters": {
+      "type": "object",
+      "propertyNames": { "pattern": "^[a-z][a-z0-9_]*$" },
+      "additionalProperties": {
+        "type": "array", "minItems": 1, "uniqueItems": true,
+        "items": { "type": ["string", "integer", "boolean"] }
+      }
+    },
+    "namespace": { "type": "string", "minLength": 1 },
+    "scope": {
+      "description": "What setup, solution and cases may create beyond the problem namespace. Absent: only the problem namespace, no cluster-scoped objects.",
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "namespaces": { "type": "array", "uniqueItems": true, "items": { "type": "string", "minLength": 1 } },
+        "cluster_resources": { "type": "array", "items": { "$ref": "#/$defs/cluster_ref" } }
+      }
+    },
+    "budget": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["cpu", "memory"],
+      "properties": {
+        "cpu": { "$ref": "#/$defs/quantity" },
+        "memory": { "$ref": "#/$defs/quantity" }
+      }
+    },
+    "sources": { "type": "array", "uniqueItems": true, "items": { "type": "string", "format": "uri" } },
+    "criteria": { "type": "array", "minItems": 1, "items": { "$ref": "#/$defs/criterion" } },
+    "setup": { "type": "array", "items": { "$ref": "#/$defs/action" } },
+    "solution": { "type": "array", "minItems": 1, "items": { "$ref": "#/$defs/action" } },
+    "initial_expected": { "$ref": "#/$defs/expected" },
+    "initial_score": { "type": "integer", "minimum": 0 },
+    "cases": { "type": "array", "items": { "$ref": "#/$defs/case" } }
+  },
+  "$defs": {
+    "id": { "type": "string", "pattern": "^[a-z0-9]([-a-z0-9]{0,61}[a-z0-9])?$" },
+    "quantity": {
+      "description": "Kubernetes resource quantity, e.g. 250m, 1, 128Mi.",
+      "type": ["string", "integer"],
+      "pattern": "^[0-9]+(\\.[0-9]+)?(m|k|M|G|T|Ki|Mi|Gi|Ti)?$"
+    },
+    "duration": {
+      "description": "Go duration string, e.g. 500ms, 30s, 2m.",
+      "type": "string",
+      "pattern": "^([0-9]+(\\.[0-9]+)?(ms|s|m|h))+$"
+    },
+    "object_ref": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["api_version", "kind", "name"],
+      "properties": {
+        "api_version": { "type": "string", "minLength": 1 },
+        "kind": { "type": "string", "minLength": 1 },
+        "namespace": { "type": "string" },
+        "name": { "type": "string", "minLength": 1 }
+      }
+    },
+    "cluster_ref": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["api_version", "kind", "name"],
+      "properties": {
+        "api_version": { "type": "string", "minLength": 1 },
+        "kind": { "type": "string", "minLength": 1 },
+        "name": { "type": "string", "minLength": 1 }
+      }
+    },
+    "criterion": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "kind", "points", "feedback"],
+      "properties": {
+        "id": { "$ref": "#/$defs/id" },
+        "feedback": {
+          "description": "Korean feedback for the learner (spec 8.1), shown with the criterion's result where the mode discloses results.",
+          "type": "string", "minLength": 1, "maxLength": 500
+        },
+        "kind": {
+          "enum": [
+            "resource", "field", "ready", "http", "tcp", "network-policy", "file", "image",
+            "helm", "kustomize", "logs", "job", "cronjob-template", "cronjob-schedule",
+            "authorization", "security-context"
+          ]
+        },
+        "target": { "$ref": "#/$defs/object_ref" },
+        "points": { "type": "integer", "minimum": 1, "maximum": 100 },
+        "depends_on": { "type": "array", "uniqueItems": true, "items": { "$ref": "#/$defs/id" } },
+        "timeout": { "$ref": "#/$defs/duration" },
+        "args": { "type": "object" }
+      }
+    },
+    "action": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["kind"],
+      "properties": {
+        "kind": { "enum": ["apply", "delete-owned", "helm", "image", "file", "patch"] },
+        "args": { "type": "object" }
+      }
+    },
+    "expected": {
+      "type": "object",
+      "minProperties": 1,
+      "propertyNames": { "$ref": "#/$defs/id" },
+      "additionalProperties": { "enum": ["PASS", "FAIL"] }
+    },
+    "case": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "actions", "expected", "expected_score"],
+      "properties": {
+        "id": { "$ref": "#/$defs/id" },
+        "actions": { "type": "array", "minItems": 1, "items": { "$ref": "#/$defs/action" } },
+        "expected": { "$ref": "#/$defs/expected" },
+        "expected_score": { "type": "integer", "minimum": 0 }
+      }
+    }
+  }
+}

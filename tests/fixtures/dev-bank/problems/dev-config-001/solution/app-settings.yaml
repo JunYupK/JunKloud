@@ -1,0 +1,8 @@
+# DEV-SOLUTION-MARKER-CONFIG
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: app-settings
+  namespace: "${namespace}"
+data:
+  mode: production

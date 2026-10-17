@@ -1,0 +1,9 @@
+# A wrong answer that breaks everything: nobody may reach web, not even the
+# frontend. A "blocked" intruder next to it proves nothing.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: deny-all
+spec:
+  podSelector: {}
+  policyTypes: [Ingress]

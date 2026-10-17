@@ -1,0 +1,10 @@
+# The same result written another way: a JSON patch, flow style, other key order.
+resources: [../base]
+labels: [{pairs: {env: prod}}]
+patches:
+  - target: {kind: Deployment, name: web}
+    patch: |-
+      [{"op": "replace", "path": "/spec/replicas", "value": 2}]
+kind: Kustomization
+namespace: jk-art
+apiVersion: kustomize.config.k8s.io/v1beta1

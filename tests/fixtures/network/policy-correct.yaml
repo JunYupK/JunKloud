@@ -1,0 +1,15 @@
+# The correct answer: only role=frontend pods of this namespace may reach web.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: web-from-frontend
+spec:
+  podSelector:
+    matchLabels: {app: web}
+  policyTypes: [Ingress]
+  ingress:
+  - from:
+    - podSelector:
+        matchLabels: {role: frontend}
+    ports:
+    - {protocol: TCP, port: 8080}

@@ -1,0 +1,51 @@
+# Development fixture 5 of 5 (not product content): harden a ServiceAccount.
+schema_version: 1
+id: dev-sa-001
+version: 1.0.0
+title: Stop the builder ServiceAccount mounting its token
+domain: environment-security
+difficulty: medium
+type: modify
+tags: [serviceaccount, security]
+competencies:
+  - "Understand authentication, authorization and admission control"
+capabilities: []
+namespace: dev-sec
+budget:
+  cpu: 50m
+  memory: 32Mi
+criteria:
+  - id: sa-exists
+    kind: resource
+    feedback: "builder ServiceAccount가 있는지 확인하세요."
+    target: {api_version: v1, kind: ServiceAccount, namespace: dev-sec, name: builder}
+    points: 2
+  - id: sa-no-automount
+    kind: field
+    feedback: "builder ServiceAccount가 토큰을 자동으로 마운트하지 않도록 설정했는지 확인하세요."
+    target: {api_version: v1, kind: ServiceAccount, namespace: dev-sec, name: builder}
+    points: 3
+    depends_on: [sa-exists]
+    args:
+      fields:
+        - path: automountServiceAccountToken
+          equals: false
+setup:
+  - kind: apply
+    args: {path: setup/builder.yaml}
+solution:
+  - kind: apply
+    args: {path: solution/builder.yaml}
+initial_expected:
+  sa-exists: PASS
+  sa-no-automount: FAIL
+initial_score: 2
+cases:
+  - id: other-account
+    actions:
+      - kind: apply
+        args: {path: cases/other-account.yaml}
+    expected:
+      sa-exists: PASS
+      sa-no-automount: FAIL
+    expected_score: 2

@@ -1,0 +1,11 @@
+# REFERENCE-ANSWER-MARKER
+apiVersion: v1
+kind: Service
+metadata:
+  name: "${service_name}"
+  namespace: "${namespace}"
+spec:
+  selector: {app: web}
+  ports:
+    - port: "${port}"
+      targetPort: 80

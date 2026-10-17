@@ -1,0 +1,6 @@
+apiVersion: v2
+name: web
+description: Reviewed fixture chart for the artifact grading tests
+type: application
+version: 0.1.0
+appVersion: "1.0"

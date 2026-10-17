@@ -1,0 +1,25 @@
+# A server that is "up" for Kubernetes (no readiness probe, so its endpoint is
+# Ready) but serves nothing. Used to prove that a blocked path next to a dead
+# server is not a NetworkPolicy pass.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: web
+spec:
+  replicas: 1
+  selector:
+    matchLabels: {app: web}
+  template:
+    metadata:
+      labels: {app: web}
+    spec:
+      securityContext: {runAsNonRoot: true, runAsUser: 65534, seccompProfile: {type: RuntimeDefault}}
+      containers:
+      - name: web
+        image: docker.io/library/busybox:1.37.0
+        imagePullPolicy: IfNotPresent
+        command: [sleep, "3600"]
+        resources:
+          requests: {cpu: 10m, memory: 16Mi}
+          limits: {cpu: 100m, memory: 32Mi}
+        securityContext: {allowPrivilegeEscalation: false, capabilities: {drop: [ALL]}}

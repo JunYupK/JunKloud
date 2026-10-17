@@ -1,0 +1,98 @@
+# Validation fixture: partial credit before any work (2 of 10), full marks for
+# the reference answer (10), 6 for a Deployment with the wrong replica count,
+# and 10 again for an equivalent answer written differently. Uses only the
+# resource, field and ready criteria and the preloaded probe image.
+schema_version: 1
+id: scale-web
+version: 1.0.0
+title: Run the web Deployment with the requested replicas
+domain: deployment
+difficulty: easy
+type: build
+tags: [deployment, scaling]
+competencies:
+  - "Use Kubernetes primitives to implement common deployment strategies"
+capabilities: []
+parameters:
+  namespace: [jk-val-a, jk-val-b]
+  replicas: [2, 3]
+namespace: "${namespace}"
+budget:
+  cpu: 250m
+  memory: 128Mi
+criteria:
+  - id: config-exists
+    kind: resource
+    feedback: "settings ConfigMap이 있는지 확인하세요."
+    target: {api_version: v1, kind: ConfigMap, namespace: "${namespace}", name: settings}
+    points: 2
+  - id: web-exists
+    kind: resource
+    feedback: "web Deployment가 있는지 확인하세요."
+    target: {api_version: apps/v1, kind: Deployment, namespace: "${namespace}", name: web}
+    points: 2
+  - id: web-image
+    kind: field
+    feedback: "web Deployment의 컨테이너 이미지를 확인하세요."
+    target: {api_version: apps/v1, kind: Deployment, namespace: "${namespace}", name: web}
+    points: 2
+    depends_on: [web-exists]
+    args:
+      fields:
+        - path: spec.template.spec.containers[name=web].image
+          equals: busybox:1.37.0
+  - id: web-replicas
+    kind: field
+    feedback: "web Deployment의 replicas 값을 확인하세요."
+    target: {api_version: apps/v1, kind: Deployment, namespace: "${namespace}", name: web}
+    points: 2
+    depends_on: [web-exists]
+    args:
+      fields:
+        - path: spec.replicas
+          equals: "${replicas}"
+  - id: web-ready
+    kind: ready
+    feedback: "web Deployment가 롤아웃을 마치고 재시작 없이 Ready 상태를 유지하는지 확인하세요."
+    target: {api_version: apps/v1, kind: Deployment, namespace: "${namespace}", name: web}
+    points: 2
+    depends_on: [web-exists]
+    timeout: 90s
+    args:
+      replicas: "${replicas}"
+setup:
+  - kind: apply
+    args: {path: setup/config.yaml}
+solution:
+  - kind: apply
+    args: {path: solution/web.yaml}
+initial_expected:
+  config-exists: PASS
+  web-exists: FAIL
+  web-image: FAIL
+  web-replicas: FAIL
+  web-ready: FAIL
+initial_score: 2
+cases:
+  - id: wrong-replicas
+    actions:
+      - kind: apply
+        args: {path: cases/wrong-replicas.yaml}
+    expected:
+      config-exists: PASS
+      web-exists: PASS
+      web-image: PASS
+      web-replicas: FAIL
+      web-ready: FAIL
+    expected_score: 6
+  - id: alt-short-image
+    actions:
+      - kind: apply
+        args: {path: cases/alt-short-image.yaml}
+    expected:
+      config-exists: PASS
+      web-exists: PASS
+      web-image: PASS
+      web-replicas: PASS
+      web-ready: PASS
+    expected_score: 10

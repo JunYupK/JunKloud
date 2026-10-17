@@ -1,0 +1,7 @@
+# DEV-SOLUTION-MARKER-SA
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: builder
+  namespace: dev-sec
+automountServiceAccountToken: false

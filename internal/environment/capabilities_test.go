@@ -1,0 +1,495 @@
+//go:build linux
+
+package environment
+
+import (
+	"crypto/ecdsa"
+	"crypto/elliptic"
+	"crypto/rand"
+	"crypto/sha256"
+	"crypto/x509"
+	"crypto/x509/pkix"
+	"encoding/base64"
+	"encoding/hex"
+	"encoding/pem"
+	"errors"
+	"fmt"
+	"io/fs"
+	"net"
+	"os"
+	"path/filepath"
+	"slices"
+	"strings"
+	"testing"
+	"time"
+
+	certv1 "k8s.io/api/certificates/v1"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
+	"sigs.k8s.io/yaml"
+
+	"github.com/JunYupK/JunKloud/internal/executil"
+	"github.com/JunYupK/JunKloud/internal/model"
+	"github.com/JunYupK/JunKloud/internal/testutil"
+	"github.com/JunYupK/JunKloud/runtime/platform"
+)
+
+type lockImage struct {
+	Version        string            `json:"version"`
+	Image          string            `json:"image"`
+	Digest         string            `json:"digest"`
+	RunsOn         string            `json:"runs_on"`
+	Platforms      map[string]string `json:"platforms"`
+	Manifest       string            `json:"manifest"`
+	ManifestSHA256 string            `json:"manifest_sha256"`
+}
+
+func readPlatformLock(t *testing.T) map[string]lockImage {
+	t.Helper()
+	raw, err := os.ReadFile(filepath.Join("..", "..", "runtime", "versions.lock.yaml"))
+	testutil.NoError(t, err)
+	var lock struct {
+		Platform map[string]lockImage `json:"platform"`
+	}
+	testutil.NoError(t, yaml.Unmarshal(raw, &lock))
+	return lock.Platform
+}
+
+// Every pinned platform image equals the lock entry, is pinned by digest and
+// is published for both target architectures.
+func TestPlatformImagesMatchLock(t *testing.T) {
+	lock := readPlatformLock(t)
+	for key, want := range map[string]struct {
+		img    PinnedImage
+		runsOn string
+	}{
+		"cloud_provider_kind": {CloudProviderKindImage, "host"},
+		"envoy_proxy":         {EnvoyProxyImage, "host"},
+		"metrics_server":      {MetricsServerImage, "node"},
+		"probe_image":         {ProbeImage, "node"},
+	} {
+		img := want.img
+		l, ok := lock[key]
+		if !ok {
+			t.Fatalf("lock has no platform.%s", key)
+		}
+		testutil.Equal(t, img.Name, l.Image)
+		testutil.Equal(t, img.Digest, l.Digest)
+		testutil.NoError(t, img.validate())
+		var amd, arm bool
+		for p := range l.Platforms {
+			amd = amd || p == "linux/amd64"
+			arm = arm || strings.HasPrefix(p, "linux/arm64")
+		}
+		if !amd || !arm {
+			t.Fatalf("platform.%s does not record both linux/amd64 and linux/arm64: %v", key, l.Platforms)
+		}
+		testutil.Equal(t, l.RunsOn, want.runsOn)
+	}
+	testutil.Equal(t, lock["cloud_provider_kind"].Version, CloudProviderKindVersion)
+	testutil.Equal(t, lock["metrics_server"].Version, MetricsServerVersion)
+}
+
+// The vendored metrics-server manifest is byte-for-byte the pinned release
+// asset. The objects JunKloud applies from it reference the pinned image,
+// carry ownership labels and verify TLS on both hops: metrics-server checks
+// kubelet certificates against the cluster CA (no --kubelet-insecure-tls),
+// and the API server checks metrics-server's certificate against a
+// JunKloud CA (caBundle instead of the upstream insecureSkipTLSVerify).
+func TestMetricsServerManifestPinned(t *testing.T) {
+	lock := readPlatformLock(t)
+	raw, err := fs.ReadFile(platform.FS, platform.MetricsServerManifest)
+	testutil.NoError(t, err)
+	sum := sha256.Sum256(raw)
+	testutil.Equal(t, hex.EncodeToString(sum[:]), lock["metrics_server"].ManifestSHA256)
+	testutil.Equal(t, "runtime/platform/"+platform.MetricsServerManifest, lock["metrics_server"].Manifest)
+
+	tlsBundle, err := newMetricsTLS(time.Now())
+	testutil.NoError(t, err)
+	objs, err := platformObjects("0123456789ab", tlsBundle)
+	testutil.NoError(t, err)
+	var kinds []string
+	for _, o := range objs {
+		kinds = append(kinds, o.GetKind())
+		testutil.Equal(t, o.GetLabels()[LabelEnvironmentID], "0123456789ab")
+		testutil.Equal(t, o.GetLabels()[LabelComponent], ComponentPlatform)
+		testutil.Equal(t, o.GetLabels()[LabelManagedBy], ManagedByValue)
+		js := mustJSON(t, o.Object)
+		if strings.Contains(strings.ToLower(js), "insecure") {
+			t.Fatalf("%s %s disables TLS verification: %s", o.GetKind(), o.GetName(), js)
+		}
+		switch o.GetKind() {
+		case "Deployment":
+			for _, want := range []string{`"image":"` + MetricsServerImage.Name + `"`, "--tls-cert-file=", "--tls-private-key-file="} {
+				if !strings.Contains(js, want) {
+					t.Fatalf("metrics-server deployment lacks %s: %s", want, js)
+				}
+			}
+		case "APIService":
+			ca, _, _ := unstructured.NestedString(o.Object, "spec", "caBundle")
+			testutil.Equal(t, ca, base64.StdEncoding.EncodeToString(tlsBundle.caPEM))
+		}
+	}
+	for _, want := range []string{"ServiceAccount", "ClusterRole", "Deployment", "Service", "APIService", "Secret"} {
+		if !slices.Contains(kinds, want) {
+			t.Fatalf("metrics-server objects %v lack %s", kinds, want)
+		}
+	}
+	// The serving certificate names the Service the API server dials and
+	// chains to the CA in the APIService.
+	block, _ := pem.Decode(tlsBundle.certPEM)
+	cert, err := x509.ParseCertificate(block.Bytes)
+	testutil.NoError(t, err)
+	pool := x509.NewCertPool()
+	pool.AppendCertsFromPEM(tlsBundle.caPEM)
+	_, err = cert.Verify(x509.VerifyOptions{DNSName: "metrics-server.kube-system.svc", Roots: pool})
+	testutil.NoError(t, err)
+
+	// The image-build probe context is embedded and builds FROM the probe image.
+	df, err := fs.ReadFile(platform.FS, platform.ImageBuildProbeDir+"/Dockerfile")
+	testutil.NoError(t, err)
+	if !strings.Contains(string(df), "FROM "+ProbeImage.Ref()) {
+		t.Fatalf("image-build probe does not build FROM the pinned probe image:\n%s", df)
+	}
+}
+
+func mustJSON(t *testing.T, v any) string {
+	t.Helper()
+	b, err := yaml.Marshal(v)
+	testutil.NoError(t, err)
+	j, err := yaml.YAMLToJSON(b)
+	testutil.NoError(t, err)
+	return string(j)
+}
+
+func TestPinnedImageValidation(t *testing.T) {
+	good := PinnedImage{Name: "docker.io/library/busybox:1.37.0", Digest: "sha256:" + strings.Repeat("a", 64)}
+	testutil.NoError(t, good.validate())
+	testutil.Equal(t, good.Ref(), "docker.io/library/busybox:1.37.0@sha256:"+strings.Repeat("a", 64))
+	for _, bad := range []PinnedImage{
+		{Name: "--help:1", Digest: good.Digest},
+		{Name: "busybox", Digest: good.Digest},        // no tag
+		{Name: "busybox:latest", Digest: good.Digest}, // floating tag
+		{Name: good.Name, Digest: "sha256:abc"},
+		{Name: good.Name, Digest: ""},
+	} {
+		if err := bad.validate(); !errors.Is(err, ErrInvalidImage) {
+			t.Fatalf("%+v accepted (err %v)", bad, err)
+		}
+	}
+}
+
+// Preloading follows R6: pull the exact digest for the node's platform, tag
+// it, save that platform only and load the archive into this cluster.
+func TestPreloadCommands(t *testing.T) {
+	dir := t.TempDir()
+	fake := &fakeRunner{respond: func(string, []string) (executil.Result, error) { return executil.Result{}, nil }}
+	m := New(dir, openTestStore(t, dir), WithRunner(fake))
+	img := PinnedImage{Name: "docker.io/library/busybox:1.37.0", Digest: "sha256:" + strings.Repeat("b", 64)}
+	testutil.NoError(t, m.preload(bg, "junkloud-0123456789ab", "arm64", img, true))
+	calls := fake.Calls()
+	testutil.Equal(t, len(calls), 4)
+	testutil.Equal(t, calls[0], "docker pull --quiet --platform linux/arm64 "+img.Ref())
+	testutil.Equal(t, calls[1], "docker tag "+img.Ref()+" "+img.Name)
+	if !strings.HasPrefix(calls[2], "docker save --platform linux/arm64 --output ") || !strings.HasSuffix(calls[2], " "+img.Name) {
+		t.Fatalf("save: %s", calls[2])
+	}
+	archive := strings.Fields(calls[2])[5]
+	testutil.Equal(t, calls[3], "kind load image-archive "+archive+" --name junkloud-0123456789ab")
+	if _, err := os.Stat(archive); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("archive %s left behind (%v)", archive, err)
+	}
+
+	// A host image is pulled and tagged but never loaded into the node.
+	fake2 := &fakeRunner{respond: fake.respond}
+	m2 := New(dir, openTestStore(t, t.TempDir()), WithRunner(fake2))
+	testutil.NoError(t, m2.preload(bg, "junkloud-0123456789ab", "amd64", img, false))
+	testutil.Equal(t, fake2.Calls(), []string{
+		"docker pull --quiet --platform linux/amd64 " + img.Ref(),
+		"docker tag " + img.Ref() + " " + img.Name,
+	})
+
+	// An invalid reference never reaches docker.
+	fake3 := &fakeRunner{}
+	m3 := New(dir, openTestStore(t, t.TempDir()), WithRunner(fake3))
+	testutil.ErrorIs(t, m3.preload(bg, "junkloud-0123456789ab", "amd64", PinnedImage{Name: "-x:1", Digest: img.Digest}, true), ErrInvalidImage)
+	testutil.Equal(t, len(fake3.Calls()), 0)
+}
+
+// The kind configuration always asks kubelets for CA-signed serving
+// certificates (so metrics-server can verify them) and keeps host-compat
+// patches opt-in.
+func TestKindConfigServerTLSBootstrap(t *testing.T) {
+	for _, compat := range []HostCompat{HostCompatNone, HostCompatCgroupV1} {
+		cfg := string(kindConfig("0123456789ab", compat))
+		var parsed map[string]any
+		testutil.NoError(t, yaml.Unmarshal([]byte(cfg), &parsed))
+		node := parsed["nodes"].([]any)[0].(map[string]any)
+		patches := node["kubeadmConfigPatches"].([]any)
+		testutil.Equal(t, len(patches), 1)
+		var kubelet map[string]any
+		testutil.NoError(t, yaml.Unmarshal([]byte(patches[0].(string)), &kubelet))
+		testutil.Equal(t, kubelet["kind"], "KubeletConfiguration")
+		testutil.Equal(t, kubelet["serverTLSBootstrap"], true)
+		_, hasCgroup := kubelet["failCgroupV1"]
+		testutil.Equal(t, hasCgroup, compat.Has(HostCompatCgroupV1))
+	}
+}
+
+func TestParseHostCompatSet(t *testing.T) {
+	got, err := ParseHostCompat("no-ipv6,cgroupv1")
+	testutil.NoError(t, err)
+	testutil.Equal(t, got, HostCompat("cgroupv1,no-ipv6"))
+	testutil.Equal(t, got.Has(HostCompatCgroupV1), true)
+	testutil.Equal(t, got.Has(HostCompatNoIPv6), true)
+	testutil.Equal(t, HostCompatCgroupV1.Has(HostCompatNoIPv6), false)
+	testutil.Equal(t, HostCompatNone.Has(HostCompatCgroupV1), false)
+	got, err = ParseHostCompat("cgroupv1,cgroupv1")
+	testutil.NoError(t, err)
+	testutil.Equal(t, got, HostCompatCgroupV1)
+	if _, err := ParseHostCompat("cgroupv1,bogus"); err == nil {
+		t.Fatal("unknown mode accepted")
+	}
+}
+
+// cloud-provider-kind runs from the pinned image, on the kind network, with
+// JunKloud ownership labels, always behind the docker CLI wrapper that
+// scopes it to this environment's cluster; the IPv6 sysctl filter exists
+// only under the explicit no-ipv6 host-compat mode.
+func TestCloudProviderRunArgs(t *testing.T) {
+	args := cloudProviderRunArgs("0123456789ab", HostCompatNone)
+	joined := strings.Join(args, " ")
+	for _, want := range []string{
+		"run --detach --name junkloud-cpk-0123456789ab",
+		"--label " + LabelEnvironmentID + "=0123456789ab",
+		"--label " + LabelManagedBy + "=" + ManagedByValue,
+		"--label " + LabelComponent + "=" + ComponentCloudProvider,
+		"--network kind",
+		"--restart unless-stopped",
+		"--volume /var/run/docker.sock:/var/run/docker.sock",
+		"--entrypoint /bin/sh " + CloudProviderKindImage.Ref() + " -c ",
+		"cluster='junkloud-0123456789ab'",
+		"exec /bin/cloud-provider-kind",
+		" cloud-provider-kind --gateway-channel=standard --enable-default-ingress=true",
+	} {
+		if !strings.Contains(joined, want) {
+			t.Fatalf("cloud-provider-kind args lack %q:\n%s", want, joined)
+		}
+	}
+	for _, bad := range []string{"--privileged", "ipv6"} {
+		if strings.Contains(joined, bad) {
+			t.Fatalf("default cloud-provider-kind args contain %q:\n%s", bad, joined)
+		}
+	}
+	shim := strings.Join(cloudProviderRunArgs("0123456789ab", HostCompat("cgroupv1,no-ipv6")), " ")
+	for _, want := range []string{"--sysctl=net.ipv6.*", "cluster='junkloud-0123456789ab'"} {
+		if !strings.Contains(shim, want) {
+			t.Fatalf("no-ipv6 args lack %q:\n%s", want, shim)
+		}
+	}
+	if configLabel(args) == configLabel(cloudProviderRunArgs("0123456789ab", HostCompatNoIPv6)) {
+		t.Fatal("config label does not change with the run configuration")
+	}
+}
+
+// The docker CLI wrapper, run for real with a stub docker: cluster-wide
+// listings cloud-provider-kind makes (kind's cluster discovery, its
+// load-balancer cleanup) are narrowed to the owned cluster; everything else
+// passes through unchanged, argument boundaries intact; IPv6 sysctls are
+// dropped only in no-ipv6 mode.
+func TestCloudProviderDockerWrapper(t *testing.T) {
+	dir := t.TempDir()
+	stub := filepath.Join(dir, "docker-stub")
+	testutil.NoError(t, os.WriteFile(stub, []byte("#!/bin/sh\nfor a do printf '%s\\n' \"$a\"; done\n"), 0o755))
+	run := func(compat HostCompat, args ...string) []string {
+		t.Helper()
+		wrapper := filepath.Join(dir, "docker")
+		testutil.NoError(t, os.WriteFile(wrapper, []byte(cloudProviderDockerWrapper("junkloud-0123456789ab", compat, stub)), 0o755))
+		res, err := executil.Run(bg, wrapper, args, nil)
+		testutil.NoError(t, err)
+		return strings.Split(strings.TrimSuffix(string(res.Stdout), "\n"), "\n")
+	}
+	const owned = "junkloud-0123456789ab"
+	// kind ListClusters (sigs.k8s.io/kind v0.33.0 docker provider).
+	testutil.Equal(t, run(HostCompatNone, "ps", "-a", "--filter", "label=io.x-k8s.kind.cluster", "--format", `{{.Label "io.x-k8s.kind.cluster"}}`),
+		[]string{"ps", "-a", "--filter", "label=io.x-k8s.kind.cluster=" + owned, "--format", `{{.Label "io.x-k8s.kind.cluster"}}`})
+	// cloud-provider-kind's final cleanup of every load balancer container.
+	testutil.Equal(t, run(HostCompatNone, "ps", "-a", "--filter", "label=io.x-k8s.cloud-provider-kind.cluster", "--format", "{{.ID }}"),
+		[]string{"ps", "-a", "--filter", "label=io.x-k8s.cloud-provider-kind.cluster=" + owned, "--format", "{{.ID }}"})
+	testutil.Equal(t, run(HostCompatNone, "ps", "--filter=label=io.x-k8s.kind.cluster"),
+		[]string{"ps", "--filter=label=io.x-k8s.kind.cluster=" + owned})
+	// Per-cluster calls and labels with values pass through untouched.
+	pass := []string{"run", "--label", "io.x-k8s.cloud-provider-kind.cluster=" + owned, "--sysctl=net.ipv6.conf.all.forwarding=1", "a b", ""}
+	testutil.Equal(t, run(HostCompatNone, pass...), pass)
+	testutil.Equal(t, run(HostCompatNoIPv6, pass...), []string{"run", "--label", "io.x-k8s.cloud-provider-kind.cluster=" + owned, "a b", ""})
+}
+
+func configLabel(args []string) string {
+	for i, a := range args {
+		if a == "--label" && strings.HasPrefix(args[i+1], labelConfig+"=") {
+			return args[i+1]
+		}
+	}
+	return ""
+}
+
+// Only kubelet-serving CSRs requested by one of this environment's nodes for
+// exactly that node's names and addresses are approved.
+func TestKubeletServingCSRValidation(t *testing.T) {
+	nodes := map[string]nodeNames{"junkloud-x-control-plane": {dns: []string{"junkloud-x-control-plane"}, ips: []string{"172.18.0.2"}}}
+	good := func() *certv1.CertificateSigningRequest {
+		return testCSR(t, "system:node:junkloud-x-control-plane", "system:node:junkloud-x-control-plane", []string{"system:nodes"},
+			[]string{"junkloud-x-control-plane"}, []string{"172.18.0.2"},
+			[]certv1.KeyUsage{certv1.UsageDigitalSignature, certv1.UsageServerAuth})
+	}
+	testutil.NoError(t, validKubeletServingCSR(good(), nodes))
+
+	cases := map[string]func(c *certv1.CertificateSigningRequest){
+		"other signer": func(c *certv1.CertificateSigningRequest) {
+			c.Spec.SignerName = certv1.KubeAPIServerClientKubeletSignerName
+		},
+		"foreign node":  func(c *certv1.CertificateSigningRequest) { c.Spec.Username = "system:node:someone-else" },
+		"not a node":    func(c *certv1.CertificateSigningRequest) { c.Spec.Username = "kubernetes-admin" },
+		"no node group": func(c *certv1.CertificateSigningRequest) { c.Spec.Groups = []string{"system:authenticated"} },
+		"client usage": func(c *certv1.CertificateSigningRequest) {
+			c.Spec.Usages = append(c.Spec.Usages, certv1.UsageClientAuth)
+		},
+		"already approved": func(c *certv1.CertificateSigningRequest) {
+			c.Status.Conditions = []certv1.CertificateSigningRequestCondition{{Type: certv1.CertificateApproved, Status: "True"}}
+		},
+	}
+	for name, mutate := range cases {
+		c := good()
+		mutate(c)
+		if err := validKubeletServingCSR(c, nodes); err == nil {
+			t.Fatalf("%s: CSR accepted", name)
+		}
+	}
+	for name, c := range map[string]*certv1.CertificateSigningRequest{
+		"foreign SAN IP": testCSR(t, "system:node:junkloud-x-control-plane", "system:node:junkloud-x-control-plane", []string{"system:nodes"},
+			[]string{"junkloud-x-control-plane"}, []string{"10.0.0.9"}, []certv1.KeyUsage{certv1.UsageServerAuth}),
+		"foreign SAN DNS": testCSR(t, "system:node:junkloud-x-control-plane", "system:node:junkloud-x-control-plane", []string{"system:nodes"},
+			[]string{"evil.example"}, []string{"172.18.0.2"}, []certv1.KeyUsage{certv1.UsageServerAuth}),
+		"CN mismatch": testCSR(t, "system:node:junkloud-x-control-plane", "system:node:other", []string{"system:nodes"},
+			[]string{"junkloud-x-control-plane"}, []string{"172.18.0.2"}, []certv1.KeyUsage{certv1.UsageServerAuth}),
+	} {
+		if err := validKubeletServingCSR(c, nodes); err == nil {
+			t.Fatalf("%s: CSR accepted", name)
+		}
+	}
+}
+
+func testCSR(t *testing.T, username, cn string, groups, dns, ips []string, usages []certv1.KeyUsage) *certv1.CertificateSigningRequest {
+	t.Helper()
+	key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	testutil.NoError(t, err)
+	tmpl := &x509.CertificateRequest{Subject: pkix.Name{CommonName: cn, Organization: []string{"system:nodes"}}, DNSNames: dns}
+	for _, ip := range ips {
+		tmpl.IPAddresses = append(tmpl.IPAddresses, net.ParseIP(ip))
+	}
+	der, err := x509.CreateCertificateRequest(rand.Reader, tmpl, key)
+	testutil.NoError(t, err)
+	return &certv1.CertificateSigningRequest{
+		ObjectMeta: metav1.ObjectMeta{Name: "csr-test"},
+		Spec: certv1.CertificateSigningRequestSpec{
+			Request:    pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE REQUEST", Bytes: der}),
+			SignerName: certv1.KubeletServingSignerName,
+			Username:   username,
+			Groups:     append(groups, "system:authenticated"),
+			Usages:     usages,
+		},
+	}
+}
+
+func TestDoctorReportUnavailable(t *testing.T) {
+	r := DoctorReport{Checks: []CapabilityCheck{
+		{Name: CapabilityDNS, Status: StatusPass},
+		{Name: CapabilityIngress, Status: StatusFail, Reason: "x"},
+	}}
+	testutil.Equal(t, r.Unavailable([]string{CapabilityDNS}), []string(nil))
+	testutil.Equal(t, r.Unavailable([]string{CapabilityIngress, CapabilityDNS, CapabilityMetrics}), []string{CapabilityIngress, CapabilityMetrics})
+	testutil.Equal(t, Capabilities, []string{"dns", "service", "network-policy", "ingress", "storage", "metrics", "image-build"})
+}
+
+// StopPlatform stops only this environment's cloud-provider-kind container
+// and load balancers labeled for this environment's cluster; a container of
+// the same name owned by someone else, or a foreign identity, stops nothing.
+func TestStopPlatformOwnership(t *testing.T) {
+	m, recorded, _, _ := newLiveManager(t, func(model.Identity, *liveSetup) {})
+	cpk := strings.Repeat("c", 64)
+	lb := strings.Repeat("d", 64)
+	inspect := func(env string) []byte {
+		return []byte(`[{"Id":"` + cpk + `","Config":{"Image":"x","Labels":{"` + LabelEnvironmentID + `":"` + env +
+			`","` + LabelComponent + `":"` + ComponentCloudProvider + `","` + LabelManagedBy + `":"` + ManagedByValue + `"}},"State":{"Running":true}}]`)
+	}
+	owner := recorded.ID
+	fake := &fakeRunner{respond: func(exe string, args []string) (executil.Result, error) {
+		switch {
+		case args[0] == "container" && args[1] == "inspect":
+			return executil.Result{Stdout: inspect(owner)}, nil
+		case args[0] == "ps":
+			return executil.Result{Stdout: []byte(lb + "\n")}, nil
+		}
+		return executil.Result{}, nil
+	}}
+	m.runner = fake
+	testutil.NoError(t, m.StopPlatform(bg, recorded))
+	testutil.Equal(t, fake.Calls(), []string{
+		"docker container inspect -- " + CloudProviderContainerName(recorded.ID),
+		"docker stop --time 30 " + cpk,
+		"docker rm " + cpk,
+		"docker ps --all --quiet --no-trunc --filter label=" + cloudProviderLBLabel + "=" + recorded.ClusterName,
+		"docker rm --force " + lb,
+	})
+
+	owner = "someone-else"
+	fake.calls = nil
+	testutil.ErrorIs(t, m.StopPlatform(bg, recorded), ErrNotOwned)
+	testutil.Equal(t, fake.Calls(), []string{"docker container inspect -- " + CloudProviderContainerName(recorded.ID)})
+
+	other := recorded
+	other.ID = "someone-else"
+	fake.calls = nil
+	testutil.ErrorIs(t, m.StopPlatform(bg, other), ErrIdentityMismatch)
+	testutil.Equal(t, len(fake.Calls()), 0)
+}
+
+// When the registry cannot be reached (offline, rate-limited), preloading
+// still succeeds if the pinned digest's content for the platform is
+// complete in the local store (proved by saving it), and fails with the
+// pull error otherwise.
+func TestPreloadFallsBackToLocalContent(t *testing.T) {
+	img := PinnedImage{Name: "docker.io/library/busybox:1.37.0", Digest: "sha256:" + strings.Repeat("b", 64)}
+	pullFails := func(saveOK bool) *fakeRunner {
+		return &fakeRunner{respond: func(exe string, args []string) (executil.Result, error) {
+			switch {
+			case exe == "docker" && args[0] == "pull":
+				// executil.Runner puts the stderr tail into the error.
+				return executil.Result{ExitCode: 1}, fmt.Errorf("%w: exit status 1: 429 Too Many Requests", executil.ErrExit)
+			case exe == "docker" && args[0] == "save" && !saveOK:
+				return executil.Result{ExitCode: 1}, fmt.Errorf("%w: exit status 1: content digest not found", executil.ErrExit)
+			}
+			return executil.Result{}, nil
+		}}
+	}
+	for _, intoNode := range []bool{true, false} {
+		dir := t.TempDir()
+		ok := pullFails(true)
+		m := New(dir, openTestStore(t, dir), WithRunner(ok))
+		testutil.NoError(t, m.preload(bg, "junkloud-0123456789ab", "amd64", img, intoNode))
+		saved := ok.count("docker save --platform linux/amd64 --output ")
+		if saved != 1 {
+			t.Fatalf("intoNode=%v: local content not proved by one save (%d): %v", intoNode, saved, ok.Calls())
+		}
+		testutil.Equal(t, ok.count("kind load"), map[bool]int{true: 1, false: 0}[intoNode])
+
+		dir = t.TempDir()
+		missing := pullFails(false)
+		m = New(dir, openTestStore(t, dir), WithRunner(missing))
+		err := m.preload(bg, "junkloud-0123456789ab", "amd64", img, intoNode)
+		if err == nil || !strings.Contains(err.Error(), "429") {
+			t.Fatalf("intoNode=%v: missing local content not reported with the pull error: %v", intoNode, err)
+		}
+		testutil.Equal(t, missing.count("kind load"), 0)
+	}
+}

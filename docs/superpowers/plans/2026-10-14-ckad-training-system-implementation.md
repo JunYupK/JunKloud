@@ -126,7 +126,7 @@ Task 2에서 `internal/model`에 아래 타입을 정의한다. 패키지 간에
 
 **Interfaces:** Produces `problem.Load(dir string) (model.Problem,error)`, `Freeze(p model.Problem, seed uint64) (model.FrozenProblem,error)`, `Select(bank []model.Problem, opts SelectOptions) ([]model.Problem,error)`, `ResolveAsset(root,path string) (string,error)`. `SelectOptions{Mode,Domain,Difficulty,Tag string; Count int; Seed uint64}`.
 
-- [ ] **실패 테스트 작성:** `TestFreezeStable`, `TestInvalidDefinition`, `TestAssetEscape`, `TestSelectInsufficient`. 정상 fixture ID는 `service-test`, primary domain은 `networking`. 중복 YAML key·알 수 없는 kind·순환 DependsOn·잘못된 배점·범위 밖 포트·중복 ID를 거부한다.
+- [x] **실패 테스트 작성:** `TestFreezeStable`, `TestInvalidDefinition`, `TestAssetEscape`, `TestSelectInsufficient`. 정상 fixture ID는 `service-test`, primary domain은 `networking`. 중복 YAML key·알 수 없는 kind·순환 DependsOn·잘못된 배점·범위 밖 포트·중복 ID를 거부한다.
   ```go
   a, err := problem.Freeze(p, 38129); testutil.NoError(t, err)
   b, err := problem.Freeze(p, 38129); testutil.NoError(t, err)
@@ -134,10 +134,10 @@ Task 2에서 `internal/model`에 아래 타입을 정의한다. 패키지 간에
   _, err = problem.ResolveAsset(root, "../solution/answer.yaml")
   testutil.ErrorIs(t, err, problem.ErrAssetEscape)
   ```
-- [ ] **실패 확인:** `go test ./internal/problem -run 'TestFreeze|TestInvalid|TestAsset|TestSelect' -v`에서 미구현 동작 실패 확인.
-- [ ] **최소 구현:** strict YAML→JSON 변환과 JSON Schema 2020-12 validation 후 타입 변환. 수량·시간 문자열의 parsing을 명시한다. 이름 등 scalar parameter만 구조적으로 치환하고 누락 변수를 거부한다. hash는 정규화한 정의와 package 파일을 정렬해 계산한다. symlink 실제 경로와 상위 이탈을 검사한다. 난수 알고리즘 version은 `seed-v1`로 기록하며 정렬된 후보와 고정 PRNG 규칙을 golden test에 고정한다.
-- [ ] **통과 확인:** 위 테스트와 `go test ./internal/model ./internal/problem` PASS. 다른 seed의 유효값, 한글·공백 경로, 중복 선택 방지, 5~20 / retry 1~20 경계를 확인한다.
-- [ ] **커밋:** `feat: validate and freeze declarative problems`.
+- [x] **실패 확인:** `go test ./internal/problem -run 'TestFreeze|TestInvalid|TestAsset|TestSelect' -v`에서 미구현 동작 실패 확인.
+- [x] **최소 구현:** strict YAML→JSON 변환과 JSON Schema 2020-12 validation 후 타입 변환. 수량·시간 문자열의 parsing을 명시한다. 이름 등 scalar parameter만 구조적으로 치환하고 누락 변수를 거부한다. hash는 정규화한 정의와 package 파일을 정렬해 계산한다. symlink 실제 경로와 상위 이탈을 검사한다. 난수 알고리즘 version은 `seed-v1`로 기록하며 정렬된 후보와 고정 PRNG 규칙을 golden test에 고정한다.
+- [x] **통과 확인:** 위 테스트와 `go test ./internal/model ./internal/problem` PASS. 다른 seed의 유효값, 한글·공백 경로, 중복 선택 방지, 5~20 / retry 1~20 경계를 확인한다.
+- [x] **커밋:** `feat: validate and freeze declarative problems`.
 
 ### Task 3: SQLite 기록·원자적 결과·환경 잠금
 
@@ -145,17 +145,17 @@ Task 2에서 `internal/model`에 아래 타입을 정의한다. 패키지 간에
 
 **Interfaces:** Produces `store.Open(path string) (*Store,error)`, `Close() error`; Store methods `CreateSession(ctx,SessionRecord) error`, `LoadSession(ctx,id string) (SessionRecord,error)`, `Transition(ctx,id,from,to string) error`, `PutOperation(ctx,Operation) error`, `PutInventory(ctx,Inventory) error`, `CreateSubmission(ctx,Submission) error`, `SaveRun(ctx,GradingRun) error`, `SaveValidation(ctx,ValidationRecord) error`, `RecordReview(ctx,sessionID,problemID string,at time.Time) error`. `lock.Acquire(path string) (release func() error,err error)`.
 
-- [ ] **실패 테스트 작성:** `TestSaveRunAtomic`, `TestTransitionCompareAndSwap`, `TestCorruptDBPreserved`, `TestLockAcrossProcesses`. 별도 프로세스의 경합, 도중 rollback, 같은 제출의 변경 거부를 검증한다.
+- [x] **실패 테스트 작성:** `TestSaveRunAtomic`, `TestTransitionCompareAndSwap`, `TestCorruptDBPreserved`, `TestLockAcrossProcesses`. 별도 프로세스의 경합, 도중 rollback, 같은 제출의 변경 거부를 검증한다.
   ```go
   err := s.Transition(ctx, "s1", "RUNNING", "GRADING")
   testutil.NoError(t, err)
   err = s.Transition(ctx, "s1", "RUNNING", "GRADING")
   testutil.ErrorIs(t, err, store.ErrStateConflict)
   ```
-- [ ] **실패 확인:** `go test ./internal/store ./internal/lock -v`에서 상태 충돌·중복 잠금 관련 실패 확인.
-- [ ] **최소 구현:** `database/sql`+modernc driver, foreign keys, bounded busy timeout, migration version, 명시적 트랜잭션. 제출·grading run은 append-only이며 update로 점수를 덮어쓰지 않는다. Linux file lock으로 프로세스 종료 시 잠금이 해제되게 한다. DB 손상 시 원본 보존. API 작업과 DB transaction을 묶었다고 가정하지 않는다.
-- [ ] **통과 확인:** 동일 명령 PASS 및 `go test -race ./internal/store ./internal/lock`. kill된 프로세스의 lock 회수와 다른 조회 프로세스의 동작 확인.
-- [ ] **커밋:** `feat: persist sessions and recoverable operations`.
+- [x] **실패 확인:** `go test ./internal/store ./internal/lock -v`에서 상태 충돌·중복 잠금 관련 실패 확인.
+- [x] **최소 구현:** `database/sql`+modernc driver, foreign keys, bounded busy timeout, migration version, 명시적 트랜잭션. 제출·grading run은 append-only이며 update로 점수를 덮어쓰지 않는다. Linux file lock으로 프로세스 종료 시 잠금이 해제되게 한다. DB 손상 시 원본 보존. API 작업과 DB transaction을 묶었다고 가정하지 않는다.
+- [x] **통과 확인:** 동일 명령 PASS 및 `go test -race ./internal/store ./internal/lock`. kill된 프로세스의 lock 회수와 다른 조회 프로세스의 동작 확인.
+- [x] **커밋:** `feat: persist sessions and recoverable operations`.
 
 ### Task 4: 전용 클러스터 식별·명령 실행·초기 적용
 
@@ -163,16 +163,16 @@ Task 2에서 `internal/model`에 아래 타입을 정의한다. 패키지 간에
 
 **Interfaces:** Consumes Task 2 Identity/Inventory/Operation과 Task 3 Store. Produces `executil.Run(ctx context.Context, exe string,args []string,stdin io.Reader) (Result,error)` with `Result{Stdout,Stderr []byte; ExitCode int}`; `environment.New(stateDir string,s *store.Store) *Manager`; methods `Ensure(ctx) (Identity,error)`, `Check(ctx,id Identity) error`, `Apply(ctx,id Identity,owner Inventory,actions []Action) (Inventory,error)`.
 
-- [ ] **실패 테스트 작성:** `TestRejectForeignIdentity`, `TestIgnoreAmbientKubeconfig`, `TestRecoverCreateIntent`, `TestExecCancellation`. 이름이 같아도 CA/marker UID/container ID가 다른 환경을 거부한다.
+- [x] **실패 테스트 작성:** `TestRejectForeignIdentity`, `TestIgnoreAmbientKubeconfig`, `TestRecoverCreateIntent`, `TestExecCancellation`. 이름이 같아도 CA/marker UID/container ID가 다른 환경을 거부한다.
   ```go
   err := manager.Check(ctx, foreignIdentity)
   testutil.ErrorIs(t, err, environment.ErrIdentityMismatch)
   testutil.Equal(t, foreignClusterMutationCount, 0)
   ```
-- [ ] **실패 확인:** `go test ./internal/executil ./internal/environment -v`에서 소유권 거부 동작 실패 확인.
-- [ ] **최소 구현:** create intent를 먼저 저장하고 환경 ID가 포함된 namespace·label·Docker metadata를 적용한다. 내부 endpoint와 정당한 CA 검증을 갖춘 별도 kubeconfig를 만든다. host KUBECONFIG와 current-context를 읽지 않는다. 외부 명령은 인자 배열·bounded output·context 취소로 실행한다. 작업 실패를 자동 글로벌 삭제로 복구하지 않는다.
-- [ ] **통과 확인:** unit PASS; `go test -tags=integration ./tests/integration -run TestEnvironment -count=1 -v` PASS. create 직후 중단을 주입해 기록된 intent로 소유 대상을 재확인한다. 다른 cluster sentinel이 그대로임을 확인한다.
-- [ ] **커밋:** `feat: manage an explicitly owned kind environment`.
+- [x] **실패 확인:** `go test ./internal/executil ./internal/environment -v`에서 소유권 거부 동작 실패 확인.
+- [x] **최소 구현:** create intent를 먼저 저장하고 환경 ID가 포함된 namespace·label·Docker metadata를 적용한다. 내부 endpoint와 정당한 CA 검증을 갖춘 별도 kubeconfig를 만든다. host KUBECONFIG와 current-context를 읽지 않는다. 외부 명령은 인자 배열·bounded output·context 취소로 실행한다. 작업 실패를 자동 글로벌 삭제로 복구하지 않는다.
+- [x] **통과 확인:** unit PASS; `go test -tags=integration ./tests/integration -run TestEnvironment -count=1 -v` PASS. create 직후 중단을 주입해 기록된 intent로 소유 대상을 재확인한다. 다른 cluster sentinel이 그대로임을 확인한다.
+- [x] **커밋:** `feat: manage an explicitly owned kind environment`.
 
 ### Task 5: 플랫폼 capability와 doctor
 
@@ -180,16 +180,16 @@ Task 2에서 `internal/model`에 아래 타입을 정의한다. 패키지 간에
 
 **Interfaces:** Consumes Manager.Check/Apply. Produces `Manager.Doctor(ctx,id Identity) (DoctorReport,error)`; `DoctorReport{EnvironmentID string; Checks []CapabilityCheck; Versions map[string]string}`, `CapabilityCheck{Name,Status,Reason string}`. capability 이름은 `dns,service,network-policy,ingress,storage,metrics,image-build`.
 
-- [ ] **실패 테스트 작성:** `TestPlatformCapabilities`, `TestDoctorDoesNotReadAnswers`. DNS와 Service 양성 연결, NetworkPolicy 음성·양성, Ingress host/path, PVC 쓰기·읽기, metrics API, image build를 실제로 검사한다.
+- [x] **실패 테스트 작성:** `TestPlatformCapabilities`, `TestDoctorDoesNotReadAnswers`. DNS와 Service 양성 연결, NetworkPolicy 음성·양성, Ingress host/path, PVC 쓰기·읽기, metrics API, image build를 실제로 검사한다.
   ```go
   report, err := manager.Doctor(ctx, id); testutil.NoError(t, err)
   for _, check := range report.Checks { testutil.Equal(t, check.Status, "PASS") }
   testutil.Equal(t, answerNamespaceReadCount, 0)
   ```
-- [ ] **실패 확인:** 부가 기능 미설치 상태에서 integration 명령이 해당 capability 실패를 보고하는지 확인한다.
-- [ ] **최소 구현:** cloud-provider-kind의 독립 프로세스 수명 주기·재시작·종료 처리, 필요한 metrics/storage 구성과 사전 이미지 준비를 고정한다. doctor는 전용 platform probe만 사용하고 시험 namespace를 읽지 않는다. 기능 실패를 capability 비활성 상태로 보고해 해당 문제 출제를 막는다.
+- [x] **실패 확인:** 부가 기능 미설치 상태에서 integration 명령이 해당 capability 실패를 보고하는지 확인한다.
+- [x] **최소 구현:** cloud-provider-kind의 독립 프로세스 수명 주기·재시작·종료 처리, 필요한 metrics/storage 구성과 사전 이미지 준비를 고정한다. doctor는 전용 platform probe만 사용하고 시험 namespace를 읽지 않는다. 기능 실패를 capability 비활성 상태로 보고해 해당 문제 출제를 막는다.
 - [ ] **통과 확인:** `go test -tags=integration ./tests/integration -run 'TestPlatform|TestDoctor' -count=1 -v` PASS. M2 4GiB에서 기능 구성 자체가 성립하는지 조기 확인하고 불가하면 나머지 제품 구현 전 설계로 되돌린다.
-- [ ] **커밋:** `feat: verify required Kubernetes capabilities`.
+- [x] **커밋:** `feat: verify required Kubernetes capabilities`.
 
 ### Task 6: 공통 채점 엔진과 설정·상태 판정
 
@@ -197,17 +197,17 @@ Task 2에서 `internal/model`에 아래 타입을 정의한다. 패키지 간에
 
 **Interfaces:** Produces `grader.Checker` with `Check(context.Context,Target,model.Criterion) (model.CheckResult,error)`; `Target{Identity model.Identity; Problem model.FrozenProblem; Workspace string}`; `NewEngine(checkers map[string]Checker) *Engine`; `Engine.Evaluate(ctx,Target) (model.Evaluation,error)`. unit tests용 fake Checker는 test 파일에서 정의한다.
 
-- [ ] **실패 테스트 작성:** `TestPartialScore`, `TestErrorKeepsScorePending`, `TestQuantityEquivalence`, `TestObservedGeneration`, `TestEvidenceRedaction`. 2+2+2+4 배점 fixture에서 PASS 2개(2·4), FAIL 2개는 6/10이고 ERROR가 하나 생기면 Score=nil이다.
+- [x] **실패 테스트 작성:** `TestPartialScore`, `TestErrorKeepsScorePending`, `TestQuantityEquivalence`, `TestObservedGeneration`, `TestEvidenceRedaction`. 2+2+2+4 배점 fixture에서 PASS 2개(2·4), FAIL 2개는 6/10이고 ERROR가 하나 생기면 Score=nil이다.
   ```go
   testutil.Equal(t, *graded.Score, 6)
   testutil.Equal(t, pending.Score, (*int)(nil))
   testutil.Equal(t, pending.Complete, false)
   testutil.Equal(t, strings.Contains(encodedEvidence, "secret-canary-value"), false)
   ```
-- [ ] **실패 확인:** `go test ./internal/grader -run 'TestPartial|TestError|TestQuantity|TestObserved|TestEvidence' -v` 실패 확인.
-- [ ] **최소 구현:** criterion DAG, 선행 FAIL→명시적 prerequisite FAIL, provider 장애→ERROR. quantity·named container·unordered selector는 의미 기반 비교한다. readiness는 observedGeneration과 원하는 replicas를 함께 확인한다. 30초 기본 한도와 주입 가능한 clock 사용. 병렬성 기본 2, 변경 probe는 직렬 실행. evidence에 원문 Secret을 보관하지 않는다.
-- [ ] **통과 확인:** 단위 tests PASS 및 `go test -tags=integration ./tests/integration -run TestResourceGrading -count=1 -v`. API default 값이 있는 동등한 답안과 실제 wrong image를 검증한다.
-- [ ] **커밋:** `feat: grade resource requirements with partial scores`.
+- [x] **실패 확인:** `go test ./internal/grader -run 'TestPartial|TestError|TestQuantity|TestObserved|TestEvidence' -v` 실패 확인.
+- [x] **최소 구현:** criterion DAG, 선행 FAIL→명시적 prerequisite FAIL, provider 장애→ERROR. quantity·named container·unordered selector는 의미 기반 비교한다. readiness는 observedGeneration과 원하는 replicas를 함께 확인한다. 30초 기본 한도와 주입 가능한 clock 사용. 병렬성 기본 2, 변경 probe는 직렬 실행. evidence에 원문 Secret을 보관하지 않는다.
+- [x] **통과 확인:** 단위 tests PASS 및 `go test -tags=integration ./tests/integration -run TestResourceGrading -count=1 -v`. API default 값이 있는 동등한 답안과 실제 wrong image를 검증한다.
+- [x] **커밋:** `feat: grade resource requirements with partial scores`.
 
 ### Task 7: Service·Ingress·NetworkPolicy 동작 검사
 
@@ -215,17 +215,17 @@ Task 2에서 `internal/model`에 아래 타입을 정의한다. 패키지 간에
 
 **Interfaces:** Produces `NetworkChecker` implementing Task 6 Checker. Criterion Kind는 `http,tcp,network-policy`; Args에 source namespace/labels, destination ref, port, expected connection, HTTP host/path/status/body marker를 정의한다. typed probe result는 `ProbeResult{Connected bool; HTTPStatus int; BodyMarker,FailureClass string}`.
 
-- [ ] **실패 테스트 작성:** `TestAllowAndDeny`, `TestDeadServerNotPolicyPass`, `TestDNSFailureNotDenyPass`, `TestWrongBackend`, `TestProbeCleanupAfterCancel`.
+- [x] **실패 테스트 작성:** `TestAllowAndDeny`, `TestDeadServerNotPolicyPass`, `TestDNSFailureNotDenyPass`, `TestWrongBackend`, `TestProbeCleanupAfterCancel`.
   ```go
   testutil.Equal(t, correctPolicy.Status, "PASS")
   testutil.Equal(t, allTrafficBroken.Status == "PASS", false)
   testutil.Equal(t, wrongBackend.Status, "FAIL")
   testutil.Equal(t, remainingProbePods, 0)
   ```
-- [ ] **실패 확인:** `go test ./internal/grader -run 'TestAllow|TestDead|TestDNS|TestWrongBackend|TestProbeCleanup' -v` 실패 확인.
-- [ ] **최소 구현:** 3초×최대3회, 명시된 source identity의 probe Pod, 정상 서버 대조 확인, DNS 오류 분류, 라우팅 응답 marker 검사. allow/deny 결과가 함께 성립해야 policy 완전 정답. 성공했을 때도 probe inventory 정리. 이미지를 시작 전에 준비해 image pull 실패와 학습자 오답을 구분한다.
+- [x] **실패 확인:** `go test ./internal/grader -run 'TestAllow|TestDead|TestDNS|TestWrongBackend|TestProbeCleanup' -v` 실패 확인.
+- [x] **최소 구현:** 3초×최대3회, 명시된 source identity의 probe Pod, 정상 서버 대조 확인, DNS 오류 분류, 라우팅 응답 marker 검사. allow/deny 결과가 함께 성립해야 policy 완전 정답. 성공했을 때도 probe inventory 정리. 이미지를 시작 전에 준비해 image pull 실패와 학습자 오답을 구분한다.
 - [ ] **통과 확인:** `go test -tags=integration ./tests/integration -run TestNetworkGrading -count=1 -v`에서 정책 없음·올바름·전부 차단·서버 다운·DNS 실패를 각각 확인한다.
-- [ ] **커밋:** `feat: verify network behavior without false passes`.
+- [x] **커밋:** `feat: verify network behavior without false passes`.
 
 ### Task 8: 파일·이미지·Helm·Kustomize·보안 검사
 
@@ -233,7 +233,7 @@ Task 2에서 `internal/model`에 아래 타입을 정의한다. 패키지 간에
 
 **Interfaces:** Produces `ArtifactChecker`, `SecurityChecker` implementing Checker; `CaptureInputs(ctx,Target) (map[string]string,error)`. Kind는 `file,image,helm,kustomize,logs,job,authorization,security-context`. 제출 대상만 fingerprint하고 controller status 전체를 hash하지 않는다.
 
-- [ ] **실패 테스트 작성:** `TestHelmRequiredNotRawApply`, `TestImageActuallyRuns`, `TestOverlaySemantics`, `TestAssetSymlinkEscape`, `TestInputChange`, `TestCronScheduleNotProvedByManualJob`, `TestEffectiveIdentity`. 각 이름에 해당하는 원본 fixture와 오답을 test 파일에서 명시한다.
+- [x] **실패 테스트 작성:** `TestHelmRequiredNotRawApply`, `TestImageActuallyRuns`, `TestOverlaySemantics`, `TestAssetSymlinkEscape`, `TestInputChange`, `TestCronScheduleNotProvedByManualJob`, `TestEffectiveIdentity`. 각 이름에 해당하는 원본 fixture와 오답을 test 파일에서 명시한다.
   ```go
   testutil.Equal(t, rawAppliedWithoutRelease.Status, "FAIL")
   testutil.Equal(t, validOverlayDifferentKeyOrder.Status, "PASS")
@@ -241,9 +241,9 @@ Task 2에서 `internal/model`에 아래 타입을 정의한다. 패키지 간에
   testutil.Equal(t, manualJobOnlyProvesSchedule, false)
   ```
 - [ ] **실패 확인:** `go test ./internal/grader -run 'TestHelm|TestImage|TestOverlay|TestAssetSymlink|TestInputChange|TestCron|TestEffective' -v` 실패 확인.
-- [ ] **최소 구현:** Helm의 JSON 결과와 release 검증, Kustomize 렌더링 후 API 의미 비교, image ID/digest·archive 구조·실제 실행 확인. 현재 아키텍처 이미지로 검사하며 Docker 전역 cache를 정리하지 않는다. 파일은 Task 2 경로 검증 사용. Job 실행·CronJob template·schedule observation을 다른 Kind 인자로 구분한다. SA/RBAC는 실제 credential 또는 권한 review 결과, SecurityContext는 명시 필드와 필요 시 exec 결과를 검사한다.
-- [ ] **통과 확인:** `go test -tags=integration ./tests/integration -run TestArtifactGrading -count=1 -v` PASS. stdout/stderr·저장 evidence에 Secret이 없고 foreign Docker sentinel이 보존된다.
-- [ ] **커밋:** `feat: grade application artifacts and security behavior`.
+- [x] **최소 구현:** Helm의 JSON 결과와 release 검증, Kustomize 렌더링 후 API 의미 비교, image ID/digest·archive 구조·실제 실행 확인. 현재 아키텍처 이미지로 검사하며 Docker 전역 cache를 정리하지 않는다. 파일은 Task 2 경로 검증 사용. Job 실행·CronJob template·schedule observation을 다른 Kind 인자로 구분한다. SA/RBAC는 실제 credential 또는 권한 review 결과, SecurityContext는 명시 필드와 필요 시 exec 결과를 검사한다.
+- [x] **통과 확인:** `go test -tags=integration ./tests/integration -run TestArtifactGrading -count=1 -v` PASS. stdout/stderr·저장 evidence에 Secret이 없고 foreign Docker sentinel이 보존된다.
+- [x] **커밋:** `feat: grade application artifacts and security behavior`.
 
 ### Task 9: 문제 작성 검증과 검증 기록 무효화
 
@@ -251,17 +251,17 @@ Task 2에서 `internal/model`에 아래 타입을 정의한다. 패키지 간에
 
 **Interfaces:** Consumes Problem/Freeze, Manager.Apply, Engine.Evaluate, Store.SaveValidation. Produces `author.Validator.Validate(ctx context.Context,p model.Problem,seeds []uint64) (model.ValidationRecord,error)`, `CertificateMatches(record model.ValidationRecord,problemHash,graderVersion,environmentHash string) bool`.
 
-- [ ] **실패 테스트 작성:** `TestInitialSolvedWrongReset`, `TestInitiallyPerfectRejected`, `TestStaleCertificate`, `TestValidationBlockedDuringSession`. 초기 부분 점수 2, 정답 10, 오답 6인 fixture를 준비한다.
+- [x] **실패 테스트 작성:** `TestInitialSolvedWrongReset`, `TestInitiallyPerfectRejected`, `TestStaleCertificate`, `TestValidationBlockedDuringSession`. 초기 부분 점수 2, 정답 10, 오답 6인 fixture를 준비한다.
   ```go
   testutil.Equal(t, record.Cases["initial"].MaxScore, 10)
   testutil.Equal(t, *record.Cases["initial"].Score, 2)
   testutil.Equal(t, *record.Cases["solved"].Score, 10)
   testutil.Equal(t, author.CertificateMatches(record, changedHash, engineVersion, envHash), false)
   ```
-- [ ] **실패 확인:** `go test ./internal/author -v` 실패 확인.
-- [ ] **최소 구현:** 허용된 Action dispatch, 임시 문제 namespace 묶음, 단계별 환경·grader 공용 호출. cleanup 기능은 임시 관리 inventory만으로 구현하고 Task 13에서 공통 reset에 통합한다. 각 문제의 초기 벡터·정답·오답·대표 seed·대체 정답을 기록한다. 하나라도 ERROR이면 validation 성공 처리하지 않는다.
-- [ ] **통과 확인:** `go test -tags=integration ./tests/integration -run TestProblemValidation -count=1 -v`. 모범 해답 적용 후의 상태가 다음 사례로 누출되지 않으며 certificate hash 변경은 재검증을 요구한다.
-- [ ] **커밋:** `feat: validate authored problems with the runtime grader`.
+- [x] **실패 확인:** `go test ./internal/author -v` 실패 확인.
+- [x] **최소 구현:** 허용된 Action dispatch, 임시 문제 namespace 묶음, 단계별 환경·grader 공용 호출. cleanup 기능은 임시 관리 inventory만으로 구현하고 Task 13에서 공통 reset에 통합한다. 각 문제의 초기 벡터·정답·오답·대표 seed·대체 정답을 기록한다. 하나라도 ERROR이면 validation 성공 처리하지 않는다.
+- [x] **통과 확인:** `go test -tags=integration ./tests/integration -run TestProblemValidation -count=1 -v`. 모범 해답 적용 후의 상태가 다음 사례로 누출되지 않으며 certificate hash 변경은 재검증을 요구한다.
+- [x] **커밋:** `feat: validate authored problems with the runtime grader`.
 
 ### Task 10: 준비·시작·시간·동결된 세션
 
@@ -269,7 +269,7 @@ Task 2에서 `internal/model`에 아래 타입을 정의한다. 패키지 간에
 
 **Interfaces:** Produces `session.New(s *store.Store,env *environment.Manager,engine *grader.Engine,bankDir,stateDir string) *Service`; `Prepare(ctx,StartOptions) (model.SessionRecord,error)`, `Start(ctx,sessionID string,at time.Time) error`, `Status(ctx,sessionID string,now time.Time) (Status,error)`. `StartOptions{Mode,MockID,Domain,Difficulty,Tag string; Count int; Seed uint64; RetrySessionID string; NewSeed bool}`; `Status{Session model.SessionRecord; Elapsed,Overtime time.Duration; ClockAnomaly bool}`.
 
-- [ ] **실패 테스트 작성:** `TestPrepareHidesQuestions`, `TestBrokenInitialStateIsExpected`, `TestStartClock`, `TestWallClockAfterSleep`, `TestSecondSessionRejected`, `TestBankChangeDoesNotChangeActiveSession`.
+- [x] **실패 테스트 작성:** `TestPrepareHidesQuestions`, `TestBrokenInitialStateIsExpected`, `TestStartClock`, `TestWallClockAfterSleep`, `TestSecondSessionRejected`, `TestBankChangeDoesNotChangeActiveSession`.
   ```go
   testutil.Equal(t, prepared.StartedAt, (*time.Time)(nil))
   testutil.Equal(t, publicQuestionFilesBeforeStart, 0)
@@ -277,9 +277,9 @@ Task 2에서 `internal/model`에 아래 타입을 정의한다. 패키지 간에
   testutil.Equal(t, status.Overtime, time.Minute)
   ```
 - [ ] **실패 확인:** `go test ./internal/session -run 'TestPrepare|TestBroken|TestStartClock|TestWall|TestSecond|TestBankChange' -v` 실패 확인.
-- [ ] **최소 구현:** 전용 환경·capability·validation 확인→문제 freeze→모든 setup·초기 결과 검증→PREPARING. 확인 후 public assets 공개·RUNNING 전환·시작 시각 저장. 의도된 CrashLoop를 플랫폼 고장으로 혼동하지 않는다. 실패 준비의 inventory는 보존해 복구할 수 있게 한다.
-- [ ] **통과 확인:** `go test -tags=integration ./tests/integration -run TestSessionStart -count=1 -v` PASS. 개발용 세트는 5개 fixture를 사용하며 출시 문제 수로 세지 않는다.
-- [ ] **커밋:** `feat: prepare reproducible sessions before starting the clock`.
+- [x] **최소 구현:** 전용 환경·capability·validation 확인→문제 freeze→모든 setup·초기 결과 검증→PREPARING. 확인 후 public assets 공개·RUNNING 전환·시작 시각 저장. 의도된 CrashLoop를 플랫폼 고장으로 혼동하지 않는다. 실패 준비의 inventory는 보존해 복구할 수 있게 한다.
+- [x] **통과 확인:** `go test -tags=integration ./tests/integration -run TestSessionStart -count=1 -v` PASS. 개발용 세트는 5개 fixture를 사용하며 출시 문제 수로 세지 않는다.
+- [x] **커밋:** `feat: prepare reproducible sessions before starting the clock`.
 
 ### Task 11: 제출·부분 저장·retry/resubmit·공개 규칙
 
@@ -287,17 +287,17 @@ Task 2에서 `internal/model`에 아래 타입을 정의한다. 패키지 간에
 
 **Interfaces:** Adds Service methods `Grade(ctx,sessionID string,opts GradeOptions) (model.GradingRun,error)`, `Review(ctx,sessionID,problemID string,solution bool) (Review,error)`; `GradeOptions{ProblemID string; Retry,Resubmit bool; At time.Time}`; `Review{Runs []model.GradingRun; Explanation,ReferenceSolution string; SolutionViewed bool}`. Uses CaptureInputs from Task 8.
 
-- [ ] **실패 테스트 작성:** `TestExamDisclosure`, `TestPracticeDisclosure`, `TestRetryPreservesSubmissionTime`, `TestChangedAnswerRequiresResubmit`, `TestResubmitAppendOnly`, `TestErrorNoFinalScore`, `TestCrashDuringGrade`. 최초 제출 10:00, retry 10:02, 새 제출 10:05의 고정 시각을 사용한다.
+- [x] **실패 테스트 작성:** `TestExamDisclosure`, `TestPracticeDisclosure`, `TestRetryPreservesSubmissionTime`, `TestChangedAnswerRequiresResubmit`, `TestResubmitAppendOnly`, `TestErrorNoFinalScore`, `TestCrashDuringGrade`. 최초 제출 10:00, retry 10:02, 새 제출 10:05의 고정 시각을 사용한다.
   ```go
   testutil.Equal(t, retrySubmission.SubmittedAt, originalSubmission.SubmittedAt)
   testutil.Equal(t, resubmission.SubmittedAt, originalSubmission.SubmittedAt.Add(5*time.Minute))
   testutil.Equal(t, incomplete.Evaluation.Score, (*int)(nil))
   testutil.Equal(t, strings.Contains(examBeforeSubmit, referenceAnswer), false)
   ```
-- [ ] **실패 확인:** `go test ./internal/session -run 'TestExam|TestPractice|TestRetry|TestChanged|TestResubmit|TestError|TestCrash' -v` 실패 확인.
-- [ ] **최소 구현:** 전환 잠금·제출 intent·입력 fingerprint 저장·grader 호출·원자적 완료. retry는 새 run, resubmit은 새 submission. 최초 제출 시 input capture가 불가능했다면 unchanged를 증명할 수 없으므로 resubmit만 안내한다. input spec/UID·파일·image 변경 시 retry 거부. 종료 전후 state 확인으로 stale 결과를 확정하지 않는다. 훈련 개별 채점은 세션을 끝내지 않고 결과와 시각을 저장한다.
-- [ ] **통과 확인:** integration submission 테스트 PASS. ERROR 상태의 시험 해설 비공개, 포기 후 공개, 제출 후 열린 해설은 재제출 기록에 반영. 최고 점수 합산 없음. clock 역행 flag와 채점시간 제외 확인.
-- [ ] **커밋:** `feat: preserve submissions and enforce feedback timing`.
+- [x] **실패 확인:** `go test ./internal/session -run 'TestExam|TestPractice|TestRetry|TestChanged|TestResubmit|TestError|TestCrash' -v` 실패 확인.
+- [x] **최소 구현:** 전환 잠금·제출 intent·입력 fingerprint 저장·grader 호출·원자적 완료. retry는 새 run, resubmit은 새 submission. 최초 제출 시 input capture가 불가능했다면 unchanged를 증명할 수 없으므로 resubmit만 안내한다. input spec/UID·파일·image 변경 시 retry 거부. 종료 전후 state 확인으로 stale 결과를 확정하지 않는다. 훈련 개별 채점은 세션을 끝내지 않고 결과와 시각을 저장한다.
+- [ ] **통과 확인:** (미완: 포기 후 공개는 Task 13 — 현재 `ErrReviewUnsupported`; 나머지는 검증됨) integration submission 테스트 PASS. ERROR 상태의 시험 해설 비공개, 포기 후 공개, 제출 후 열린 해설은 재제출 기록에 반영. 최고 점수 합산 없음. clock 역행 flag와 채점시간 제외 확인.
+- [x] **커밋:** `feat: preserve submissions and enforce feedback timing`.
 
 ### Task 12: CLI 전체 학습 흐름과 한국어 피드백
 
