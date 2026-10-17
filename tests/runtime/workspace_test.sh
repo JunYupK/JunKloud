@@ -83,7 +83,18 @@ echo "==> building workspace image (project ${PROJECT})"
 compose build workspace
 
 echo "==> starting workspace container"
+bash runtime/ensure-kind-network.sh
 compose up -d workspace
+
+echo "==> verifying the packaged CLI works without a Go compiler"
+compose exec -T workspace ckad --help >/dev/null \
+  || fail "packaged ckad executable cannot run"
+compose exec -T workspace sh -c '! command -v go >/dev/null' \
+  || fail "workspace unexpectedly needs the Go compiler"
+test "$(compose exec -T workspace printenv KUBECONFIG | tr -d '\r')" = /home/learner/.local/share/junkloud/environment/kubeconfig \
+  || fail "Docker exec session does not select the dedicated kubeconfig"
+compose exec -T workspace sh -c 'docker inspect --format "{{json .NetworkSettings.Networks}}" "$HOSTNAME"' | grep -q '"kind"' \
+  || fail "workspace is not connected to the shared kind network"
 
 echo "==> checking OS and native CPU architecture"
 os="$(compose exec -T workspace uname -s)"

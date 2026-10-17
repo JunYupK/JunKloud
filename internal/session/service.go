@@ -190,6 +190,7 @@ type Records interface {
 	ListRuns(ctx context.Context, submissionID string) ([]model.GradingRun, error)
 	RecordReview(ctx context.Context, sessionID, problemID string, at time.Time) error
 	ListReviews(ctx context.Context, sessionID string) ([]model.ReviewEvent, error)
+	SetMark(ctx context.Context, sessionID, problemID string, marked bool) error
 }
 
 var (

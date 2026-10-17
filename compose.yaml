@@ -29,6 +29,7 @@ services:
     working_dir: /src
     tty: true
     stdin_open: true
+    networks: [default, kind]
 
   dev:
     build:
@@ -45,6 +46,14 @@ services:
     working_dir: /src
     tty: true
     stdin_open: true
+    networks: [default, kind]
+
+# Shared with kind's nodes. Bootstrap it before compose creates containers;
+# external ownership prevents `compose down` from removing the shared network.
+networks:
+  kind:
+    external: true
+    name: kind
 
 # Learner home: dotfiles, shell history, personal solution files. Survives
 # `docker compose down` + `up` (container recreation); only `down -v` removes

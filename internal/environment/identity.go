@@ -149,6 +149,12 @@ func (m *Manager) KubeconfigPath() string { return filepath.Join(m.dir, "kubecon
 // IdentityPath is the file holding the recorded Identity (JSON).
 func (m *Manager) IdentityPath() string { return filepath.Join(m.dir, "identity.json") }
 
+// RecordedIdentity reads the installation's identity without contacting the
+// cluster. It is not an ownership proof: callers must Check it before any
+// external mutation. Offline grading uses it to build clients, then records
+// an ERROR run when live verification fails.
+func (m *Manager) RecordedIdentity() (model.Identity, error) { return m.readIdentity() }
+
 // ClusterName is the kind cluster (and kubeconfig context) name for an
 // environment ID.
 func ClusterName(environmentID string) string { return "junkloud-" + environmentID }

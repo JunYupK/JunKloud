@@ -37,6 +37,7 @@ import (
 	"k8s.io/apimachinery/pkg/util/wait"
 	utilyaml "k8s.io/apimachinery/pkg/util/yaml"
 
+	"github.com/JunYupK/JunKloud/internal/executil"
 	"github.com/JunYupK/JunKloud/internal/model"
 	"github.com/JunYupK/JunKloud/internal/store"
 	"github.com/JunYupK/JunKloud/runtime/platform"
@@ -177,6 +178,7 @@ var (
 	imageNamePattern   = regexp.MustCompile(`^[a-z0-9]+(?:[._-][a-z0-9]+)*(?::[0-9]+)?(?:/[a-z0-9]+(?:(?:[._]|__|-+)[a-z0-9]+)*)+:[A-Za-z0-9_][A-Za-z0-9._-]{0,127}$`)
 	imageDigestPattern = regexp.MustCompile(`^sha256:[0-9a-f]{64}$`)
 	archPattern        = regexp.MustCompile(`^[a-z0-9]+$`)
+	legacySaveAPI      = regexp.MustCompile(`"--platform" requires API version 1\.48, but the Docker daemon API version is 1\.(?:[0-3][0-9]|4[0-7])(?:\r?\n|$)`)
 	// envIDPattern: environment IDs are generated as 12 hex digits; they end
 	// up in container names and in the cloud-provider-kind wrapper script.
 	envIDPattern = regexp.MustCompile(`^[0-9a-f]{12}$`)
@@ -258,7 +260,25 @@ func (m *Manager) preload(ctx context.Context, cluster, arch string, img PinnedI
 	defer os.RemoveAll(tmp)
 	archive := filepath.Join(tmp, "image.tar")
 	if err := m.command(ctx, loadTimeout, "docker", "save", "--platform", platformFlag, "--output", archive, img.Name); err != nil {
-		return notLocal(fmt.Errorf("environment: save %s: %w", img.Name, err))
+		if !errors.Is(err, executil.ErrExit) || !legacySaveAPI.MatchString(err.Error()) {
+			return notLocal(fmt.Errorf("environment: save %s: %w", img.Name, err))
+		}
+		// Docker 24's classic image store cannot accept save --platform.
+		// Fallback is allowed only after the exact pinned ref AND its tag
+		// resolve to the same single image ID on the node's native platform.
+		// An unrelated save error, a different architecture or a changed tag
+		// never enables a broader export or emulation.
+		raw, inspectErr := m.output(ctx, dockerTimeout, "docker", "image", "inspect", "--format", "{{.Id}} {{.Os}}/{{.Architecture}}", img.Ref(), img.Name)
+		if inspectErr != nil {
+			return notLocal(fmt.Errorf("environment: inspect pinned image before legacy save: %w", inspectErr))
+		}
+		fields := strings.Fields(string(raw))
+		if len(fields) != 4 || !imageDigestPattern.MatchString(fields[0]) || fields[0] != fields[2] || fields[1] != platformFlag || fields[3] != platformFlag {
+			return fmt.Errorf("%w: legacy save requires the pinned reference and tag to name the same %s image", ErrInvalidImage, platformFlag)
+		}
+		if saveErr := m.command(ctx, loadTimeout, "docker", "save", "--output", archive, img.Name); saveErr != nil {
+			return notLocal(fmt.Errorf("environment: legacy save %s: %w", img.Name, saveErr))
+		}
 	}
 	if !intoNode {
 		return nil

@@ -19,4 +19,8 @@ seed_if_missing() {
 seed_if_missing "${HOME}/.bashrc" /etc/skel/.bashrc
 seed_if_missing "${HOME}/.bash_aliases" /etc/skel/.bash_aliases
 
+# The learner's ordinary kubectl uses the same dedicated configuration as
+# ckad. Never inherit a host kubeconfig into this training shell.
+export KUBECONFIG="${CKAD_STATE_DIR:-${HOME}/.local/share/junkloud}/environment/kubeconfig"
+
 exec "$@"

@@ -41,6 +41,9 @@ const solutionDir = "solution/"
 // While a mock exam's details are not open, Submissions carry no
 // InputHashes: their keys name the objects and files the criteria read.
 type Review struct {
+	// Feedback is Korean criterion feedback, subject to the same disclosure
+	// gate as Results. Keys are qualified problem/criterion IDs.
+	Feedback                       map[string]string
 	State                          string
 	Runs                           []model.GradingRun
 	Submissions                    []model.Submission
@@ -145,6 +148,17 @@ func (s *Service) Review(ctx context.Context, sessionID, problemID string, solut
 
 	open := detailsOpen(rec, hist)
 	rv := Review{State: rec.State, Pending: s.pending(rec, hist)}
+	if open {
+		rv.Feedback = map[string]string{}
+		for _, p := range rec.Problems {
+			if problemID != "" && p.Definition.ID != problemID {
+				continue
+			}
+			for _, c := range p.Definition.Criteria {
+				rv.Feedback[QualifiedID(p.Definition.ID, c.ID)] = c.Feedback
+			}
+		}
+	}
 	examHist, reviewHist := hist, history{}
 	if rec.Mode == model.ModeMock {
 		if i, run := examResult(hist); run != nil {
