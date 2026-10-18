@@ -301,21 +301,23 @@ Task 2에서 `internal/model`에 아래 타입을 정의한다. 패키지 간에
 
 ### Task 12: CLI 전체 학습 흐름과 한국어 피드백
 
+**실행 기록:** 2026-10-18 완료. 구현 c71de14, Windows 수정 f28d270; 독립 리뷰 및 수정 재리뷰 통과. 단위·workspace·개발용 5문항 실제 CLI E2E(8/29 → 29/29), Windows PowerShell 5.1 시작 경로 11개 회귀 시나리오 통과. 제품 문제은행과 M2 최소 사양 검증은 후속 Task 범위다.
+
 **Files:** Create cmd/ckad main, CLI root/start/status/show/mark/grade/review/doctor/bank/reset 파일·tests; Modify Dockerfile의 workspace 실행 파일 packaging; Create `tests/e2e/cli_flow_test.go`.
 
 **Interfaces:** Produces `cli.NewRoot(deps Dependencies,in io.Reader,out,errOut io.Writer) *cobra.Command`; `Dependencies{Session *session.Service; Environment *environment.Manager; Author *author.Validator; Store *store.Store; Now func() time.Time}`. root에서 명령을 조립하고 구성요소 구현은 각 패키지 호출에 한정한다.
 
-- [ ] **실패 테스트 작성:** `TestEnglishPromptKoreanFeedback`, `TestModeRestrictions`, `TestMarkDoesNotGrade`, `TestCLIExitCodes`, `TestTwoTerminalRead`, `TestNoPrivateContentInErrors`. 실제 명령 인자·입력·출력을 기록한다.
+- [x] **실패 테스트 작성:** `TestEnglishPromptKoreanFeedback`, `TestModeRestrictions`, `TestMarkDoesNotGrade`, `TestCLIExitCodes`, `TestTwoTerminalRead`, `TestNoPrivateContentInErrors`. 실제 명령 인자·입력·출력을 기록한다.
   ```go
   testutil.Equal(t, strings.Contains(questionOutput, "Namespace"), true)
   testutil.Equal(t, strings.Contains(failureOutput, "요구사항"), true)
   testutil.Equal(t, gradeCallsAfterMark, 0)
   testutil.Equal(t, codeForUnmetLearningCriteria, 1)
   ```
-- [ ] **실패 확인:** `go test ./internal/cli -v`에서 누락된 명령/공개 규칙 실패 확인.
-- [ ] **최소 구현:** spec 10장의 명령·옵션 모두 연결. exit 0=성공한 조작 또는 만점 채점, 1=정상 채점의 미충족, 2=사용법/모드 오류, 3=환경·저장·채점 불가. 모의시험 참고 66% 표시는 100점과 별도이며 합격 예측 문구 없음. solution은 명시 열람 후만 출력. stdout에는 사용자 결과, 진단은 stderr. context 취소를 모든 작업으로 전달한다.
-- [ ] **통과 확인:** `go test ./internal/cli -v`; `go test -tags=e2e ./tests/e2e -run TestCLIFlow -count=1 -v` PASS. 5개 개발 fixture로 start→풀이→grade→review가 동작한다. reset 연결은 Task 13 완료 전에는 미구현 오류를 명확히 반환하며 완료로 표시하지 않는다.
-- [ ] **커밋:** `feat: expose the terminal training workflow`.
+- [x] **실패 확인:** `go test ./internal/cli -v`에서 누락된 명령/공개 규칙 실패 확인.
+- [x] **최소 구현:** spec 10장의 명령·옵션 모두 연결. exit 0=성공한 조작 또는 만점 채점, 1=정상 채점의 미충족, 2=사용법/모드 오류, 3=환경·저장·채점 불가. 모의시험 참고 66% 표시는 100점과 별도이며 합격 예측 문구 없음. solution은 명시 열람 후만 출력. stdout에는 사용자 결과, 진단은 stderr. context 취소를 모든 작업으로 전달한다.
+- [x] **통과 확인:** `go test ./internal/cli -v`; `go test -tags=e2e ./tests/e2e -run TestCLIFlow -count=1 -v` PASS. 5개 개발 fixture로 start→풀이→grade→review가 동작한다. reset 연결은 Task 13 완료 전에는 미구현 오류를 명확히 반환하며 완료로 표시하지 않는다.
+- [x] **커밋:** `feat: expose the terminal training workflow`.
 
 ### Task 13: 문제별 reset·전체 복구·재도전
 
