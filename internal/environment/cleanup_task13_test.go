@@ -12,6 +12,7 @@ import (
 
 	"github.com/JunYupK/JunKloud/internal/model"
 	"github.com/JunYupK/JunKloud/internal/testutil"
+	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
@@ -19,6 +20,7 @@ import (
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/types"
 	dynamicfake "k8s.io/client-go/dynamic/fake"
+	kubefake "k8s.io/client-go/kubernetes/fake"
 	clienttesting "k8s.io/client-go/testing"
 )
 
@@ -136,4 +138,27 @@ func TestResetClusterUsesDistinctRecreationIntent(t *testing.T) {
 	testutil.NoError(t, err)
 	testutil.Equal(t, got, parent)
 	testutil.Equal(t, ops[0].Planned.DockerIDs, id.ContainerIDs)
+}
+
+func TestPVCDeletedClaimRetainedPVIncluded(t *testing.T) {
+	inv := model.Inventory{EnvironmentID: "env", SessionID: "session", ProblemID: "problem", Resources: []model.OwnedResource{{Ref: model.ObjectRef{APIVersion: "v1", Kind: "PersistentVolumeClaim", Namespace: "owned", Name: "data"}, UID: "claim-old"}}}
+	pv := &corev1.PersistentVolume{ObjectMeta: metav1.ObjectMeta{Name: "retained", UID: "pv-old"}, Spec: corev1.PersistentVolumeSpec{PersistentVolumeReclaimPolicy: corev1.PersistentVolumeReclaimRetain, ClaimRef: &corev1.ObjectReference{Namespace: "owned", Name: "data", UID: "claim-old"}}, Status: corev1.PersistentVolumeStatus{Phase: corev1.VolumeReleased}}
+	cl := &clients{kube: kubefake.NewClientset(pv)}
+	vols, err := snapshotVolumes(bg, cl, Owner{Inventory: inv, Scope: model.ResourceScope{Namespaces: []string{"owned"}}})
+	testutil.NoError(t, err)
+	if len(vols) != 1 {
+		t.Fatal("deleted claim's retained backing was omitted", vols)
+	}
+	testutil.Equal(t, vols[0].ClaimUID, "claim-old")
+	testutil.ErrorIs(t, validateVolume(vols[0]), ErrStorageRetained)
+}
+
+func TestPVCPendingClaimRefusesUnverifiedCleanup(t *testing.T) {
+	pvc := &corev1.PersistentVolumeClaim{ObjectMeta: metav1.ObjectMeta{Name: "data", Namespace: "owned", UID: "pending-uid"}}
+	cl := &clients{kube: kubefake.NewClientset(pvc)}
+	vols, err := snapshotVolumes(bg, cl, Owner{Scope: model.ResourceScope{Namespaces: []string{"owned"}}})
+	testutil.ErrorIs(t, err, ErrStorageRetained)
+	if len(vols) != 1 || vols[0].ClaimUID != "pending-uid" {
+		t.Fatal("pending claim identity not retained", vols)
+	}
 }

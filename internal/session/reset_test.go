@@ -343,3 +343,45 @@ func TestResetDeletedNewAttemptNeverGradesArchivedFiles(t *testing.T) {
 	testutil.NoError(t, err)
 	testutil.Equal(t, h.eng.targets[len(h.eng.targets)-1].Workspace, dir)
 }
+
+func TestResetNeverReusesSubmittedAttemptAfterDirectoryDisappears(t *testing.T) {
+	for _, move := range []bool{false, true} {
+		t.Run(fmt.Sprint(move), func(t *testing.T) {
+			h := newHarness(t)
+			v, err := h.svc.Prepare(ctx, session.StartOptions{Mode: model.ModePractice, Count: 5, Seed: 7})
+			testutil.NoError(t, err)
+			testutil.NoError(t, h.svc.Start(ctx, v.ID, t0))
+			pid := v.Problems[0].ID
+			testutil.NoError(t, h.svc.Reset(ctx, v.ID, session.ResetOptions{ProblemID: pid}))
+			h.eng.override = map[string]func(model.FrozenProblem) model.Evaluation{pid: erroredEvaluation}
+			old, err := h.svc.Grade(ctx, v.ID, session.GradeOptions{ProblemID: pid})
+			testutil.NoError(t, err)
+			dir := session.AttemptDir(h.workspace, v.ID, pid, 2)
+			if move {
+				testutil.NoError(t, os.Rename(dir, dir+"-archived"))
+			} else {
+				testutil.NoError(t, os.RemoveAll(dir))
+			}
+			h.eng.override = nil
+			testutil.NoError(t, h.svc.Reset(ctx, v.ID, session.ResetOptions{ProblemID: pid}))
+			_, n, err := session.LatestAttempt(h.workspace, v.ID, pid)
+			testutil.NoError(t, err)
+			testutil.Equal(t, n, 3)
+			rv, err := h.svc.Review(ctx, v.ID, pid, false)
+			testutil.NoError(t, err)
+			if rv.Confirmed != nil {
+				t.Fatal("prior attempt became current")
+			}
+			_, err = h.svc.Grade(ctx, v.ID, session.GradeOptions{ProblemID: pid, Retry: true})
+			testutil.ErrorIs(t, err, session.ErrAnswerChanged)
+			fresh, err := h.svc.Grade(ctx, v.ID, session.GradeOptions{ProblemID: pid})
+			testutil.NoError(t, err)
+			if fresh.SubmissionID == old.SubmissionID {
+				t.Fatal("new attempt reused old submission")
+			}
+			kept, err := h.st.GetRun(ctx, old.ID)
+			testutil.NoError(t, err)
+			testutil.Equal(t, kept, old)
+		})
+	}
+}

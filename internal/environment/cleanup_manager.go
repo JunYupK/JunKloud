@@ -97,10 +97,14 @@ func (m *Manager) cleanup(ctx context.Context, id model.Identity, inv model.Inve
 			}
 		}
 		volumes, err := snapshotVolumes(ctx, cl, owner)
+		op.Planned.Volumes = volumes
 		if err != nil {
+			// Pending/absent claims remain durable proof to reconcile on retry.
+			if saveErr := m.store.PutOperation(ctx, op); saveErr != nil {
+				return errors.Join(err, saveErr)
+			}
 			return err
 		}
-		op.Planned.Volumes = volumes
 		op.Phase = "snapshotted"
 		if err = m.store.PutOperation(ctx, op); err != nil {
 			return err
@@ -141,41 +145,84 @@ func (m *Manager) cleanup(ctx context.Context, id model.Identity, inv model.Inve
 
 func snapshotVolumes(ctx context.Context, cl *clients, owner Owner) ([]model.VolumeCleanup, error) {
 	var out []model.VolumeCleanup
+	claims := map[string]model.VolumeCleanup{}
+	for _, v := range owner.Inventory.Volumes {
+		claims[v.ClaimUID] = v
+	}
+	for _, r := range owner.Inventory.Resources {
+		if r.Ref.APIVersion == "v1" && r.Ref.Kind == "PersistentVolumeClaim" && slices.Contains(owner.Scope.Namespaces, r.Ref.Namespace) {
+			if r.UID == "" {
+				return out, fmt.Errorf("%w: PVC %s/%s has no recorded UID", ErrStorageRetained, r.Ref.Namespace, r.Ref.Name)
+			}
+			if _, ok := claims[r.UID]; !ok {
+				claims[r.UID] = model.VolumeCleanup{ClaimNamespace: r.Ref.Namespace, ClaimName: r.Ref.Name, ClaimUID: r.UID}
+			}
+		}
+	}
 	for _, ns := range owner.Scope.Namespaces {
-		claims, err := cl.kube.CoreV1().PersistentVolumeClaims(ns).List(ctx, metav1.ListOptions{})
+		live, err := cl.kube.CoreV1().PersistentVolumeClaims(ns).List(ctx, metav1.ListOptions{})
+		if apierrors.IsNotFound(err) {
+			continue
+		}
 		if err != nil {
 			return nil, err
 		}
-		for _, c := range claims.Items {
-			if c.Spec.VolumeName == "" {
-				continue
+		for _, c := range live.Items {
+			if c.UID == "" {
+				return out, fmt.Errorf("%w: PVC %s/%s has no UID", ErrStorageRetained, ns, c.Name)
 			}
-			pv, err := cl.kube.CoreV1().PersistentVolumes().Get(ctx, c.Spec.VolumeName, metav1.GetOptions{})
-			if err != nil {
-				return nil, err
+			if _, ok := claims[string(c.UID)]; !ok {
+				claims[string(c.UID)] = model.VolumeCleanup{ClaimNamespace: ns, ClaimName: c.Name, ClaimUID: string(c.UID)}
 			}
-			ref := pv.Spec.ClaimRef
-			if ref == nil || ref.UID != c.UID || ref.Name != c.Name || ref.Namespace != ns {
-				return nil, fmt.Errorf("%w: PV %s claim identity differs", ErrNotOwned, pv.Name)
-			}
-			v := model.VolumeCleanup{Name: pv.Name, UID: string(pv.UID), ClaimNamespace: ns, ClaimName: c.Name, ClaimUID: string(c.UID), ReclaimPolicy: string(pv.Spec.PersistentVolumeReclaimPolicy), Provisioner: pv.Annotations["pv.kubernetes.io/provisioned-by"]}
-			if pv.Spec.HostPath != nil {
-				v.Path = pv.Spec.HostPath.Path
-			}
-			if pv.Spec.Local != nil {
-				v.Path = pv.Spec.Local.Path
-			}
-			if pv.Spec.NodeAffinity != nil && pv.Spec.NodeAffinity.Required != nil {
-				terms := pv.Spec.NodeAffinity.Required.NodeSelectorTerms
-				if len(terms) == 1 && len(terms[0].MatchExpressions) == 1 {
-					e := terms[0].MatchExpressions[0]
-					if e.Key == "kubernetes.io/hostname" && string(e.Operator) == "In" && len(e.Values) == 1 {
-						v.NodeName = e.Values[0]
-					}
+		}
+	}
+	// A deleted claim's Released PV is still backing data. Reconcile all
+	// claim references in the verified bundle, never PV names alone.
+	pvs, err := cl.kube.CoreV1().PersistentVolumes().List(ctx, metav1.ListOptions{})
+	if err != nil {
+		return out, err
+	}
+	matched := map[string]bool{}
+	for _, pv := range pvs.Items {
+		ref := pv.Spec.ClaimRef
+		if ref == nil || !slices.Contains(owner.Scope.Namespaces, ref.Namespace) {
+			continue
+		}
+		claim, ok := claims[string(ref.UID)]
+		if !ok || claim.ClaimName != ref.Name || claim.ClaimNamespace != ref.Namespace {
+			return out, fmt.Errorf("%w: PV %s claim identity cannot be proved", ErrStorageRetained, pv.Name)
+		}
+		v := model.VolumeCleanup{Name: pv.Name, UID: string(pv.UID), ClaimNamespace: ref.Namespace, ClaimName: ref.Name, ClaimUID: string(ref.UID), ReclaimPolicy: string(pv.Spec.PersistentVolumeReclaimPolicy), Provisioner: pv.Annotations["pv.kubernetes.io/provisioned-by"]}
+		if pv.Spec.HostPath != nil {
+			v.Path = pv.Spec.HostPath.Path
+		}
+		if pv.Spec.Local != nil {
+			v.Path = pv.Spec.Local.Path
+		}
+		if pv.Spec.NodeAffinity != nil && pv.Spec.NodeAffinity.Required != nil {
+			terms := pv.Spec.NodeAffinity.Required.NodeSelectorTerms
+			if len(terms) == 1 && len(terms[0].MatchExpressions) == 1 {
+				e := terms[0].MatchExpressions[0]
+				if e.Key == "kubernetes.io/hostname" && string(e.Operator) == "In" && len(e.Values) == 1 {
+					v.NodeName = e.Values[0]
 				}
 			}
-			out = append(out, v)
 		}
+		out = append(out, v)
+		matched[string(ref.UID)] = true
+	}
+	var unresolved []string
+	for uid, claim := range claims {
+		if matched[uid] {
+			continue
+		}
+		out = append(out, claim)
+		if claim.Name == "" {
+			unresolved = append(unresolved, claim.ClaimNamespace+"/"+claim.ClaimName)
+		}
+	}
+	if len(unresolved) > 0 {
+		return out, fmt.Errorf("%w: PVC backing not established for %s; wait for binding or inspect prior data, then retry reset", ErrStorageRetained, strings.Join(unresolved, ", "))
 	}
 	return out, nil
 }

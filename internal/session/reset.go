@@ -104,6 +104,14 @@ func (s *Service) Reset(ctx context.Context, sessionID string, opts ResetOptions
 		if err != nil && !errors.Is(err, fs.ErrNotExist) {
 			return err
 		}
+		hist, err := s.loadHistory(ctx, rec.ID)
+		if err != nil {
+			return err
+		}
+		n = max(n, hist.currentAttempt(opts.ProblemID))
+		for _, grading := range hist.ops {
+			n = max(n, grading.Planned.Attempts[opts.ProblemID])
+		}
 		op.Planned.ArtifactPaths = []string{AttemptDir(s.cfg.Workspace, rec.ID, opts.ProblemID, n+1)}
 	}
 	if err = s.cfg.Store.PutOperation(ctx, op); err != nil {
