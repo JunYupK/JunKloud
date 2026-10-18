@@ -111,6 +111,16 @@ func publicError(err error) error {
 		return err
 	}
 	switch {
+	case errors.Is(err, environment.ErrNoEnvironment):
+		return fail(3, "기록된 전용 환경 ID가 없습니다. 최초 환경 생성이 중단됐다면 ckad doctor로 기록된 생성 작업을 재개하세요. 생성 기록과 리소스를 보존했습니다.")
+	case errors.Is(err, session.ErrResetPending):
+		return fail(3, "초기화가 중단되었습니다. 기존 풀이와 정리 기록을 보존했습니다. ckad status 확인 후 ckad reset --recover로 재개하세요.")
+	case errors.Is(err, environment.ErrCleanupTimeout), errors.Is(err, environment.ErrStorageRetained), errors.Is(err, environment.ErrNotOwned):
+		return fail(3, "초기화를 완료하지 못했습니다: "+err.Error()+". 남은 대상과 소유권을 확인한 뒤 ckad reset --recover로 재개하세요.")
+	case errors.Is(err, session.ErrPackageMissing), errors.Is(err, session.ErrPackageCorrupt):
+		return fail(3, "기록된 문제 패키지가 없거나 손상되어 정확히 재현할 수 없습니다. 원래 패키지를 복구하세요. 다른 버전으로 대체하지 않았습니다.")
+	case errors.Is(err, session.ErrResetConfirmation):
+		return fail(2, "전체 초기화에는 대상 환경 ID 확인이 필요합니다.")
 	case errors.Is(err, context.Canceled), errors.Is(err, context.DeadlineExceeded):
 		return fail(3, "작업이 중단되었습니다. ckad status로 기록을 확인하세요.")
 	case errors.Is(err, store.ErrNotFound):
@@ -138,7 +148,7 @@ func publicError(err error) error {
 	case errors.Is(err, session.ErrCapabilityUnavailable):
 		return fail(3, "필요한 환경 capability가 준비되지 않았습니다. ckad doctor로 확인하세요.")
 	case errors.Is(err, session.ErrEnvironmentOccupied):
-		return fail(3, "이전 학습 리소스가 남아 있습니다. ckad status로 확인하세요. reset 연결은 아직 제공되지 않습니다.")
+		return fail(3, "이전 학습 리소스가 남아 있습니다. ckad status 확인 후 ckad reset으로 정리하세요.")
 	default:
 		return fail(3, "환경·저장소 또는 채점 작업을 완료하지 못했습니다. 상태 경로·문제 은행 경로와 권한을 확인하고 ckad doctor / ckad status로 진단하세요.")
 	}

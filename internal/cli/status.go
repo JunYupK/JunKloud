@@ -103,11 +103,11 @@ func markCommand(d *Dependencies) *cobra.Command {
 	return c
 }
 
-var recoveryCommand = regexp.MustCompile(`ckad grade(?: --problem [a-z0-9][a-z0-9-]*)?(?: --(?:retry|resubmit))?`)
+var recoveryCommand = regexp.MustCompile(`ckad (?:reset --recover|grade(?: --problem [a-z0-9][a-z0-9-]*)?(?: --(?:retry|resubmit))?)`)
 
 func printPending(c *cobra.Command, pending []session.Pending) {
 	for _, p := range pending {
-		fmt.Fprintf(c.OutOrStdout(), "미완료 채점: %s | %s | %s\n", p.OperationID, p.Phase, p.Since.Local().Format("2006-01-02 15:04:05 MST"))
+		fmt.Fprintf(c.OutOrStdout(), "미완료 작업: %s | %s | %s\n", p.OperationID, p.Phase, p.Since.Local().Format("2006-01-02 15:04:05 MST"))
 		// The service has already checked which commands are legal for this
 		// interrupted scope. Preserve that decision, including problem scope
 		// and unavailable technical retries, without printing internal prose.

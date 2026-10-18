@@ -345,11 +345,7 @@ func NewRuntime(ctx context.Context, m *environment.Manager, st *store.Store, id
 	if err != nil {
 		return nil, err
 	}
-	j, err := NewClusterJanitor(m.KubeconfigPath(), id.Context, janitor...)
-	if err != nil {
-		g.Close()
-		return nil, err
-	}
+	j := environment.ManagedJanitor{Manager: m, Identity: id, Options: janitor}
 	v, err := NewValidator(Config{
 		Identity: id, Env: m, Janitor: j, Engine: g.Engine, Store: st,
 		LockPath: LockPath(cfg.StateDir), GraderVersion: grader.GraderVersion, EnvironmentHash: envHash,

@@ -57,6 +57,7 @@ func reviewCommand(d *Dependencies) *cobra.Command {
 		printSubmissionTimes(c, rv.Submissions)
 		for _, run := range rv.Runs {
 			if rv.Confirmed == nil || rv.Confirmed.ID != run.ID {
+				fmt.Fprintln(c.OutOrStdout(), "과거 관찰 기록:")
 				printRun(c, run, rv.Feedback)
 			}
 		}

@@ -31,7 +31,8 @@ func startOptions(c *cobra.Command, args []string) (session.StartOptions, error)
 		if !failed || len(args) > 0 || f.Changed("count") || f.Changed("mode") || domain != "" || difficulty != "" || tag != "" || f.Changed("seed") {
 			return o, fail(2, "재도전은 start --retry <session-id> --failed [--new-seed]로 요청하세요.")
 		}
-		return o, publicError(session.ErrRetryUnavailable)
+		o.Mode = model.ModeRetry
+		return o, nil
 	}
 	if failed || newSeed {
 		return o, fail(2, "--failed와 --new-seed는 --retry와 함께 사용하세요.")
@@ -87,6 +88,10 @@ func validateRequest(c *cobra.Command, args []string) error {
 	case "reset":
 		cluster, _ := c.Flags().GetBool("cluster")
 		pid, _ := c.Flags().GetString("problem")
+		recover, _ := c.Flags().GetBool("recover")
+		if recover && (cluster || pid != "") {
+			return fail(2, "--recover는 단독으로 사용하세요.")
+		}
 		if cluster && pid != "" {
 			return fail(2, "--cluster와 --problem을 함께 지정할 수 없습니다.")
 		}

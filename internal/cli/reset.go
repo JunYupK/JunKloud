@@ -3,33 +3,76 @@
 package cli
 
 import (
-	"github.com/JunYupK/JunKloud/internal/model"
+	"bufio"
+	"errors"
+	"fmt"
+	"strings"
+
+	"github.com/JunYupK/JunKloud/internal/session"
+	"github.com/JunYupK/JunKloud/internal/store"
 	"github.com/spf13/cobra"
 )
 
 func resetCommand(d *Dependencies) *cobra.Command {
-	c := &cobra.Command{Use: "reset", Short: "초기화 (Task 13 연결 전에는 사용할 수 없음)", Args: cobra.NoArgs}
+	c := &cobra.Command{Use: "reset", Short: "소유 리소스를 정리하고 풀이·기록 보존", Args: cobra.NoArgs}
 	c.Flags().String("problem", "", "훈련 문제 Q-number 또는 problem-id")
 	c.Flags().Bool("cluster", false, "전용 클러스터 복구 재생성")
+	c.Flags().Bool("recover", false, "기록된 미완료 reset 재개")
 	c.RunE = func(c *cobra.Command, _ []string) error {
-		pid, _ := c.Flags().GetString("problem")
-		if pid != "" {
-			id, err := current(c, d)
-			if err != nil {
-				return err
+		recover, _ := c.Flags().GetBool("recover")
+		cluster, _ := c.Flags().GetBool("cluster")
+		if d.Session == nil || d.Store == nil {
+			return publicError(errors.New("missing service"))
+		}
+		sid, err := d.Store.CurrentSessionID(c.Context())
+		var st session.Status
+		if errors.Is(err, store.ErrNotFound) && (cluster || recover) && d.Environment != nil {
+			id, e := d.Environment.RecordedIdentity()
+			if e != nil {
+				return publicError(e)
 			}
-			if _, err := resolve(c, d, id, pid); err != nil {
-				return err
-			}
-			st, err := d.Session.Status(c.Context(), id, d.Now())
+			st.Session.EnvironmentID = id.ID
+		} else if err != nil {
+			return publicError(err)
+		} else {
+			st, err = d.Session.Status(c.Context(), sid, d.Now())
 			if err != nil {
 				return publicError(err)
 			}
-			if st.Session.Mode == model.ModeMock {
-				return fail(2, "모의시험은 개별 문제 초기화를 지원하지 않습니다.")
+		}
+		if recover {
+			return publicError(d.Session.Recover(c.Context(), st.Session.EnvironmentID))
+		}
+		pid, _ := c.Flags().GetString("problem")
+		opts := session.ResetOptions{Cluster: cluster}
+		if pid != "" {
+			p, resolveErr := resolve(c, d, sid, pid)
+			opts.ProblemID, err = p.ID, resolveErr
+			if err != nil {
+				return err
+			}
+		} else {
+			fmt.Fprintf(c.OutOrStdout(), "세션 %s를 포기하고 환경 %s의 소유 리소스를 정리합니다. 풀이·성적·개인 설정은 보존됩니다.\n", sid, st.Session.EnvironmentID)
+			if cluster {
+				fmt.Fprintln(c.OutOrStdout(), "전용 클러스터 전체를 삭제하고 재생성합니다.")
+			}
+			fmt.Fprint(c.OutOrStdout(), "확인하려면 환경 ID를 입력하세요: ")
+			answers := make(chan string, 1)
+			go func() { line, _ := bufio.NewReader(c.InOrStdin()).ReadString('\n'); answers <- strings.TrimSpace(line) }()
+			select {
+			case <-c.Context().Done():
+				return publicError(c.Context().Err())
+			case opts.ConfirmedEnvironmentID = <-answers:
+			}
+			if opts.ConfirmedEnvironmentID != st.Session.EnvironmentID {
+				return fail(2, "확인이 일치하지 않아 초기화하지 않았습니다.")
 			}
 		}
-		return fail(3, "reset은 아직 사용할 수 없습니다. Task 13 초기화·보존·복구 연결이 필요합니다. 리소스는 삭제하지 않았습니다.")
+		if err = d.Session.Reset(c.Context(), sid, opts); err != nil {
+			return publicError(err)
+		}
+		fmt.Fprintln(c.OutOrStdout(), "초기화 완료. 이전 풀이와 학습 기록은 보존했습니다.")
+		return nil
 	}
 	return c
 }

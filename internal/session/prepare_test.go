@@ -580,7 +580,7 @@ func TestPrepareRejectsBadOptions(t *testing.T) {
 		})
 	}
 	_, err := h.svc.Prepare(ctx, session.StartOptions{Mode: model.ModeRetry, RetrySessionID: "practice-1"})
-	testutil.ErrorIs(t, err, session.ErrRetryUnavailable)
+	testutil.ErrorIs(t, err, store.ErrNotFound)
 
 	// An exam naming a problem the bank lacks is refused, not shortened.
 	exam := filepath.Join(h.bank, "exams", "dev-mock.yaml")

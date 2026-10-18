@@ -11,6 +11,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
@@ -309,7 +310,7 @@ func TestMockReferenceAndExistingGrade(t *testing.T) {
 		t.Fatal(code, out)
 	}
 }
-func TestCancellationAndUnimplementedCommands(t *testing.T) {
+func TestCancellationAndResetWithoutSession(t *testing.T) {
 	h := newHarness(t)
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
@@ -320,7 +321,7 @@ func TestCancellationAndUnimplementedCommands(t *testing.T) {
 	}
 	for _, args := range [][]string{{"reset"}, {"reset", "--cluster"}, {"start", "--retry", "prior", "--failed"}} {
 		code, _, diag := h.run("", args...)
-		if code != 3 || !strings.Contains(diag, "아직") {
+		if code != 2 || strings.Contains(diag, "아직") {
 			t.Fatal(fmt.Sprint(args), code, diag)
 		}
 	}
@@ -498,5 +499,28 @@ func TestExecutableBankValidationRefusesActiveLearningBeforeTools(t *testing.T) 
 	var out, diag bytes.Buffer
 	if code := Run(context.Background(), []string{"bank", "validate", "dev-config-001"}, strings.NewReader(""), &out, &diag); code != 2 || !strings.Contains(diag.String(), "진행 중") {
 		t.Fatal(code, out.String(), diag.String())
+	}
+}
+
+func TestResetPendingFirstCreatePreservesIntentAndGivesRecoveryGuidance(t *testing.T) {
+	h := newHarness(t)
+	t.Setenv("CKAD_STATE_DIR", h.state)
+	t.Setenv("CKAD_WORKSPACE", h.workspace)
+	t.Setenv("CKAD_BANK_DIR", "../../tests/fixtures/dev-bank")
+	t.Setenv("PATH", t.TempDir())
+	m := environment.New(h.state, h.deps.Store)
+	op := model.Operation{ID: "create-first", Kind: environment.OperationCreate, EnvironmentID: "first-create", Phase: environment.PhaseClusterCreate, Planned: model.Inventory{EnvironmentID: "first-create", DockerIDs: []string{"recorded-node"}, ArtifactPaths: []string{m.KubeconfigPath(), m.IdentityPath()}}}
+	must(t, h.deps.Store.PutOperation(context.Background(), op))
+	var out, diag bytes.Buffer
+	if code := Run(context.Background(), []string{"reset", "--cluster"}, strings.NewReader("first-create\n"), &out, &diag); code != 3 || !strings.Contains(diag.String(), "ckad doctor") || !strings.Contains(diag.String(), "최초") {
+		t.Fatal(code, out.String(), diag.String())
+	}
+	got, err := h.deps.Store.GetOperation(context.Background(), op.ID)
+	must(t, err)
+	if !reflect.DeepEqual(got, op) {
+		t.Fatal("reset changed the unfinished initial creation", got)
+	}
+	if _, err := os.Stat(m.IdentityPath()); !os.IsNotExist(err) {
+		t.Fatal("reset created an identity", err)
 	}
 }

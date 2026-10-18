@@ -42,6 +42,9 @@ func (s *Service) Start(ctx context.Context, sessionID string, at time.Time) err
 		return fmt.Errorf("session: start: %w", err)
 	}
 	defer release()
+	if err := s.requireNoPendingReset(ctx); err != nil {
+		return err
+	}
 
 	rec, err := s.cfg.Store.LoadSession(ctx, sessionID)
 	if err != nil {
@@ -121,9 +124,6 @@ func (s *Service) Status(ctx context.Context, sessionID string, now time.Time) (
 	if err != nil {
 		return Status{}, fmt.Errorf("session: status of %q: %w", sessionID, err)
 	}
-	if rec.StartedAt == nil {
-		return Status{Session: viewOf(rec)}, nil
-	}
 	elapsed, overtime, anomaly := wallClock(rec, now)
 	st := Status{Session: viewOf(rec), Elapsed: elapsed, Overtime: overtime, ClockAnomaly: anomaly}
 	hist, err := s.loadHistory(ctx, sessionID)
@@ -131,6 +131,15 @@ func (s *Service) Status(ctx context.Context, sessionID string, now time.Time) (
 		return Status{}, err
 	}
 	st.Pending = s.pending(rec, hist)
+	ops, err := s.cfg.Store.ListOperations(ctx, ResetOperationKind)
+	if err != nil {
+		return Status{}, err
+	}
+	for _, op := range ops {
+		if op.SessionID == rec.ID && op.Phase != PhaseDone {
+			st.Pending = append(st.Pending, Pending{OperationID: op.ID, ProblemID: op.Planned.ProblemID, Phase: op.Phase, Since: op.CreatedAt, Recorded: true, Guidance: "ckad reset --recover"})
+		}
+	}
 	return st, nil
 }
 

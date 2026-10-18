@@ -11,6 +11,7 @@ import (
 	"os"
 	"path/filepath"
 	"slices"
+	"strconv"
 	"strings"
 	"time"
 
@@ -191,6 +192,9 @@ func (s *Service) Grade(ctx context.Context, sessionID string, opts GradeOptions
 		return model.GradingRun{}, fmt.Errorf("session: grade: %w", err)
 	}
 	defer release()
+	if err := s.requireNoPendingReset(ctx); err != nil {
+		return model.GradingRun{}, err
+	}
 
 	rec, err := s.cfg.Store.LoadSession(ctx, sessionID)
 	if err != nil {
@@ -301,6 +305,16 @@ func differingVersions(frozen, live map[string]string) string {
 // execute carries a planned grading out (steps 2 to 5 of Grade).
 func (s *Service) execute(ctx context.Context, rec model.SessionRecord, hist history, p gradePlan, at time.Time) (model.GradingRun, error) {
 	items := s.items(rec, p.problems)
+	// A reset's published attempt remains current even if the learner removes
+	// its directory; never fall back to the archived answer of an older one.
+	for i := range items {
+		it := &items[i]
+		minimum := hist.currentAttempt(it.frozen.Definition.ID)
+		n, _ := strconv.Atoi(strings.TrimPrefix(filepath.Base(it.target.Workspace), attemptPrefix))
+		if n < minimum && it.missing == "" {
+			it.target.Workspace = AttemptDir(s.cfg.Workspace, rec.ID, it.frozen.Definition.ID, minimum)
+		}
+	}
 	var targets []grader.Target
 	var unreadable []string // problems whose workspace cannot be determined
 	for _, it := range items {
@@ -330,10 +344,15 @@ func (s *Service) execute(ctx context.Context, rec model.SessionRecord, hist his
 	}
 
 	// The intent first, with the time of the request (spec 11).
+	attempts := map[string]int{}
+	for _, it := range items {
+		n, _ := strconv.Atoi(strings.TrimPrefix(filepath.Base(it.target.Workspace), attemptPrefix))
+		attempts[it.frozen.Definition.ID] = max(1, n, hist.currentAttempt(it.frozen.Definition.ID))
+	}
 	op := model.Operation{
 		ID: GradeOperationID(p.runID), EnvironmentID: rec.EnvironmentID, SessionID: rec.ID,
 		Kind: GradeOperationKind, Phase: GradePlanned,
-		Planned:   model.Inventory{EnvironmentID: rec.EnvironmentID, SessionID: rec.ID, ProblemID: p.scope},
+		Planned:   model.Inventory{EnvironmentID: rec.EnvironmentID, SessionID: rec.ID, ProblemID: p.scope, Attempts: attempts},
 		CreatedAt: at,
 	}
 	if err := s.cfg.Store.PutOperation(ctx, op); err != nil {

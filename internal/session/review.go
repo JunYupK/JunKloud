@@ -68,6 +68,9 @@ type Review struct {
 // on they stay open, whatever a later review submission does to the session's
 // state. Practice shows them whenever they are asked for.
 func detailsOpen(rec model.SessionRecord, hist history) bool {
+	if rec.State == model.StateAbandoned {
+		return true
+	}
 	if rec.Mode == model.ModeMock {
 		_, run := examResult(hist)
 		return run != nil
@@ -119,8 +122,8 @@ func withheld(run model.GradingRun) model.GradingRun {
 //     solution gets ErrDisclosureLocked together with the withheld review.
 //
 // The content is read from the session's frozen package, never the bank.
-// Reviewing an abandoned session is ErrReviewUnsupported until the reset task
-// defines it.
+// An abandoned session is archival review: explicit abandonment unlocks its
+// details, records solution exposure and never presents a current total.
 func (s *Service) Review(ctx context.Context, sessionID, problemID string, solution bool) (Review, error) {
 	rec, err := s.cfg.Store.LoadSession(ctx, sessionID)
 	if err != nil {
@@ -129,8 +132,6 @@ func (s *Service) Review(ctx context.Context, sessionID, problemID string, solut
 	switch rec.State {
 	case model.StatePreparing, model.StateSetupError:
 		return Review{}, fmt.Errorf("%w: session %q is %s", ErrNotStarted, sessionID, rec.State)
-	case model.StateAbandoned:
-		return Review{}, fmt.Errorf("%w: session %q was abandoned; reviewing an abandoned session comes with the reset support", ErrReviewUnsupported, sessionID)
 	}
 	var frozen model.FrozenProblem
 	if problemID != "" {
@@ -286,6 +287,9 @@ func narrow(rec model.SessionRecord, run model.GradingRun, problemID string) mod
 // confirmed is the result a total may be shown for (see Review): a mock
 // exam's exam result, else the newest run of the scope.
 func confirmed(rec model.SessionRecord, hist history, pending []Pending, problemID string) *model.GradingRun {
+	if rec.State == model.StateAbandoned {
+		return nil
+	}
 	if rec.Mode == model.ModeMock {
 		_, run := examResult(hist)
 		if run != nil && problemID != "" {
@@ -302,6 +306,12 @@ func confirmed(rec model.SessionRecord, hist history, pending []Pending, problem
 	}
 	var newest *model.GradingRun
 	for _, sub := range hist.subs {
+		if problemID != "" && !hist.currentSubmission(sub, problemID) {
+			continue
+		}
+		if problemID == "" && slices.ContainsFunc(rec.Problems, func(f model.FrozenProblem) bool { return !hist.currentSubmission(sub, f.Definition.ID) }) {
+			continue
+		}
 		if problemID == "" && sub.ProblemID != "" {
 			continue // a problem's grade is not a session total
 		}

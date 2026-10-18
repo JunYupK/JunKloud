@@ -78,7 +78,11 @@ func (s *Service) prepare(ctx context.Context, opts StartOptions) (model.Session
 			return model.SessionRecord{}, Report{}, err
 		}
 	}
-	pl, err := s.plan(opts)
+	var pl plan
+	var err error
+	if opts.Mode != model.ModeRetry {
+		pl, err = s.plan(opts)
+	}
 	if err != nil {
 		return model.SessionRecord{}, Report{}, err
 	}
@@ -91,6 +95,15 @@ func (s *Service) prepare(ctx context.Context, opts StartOptions) (model.Session
 		return model.SessionRecord{}, Report{}, fmt.Errorf("session: prepare: %w", err)
 	}
 	defer release()
+	if err := s.requireNoPendingReset(ctx); err != nil {
+		return model.SessionRecord{}, Report{}, err
+	}
+	if opts.Mode == model.ModeRetry {
+		pl, seed, err = s.retryPlan(ctx, opts)
+		if err != nil {
+			return model.SessionRecord{}, Report{}, err
+		}
+	}
 
 	if err := s.requireNoActiveSession(ctx); err != nil {
 		return model.SessionRecord{}, Report{}, err
@@ -121,6 +134,9 @@ func (s *Service) prepare(ctx context.Context, opts StartOptions) (model.Session
 // environment and the problems.
 func (s *Service) record(ctx context.Context, id model.Identity, opts StartOptions, seed uint64, limit time.Duration, chosen []model.Problem, manifest map[string]string, envHash string) (model.SessionRecord, error) {
 	frozen, setups, err := s.freeze(id, chosen, seed)
+	if opts.Mode == model.ModeRetry && !opts.NewSeed {
+		frozen, setups, err = s.retryFrozen(ctx, id, opts, chosen)
+	}
 	if err != nil {
 		return model.SessionRecord{}, err
 	}
@@ -138,12 +154,25 @@ func (s *Service) record(ctx context.Context, id model.Identity, opts StartOptio
 		return model.SessionRecord{}, err
 	}
 	rec := model.SessionRecord{
-		ID: sid, EnvironmentID: id.ID, Mode: opts.Mode, State: model.StatePreparing,
+		ID: sid, EnvironmentID: id.ID, Mode: opts.Mode, State: model.StatePreparing, ParentID: opts.RetrySessionID,
 		Seed: seed, Problems: frozen, DurationLimit: limit,
 		GraderVersion: s.cfg.GraderVersion, EnvironmentHash: envHash, EnvironmentManifest: manifest,
 	}
 	if err := s.cfg.Store.CreateSession(ctx, rec); err != nil {
 		return model.SessionRecord{}, fmt.Errorf("session: record the session: %w", err)
+	}
+	if opts.RetrySessionID != "" {
+		reviews, e := s.cfg.Store.ListReviews(ctx, opts.RetrySessionID)
+		if e != nil {
+			return rec, e
+		}
+		for _, r := range reviews {
+			if slices.ContainsFunc(frozen, func(f model.FrozenProblem) bool { return f.Definition.ID == r.ProblemID }) {
+				if e = s.cfg.Store.RecordReview(ctx, sid, r.ProblemID, r.ReviewedAt); e != nil {
+					return rec, e
+				}
+			}
+		}
 	}
 	op := model.Operation{
 		ID: OperationID(sid), EnvironmentID: id.ID, SessionID: sid, Kind: OperationKind,

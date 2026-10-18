@@ -57,9 +57,15 @@ workspace 진입 시 `kubectl`도 전용 kubeconfig를 사용합니다. 상태 �
 `grade --retry`는 수정하지 않은 오류 제출을 다시 관찰하고, `--resubmit`은
 수정 후 새 제출을 기록합니다. 모의시험의 66%는 참고 수치입니다.
 
-`reset`, 오답 재도전(`start --retry`)은 후속 Task 13의 연결 전까지 오류를
-반환하며 정리 완료로 표시하지 않습니다. 직접 클러스터나 볼륨을 지우지 말고
-현재 기록과 개인 파일을 보존하세요.
+훈련 문제는 `ckad reset --problem Q1`로 초기화합니다. 기존 풀이·성적·개인
+설정은 보존하고 새 attempt를 만들며, 진행 중 모의시험의 개별 reset은 거부합니다.
+`ckad reset`은 환경 ID를 입력해 세션 포기와 전체 문제 정리를 확인합니다.
+`ckad reset --cluster`도 환경 ID 확인 후 전용 클러스터를 재생성합니다.
+중단된 초기화는 `ckad reset --recover`로 재개하며, 정리를 확인할 수 없는
+PVC/PV나 finalizer는 오류와 기록을 남깁니다. 미완료 정리 중 새 학습은 시작하지 않습니다.
+오답은 `ckad start --retry <session-id> --failed`로 같은 문제 version·조건에서
+재도전하고, `--new-seed`를 붙이면 검증된 범위의 새 조건을 사용합니다.
+원래 문제 패키지가 없으면 재도전을 거부합니다.
 
 개발 환경은 `runtime/up.ps1 -Service dev` 또는 `bash runtime/up.sh dev`로 시작합니다.
 그 안에서 `go test ./...`, `make test-runtime`, `make test-e2e`를 실행할 수 있습니다.
