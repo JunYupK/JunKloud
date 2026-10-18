@@ -321,21 +321,25 @@ Task 2에서 `internal/model`에 아래 타입을 정의한다. 패키지 간에
 
 ### Task 13: 문제별 reset·전체 복구·재도전
 
+**실행 기록:** 2026-10-18 완료. 구현 `1d581c7`, 독립 리뷰의 두 지적 수정 `e003745`; 수정 재리뷰에서 두 지적 해결 및 새 중요 결함 없음. 수정 후 `go test ./... -count=1` 통과. 실제 Docker/kind CLI 전체 흐름 `TestReset`은 `1d581c7`에서 1066.73초 통과, 수정 커밋의 `TestResetStorageReconciliation`은 `e003745`에서 190.19초 통과했다. 시도 폴더 삭제·이동 후 번호 재사용 방지는 수정 전 실패/수정 후 통과 회귀로 확인했다. 전체 흐름을 수정 후 다시 실행했다고 주장하지 않는다.
+
+실측 환경은 Windows/WSL2, Docker 24/API 1.43, cgroup v2이며 IPv6 비활성 환경에 필요한 `no-ipv6` 옵션만 사용했다. 개인 파일·과거 풀이/성적 보존, 실패 문제의 동일/새 seed 재도전, 확인 후 클러스터 재생성, PVC backing 제거, 삭제된 PVC의 Released Retain PV 거부와 미완료 정리 중 새 시작 차단을 검증했다. 확인할 수 없는 backing과 finalizer는 강제 삭제하지 않고 오류·기록을 보존한다. 사용자의 요청에 따라 이번 구현은 Task 13까지이며, 제품 문제은행과 M2/4GiB 최소 사양 검증은 미완료다.
+
 **Files:** Create environment cleanup, session reset/recover 및 tests, `tests/integration/reset_test.go`; Modify author validation cleanup과 CLI reset wiring.
 
 **Interfaces:** Adds `Manager.Cleanup(ctx,id model.Identity,inventory model.Inventory) error`; `Service.Reset(ctx,sessionID string,opts ResetOptions) error`, `Recover(ctx,environmentID string) error`; `ResetOptions{ProblemID string; Cluster bool; ConfirmedEnvironmentID string}`. 기존 StartOptions.RetrySessionID/NewSeed로 retry 세션 생성.
 
-- [ ] **실패 테스트 작성:** `TestResetNamespaceBundle`, `TestPVCDataRemoved`, `TestFinalizerIsNotForced`, `TestPersonalFilesPreserved`, `TestRetryOneWrongProblem`, `TestCrashAfterDelete`, `TestForeignResourcesPreserved`.
+- [x] **실패 테스트 작성:** `TestResetNamespaceBundle`, `TestPVCDataRemoved`, `TestFinalizerIsNotForced`, `TestPersonalFilesPreserved`, `TestRetryOneWrongProblem`, `TestCrashAfterDelete`, `TestForeignResourcesPreserved`.
   ```go
   testutil.Equal(t, strings.Contains(newVolumeContents, "old-attempt-marker"), false)
   testutil.Equal(t, personalAliasAfter, personalAliasBefore)
   testutil.Equal(t, len(retry.Problems), 1)
   testutil.Equal(t, foreignSentinelAfter, foreignSentinelBefore)
   ```
-- [ ] **실패 확인:** `go test ./internal/session ./internal/environment -run 'TestReset|TestPVC|TestFinalizer|TestPersonal|TestRetryOne|TestCrashAfter|TestForeign' -v` 실패 확인.
-- [ ] **최소 구현:** UID·owner 검증→정리 intent→namespaced 묶음 삭제 완료 대기→소유 cluster-scoped/스토리지/이미지 정리→새 attempt 작업 폴더. 과거 풀이·점수·개인 설정은 archive로 보존한다. platform 공유 리소스와 다른 Docker 리소스는 제외. 현재 시험의 개별 reset 거부, 전체 포기 확인. `--cluster`는 별도 전용 environment ID 확인 후만 재생성한다. 중단된 단계는 실제 상태를 확인해 재개한다.
-- [ ] **통과 확인:** `go test -tags=integration ./tests/integration -run TestReset -count=1 -v`와 CLI 전체 flow PASS. 정리 실패 상태에서 새로운 시험을 덮어 시작하지 않는다. 새 seed와 동일 seed 재도전, missing package 거부 확인.
-- [ ] **커밋:** `feat: reset owned practice state without losing user work`.
+- [x] **실패 확인:** 복구 단계에서 교체 환경 재검증, 재생성 journal 분리, 초기 생성 복구 안내, 시도 경계, 디렉터리 삭제·이동 후 번호 재사용, 삭제/미연결 PVC 회귀의 수정 전 실패와 수정 후 통과를 확인했다. 최초 구현 전 위 테스트 전체의 RED 실행 기록은 복구 기록에서 확인하지 못했으며 그 실행을 확인한 것으로 표시하지 않는다.
+- [x] **최소 구현:** UID·owner 검증→정리 intent→namespaced 묶음 삭제 완료 대기→소유 cluster-scoped/스토리지/이미지 정리→새 attempt 작업 폴더. 과거 풀이·점수·개인 설정은 archive로 보존한다. platform 공유 리소스와 다른 Docker 리소스는 제외. 현재 시험의 개별 reset 거부, 전체 포기 확인. `--cluster`는 별도 전용 environment ID 확인 후만 재생성한다. 중단된 단계는 실제 상태를 확인해 재개한다.
+- [x] **통과 확인:** `JUNKLOUD_TEST_HOST_COMPAT=no-ipv6 go test -tags=integration ./tests/integration -run '^TestReset$' -count=1 -timeout=45m -v`와 `-run '^TestResetStorageReconciliation$' -timeout=15m` PASS. 정리 실패 상태에서 새로운 시험을 덮어 시작하지 않는다. 새 seed와 동일 seed 재도전, missing package 거부 확인. 실행별 커밋은 위 기록과 같다.
+- [x] **커밋:** `feat: reset owned practice state without losing user work` (`1d581c7`), `fix: preserve reset attempt and storage cleanup proof` (`e003745`).
 
 ## 4. 제품 문제은행: 20문항 구성
 
