@@ -514,11 +514,23 @@ func (c *ArtifactChecker) captureVolume(ctx context.Context, t Target, crit mode
 	if err != nil {
 		return err
 	}
+	// A prior generic PVC criterion may have populated its key. Deduplication
+	// must not consume this criterion's separate binding/PV obligations.
+	if claim == nil && out[objectKey(claimRef)] != "absent" {
+		claim, err = c.obs.get(ctx, claimRef)
+		if err != nil {
+			return err
+		}
+	}
 	// Binding is stable submitted evidence for this destructive check only.
 	// Child Pod/ReplicaSet observations are deliberately absent: replacing one
 	// does not change a submitted Deployment, claim, mount, or workspace file.
 	if claim != nil {
-		out[objectKey(claimRef)] += ";binding=" + stringAt(claim, "spec", "volumeName")
+		base, _, _ := strings.Cut(out[objectKey(claimRef)], ";binding=")
+		if base != c.fingerprint(claim) {
+			return fmt.Errorf("%w: PVC changed during input capture", ErrTargetChanged)
+		}
+		out[objectKey(claimRef)] = base + ";binding=" + stringAt(claim, "spec", "volumeName")
 		if name := stringAt(claim, "spec", "volumeName"); name != "" {
 			if _, err := c.captureObject(ctx, model.ObjectRef{APIVersion: "v1", Kind: "PersistentVolume", Name: name}, out); err != nil {
 				return err

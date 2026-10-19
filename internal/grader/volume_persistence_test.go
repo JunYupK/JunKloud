@@ -468,3 +468,94 @@ func TestVolumeInputsKeepLearnerFilesAndMounts(t *testing.T) {
 		t.Fatal("controller PVC mount change ignored")
 	}
 }
+
+// I1: a generic PVC criterion must not consume the later volume check's
+// mandatory binding/PV capture through captureObject's deduplication.
+func TestVolumeCaptureIndependentOfPriorPVCCriterion(t *testing.T) {
+	for _, change := range []string{"PVC binding", "PV identity", "PV payload"} {
+		t.Run(change, func(t *testing.T) {
+			f := newVolumeFixture(t)
+			c := volumeCriterion()
+			target := volumeTarget(c)
+			target.Problem.Definition.Criteria = append([]model.Criterion{{ID: "claim-exists", Kind: model.CriterionResource, Target: model.ObjectRef{APIVersion: "v1", Kind: "PersistentVolumeClaim", Namespace: "jk-p1", Name: "data"}}}, target.Problem.Definition.Criteria...)
+			ck := grader.NewArtifactChecker(grader.ArtifactConfig{Reader: f.r})
+			before, err := ck.CaptureInputs(context.Background(), target)
+			if err != nil {
+				t.Fatal(err)
+			}
+			switch change {
+			case "PVC binding":
+				f.pvc["spec"].(map[string]any)["volumeName"] = "pv-other"
+			case "PV identity":
+				f.pv["metadata"].(map[string]any)["uid"] = "other-pv"
+			case "PV payload":
+				f.pv["spec"].(map[string]any)["persistentVolumeReclaimPolicy"] = "Retain"
+			}
+			after, err := ck.CaptureInputs(context.Background(), target)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if reflect.DeepEqual(before, after) {
+				t.Fatalf("%s change ignored when generic PVC criterion comes first: %v", change, after)
+			}
+		})
+	}
+	t.Run("repeated volume checks have one stable binding capture", func(t *testing.T) {
+		f := newVolumeFixture(t)
+		c := volumeCriterion()
+		target := volumeTarget(c)
+		ck := grader.NewArtifactChecker(grader.ArtifactConfig{Reader: f.r})
+		before, err := ck.CaptureInputs(context.Background(), target)
+		if err != nil {
+			t.Fatal(err)
+		}
+		c.ID = "second-volume"
+		target.Problem.Definition.Criteria = append(target.Problem.Definition.Criteria, c)
+		after, err := ck.CaptureInputs(context.Background(), target)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !reflect.DeepEqual(before, after) {
+			t.Fatalf("duplicate criterion changes canonical inputs: %v %v", before, after)
+		}
+	})
+}
+
+func TestVolumeCapturePriorPVCKeepsIntentionalReplacementStable(t *testing.T) {
+	f := newVolumeFixture(t)
+	c := volumeCriterion()
+	target := volumeTarget(c)
+	claimCriterion := model.Criterion{ID: "claim-first", Kind: model.CriterionResource, Target: model.ObjectRef{APIVersion: "v1", Kind: "PersistentVolumeClaim", Namespace: "jk-p1", Name: "data"}}
+	target.Problem.Definition.Criteria = append([]model.Criterion{claimCriterion}, target.Problem.Definition.Criteria...)
+	ck := grader.NewArtifactChecker(grader.ArtifactConfig{Reader: f.r})
+	before, err := ck.CaptureInputs(context.Background(), target)
+	if err != nil {
+		t.Fatal(err)
+	}
+	result := volumeRun(t, f, c, context.Background())
+	if result.Status != model.StatusPass {
+		t.Fatalf("%+v", result)
+	}
+	after, err := ck.CaptureInputs(context.Background(), target)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(before, after) {
+		t.Fatalf("intentional replacement changed ordered inputs: %v %v", before, after)
+	}
+}
+
+func TestVolumeCapturePriorPVCConcurrentEditIsError(t *testing.T) {
+	f := newVolumeFixture(t)
+	c := volumeCriterion()
+	target := volumeTarget(c)
+	ref := model.ObjectRef{APIVersion: "v1", Kind: "PersistentVolumeClaim", Namespace: "jk-p1", Name: "data"}
+	target.Problem.Definition.Criteria = append([]model.Criterion{{ID: "claim-first", Kind: model.CriterionResource, Target: ref}}, target.Problem.Definition.Criteria...)
+	changed := cloneVolumeObject(f.pvc)
+	changed["spec"].(map[string]any)["accessModes"] = []any{"ReadOnlyMany"}
+	f.r.put(ref, f.pvc, changed)
+	_, err := grader.NewArtifactChecker(grader.ArtifactConfig{Reader: f.r}).CaptureInputs(context.Background(), target)
+	if !errors.Is(err, grader.ErrTargetChanged) {
+		t.Fatalf("concurrent PVC edit was not rejected: %v", err)
+	}
+}
