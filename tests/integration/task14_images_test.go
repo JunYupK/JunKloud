@@ -114,14 +114,27 @@ initial_expected: {answer: FAIL}
 initial_score: 0
 cases:
   - id: absent
-    actions: []
+    actions:
+      - kind: file
+        args: {source: cases/wrong.txt, path: answer.txt}
     expected: {answer: FAIL}
     expected_score: 0
 `
-		write(id, map[string]string{"problem.yaml": definition, "question.en.md": "Write answer.txt.\n", "explanation.ko.md": "출력 파일을 작성합니다.\n", "solution/answer.txt": "OK\n"})
+		write(id, map[string]string{"problem.yaml": definition, "question.en.md": "Write answer.txt.\n", "explanation.ko.md": "출력 파일을 작성합니다.\n", "solution/answer.txt": "OK\n", "cases/wrong.txt": "WRONG\n"})
 	}
 	testutil.NoError(t, os.MkdirAll(filepath.Join(bank, "exams"), 0700))
 	return bank, pid, ref
+}
+
+func TestTask14FixtureSchema(t *testing.T) {
+	bank, _, _ := task14Bank(t, "schemafixture")
+	dirs, err := filepath.Glob(filepath.Join(bank, "problems", "*"))
+	testutil.NoError(t, err)
+	testutil.Equal(t, len(dirs), 5)
+	for _, dir := range dirs {
+		_, err := problem.Load(dir)
+		testutil.NoError(t, err)
+	}
 }
 
 func TestTask14ImageWorkflow(t *testing.T) {
