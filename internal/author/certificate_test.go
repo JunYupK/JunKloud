@@ -184,3 +184,10 @@ func TestVolumeSemanticsInvalidateImageCertificates(t *testing.T) {
 		t.Fatal("pre-volume grader certificate is still current")
 	}
 }
+
+func TestCronSuccessSemanticsInvalidateVolumeCertificates(t *testing.T) {
+	record := passedRecord("sha256:batch", "grader-4", "env")
+	if author.CertificateMatches(record, "sha256:batch", grader.GraderVersion, "env") {
+		t.Fatal("pre-scheduled-success grader certificate is still current")
+	}
+}

@@ -1,0 +1,219 @@
+{
+  "schema_version": 1,
+  "id": "batch-001",
+  "version": "1.0.0",
+  "title": "Run one parcel and schedule the recurring work",
+  "domain": "design-build",
+  "difficulty": "medium",
+  "type": "build",
+  "tags": [
+    "design-build",
+    "batch"
+  ],
+  "competencies": [
+    "Design and build workloads with observable application behavior"
+  ],
+  "capabilities": [],
+  "parameters": {
+    "namespace": [
+      "jk-batch-001-a",
+      "jk-batch-001-b"
+    ]
+  },
+  "namespace": "${namespace}",
+  "budget": {
+    "cpu": "300m",
+    "memory": "160Mi"
+  },
+  "criteria": [
+    {
+      "id": "job-completed",
+      "kind": "job",
+      "points": 1,
+      "feedback": "parcel-once Job이 실제 성공해야 합니다.",
+      "target": {
+        "api_version": "batch/v1",
+        "kind": "Job",
+        "namespace": "${namespace}",
+        "name": "parcel-once"
+      },
+      "args": {
+        "outcome": "complete"
+      },
+      "timeout": "60s"
+    },
+    {
+      "id": "job-output",
+      "kind": "logs",
+      "points": 1,
+      "feedback": "성공한 Job의 worker 로그에 parcel-packed가 필요합니다.",
+      "target": {
+        "api_version": "batch/v1",
+        "kind": "Job",
+        "namespace": "${namespace}",
+        "name": "parcel-once"
+      },
+      "args": {
+        "container": "worker",
+        "contains": [
+          "parcel-packed"
+        ],
+        "wait": true
+      },
+      "depends_on": [
+        "job-completed"
+      ],
+      "timeout": "30s"
+    },
+    {
+      "id": "cron-template",
+      "kind": "cronjob-template",
+      "points": 1,
+      "feedback": "매분 실행하며 동시 실행과 보존 개수를 제한하세요.",
+      "target": {
+        "api_version": "batch/v1",
+        "kind": "CronJob",
+        "namespace": "${namespace}",
+        "name": "parcel-clock"
+      },
+      "args": {
+        "schedule": "* * * * *",
+        "suspend": false,
+        "concurrency_policy": "Forbid",
+        "successful_jobs_history_limit": 1,
+        "failed_jobs_history_limit": 1
+      }
+    },
+    {
+      "id": "cron-fired",
+      "kind": "cronjob-schedule",
+      "points": 1,
+      "feedback": "관찰 시작 후 CronJob 컨트롤러가 예약 생성한 Job이 같은 90초 관찰 안에 성공 완료해야 합니다.",
+      "target": {
+        "api_version": "batch/v1",
+        "kind": "CronJob",
+        "namespace": "${namespace}",
+        "name": "parcel-clock"
+      },
+      "args": {
+        "schedule": "* * * * *",
+        "window": "90s",
+        "require_success": true
+      },
+      "depends_on": [
+        "cron-template"
+      ],
+      "timeout": "100s"
+    }
+  ],
+  "setup": [
+    {
+      "kind": "apply",
+      "args": {
+        "path": "setup/initial.yaml"
+      }
+    }
+  ],
+  "solution": [
+    {
+      "kind": "apply",
+      "args": {
+        "path": "solution/workloads.yaml"
+      }
+    }
+  ],
+  "initial_expected": {
+    "job-completed": "FAIL",
+    "job-output": "FAIL",
+    "cron-template": "FAIL",
+    "cron-fired": "FAIL"
+  },
+  "initial_score": 0,
+  "cases": [
+    {
+      "id": "manual-job-replacement",
+      "actions": [
+        {
+          "kind": "apply",
+          "args": {
+            "path": "cases/manual-job.yaml"
+          }
+        }
+      ],
+      "expected": {
+        "job-completed": "PASS",
+        "job-output": "PASS",
+        "cron-template": "FAIL",
+        "cron-fired": "FAIL"
+      },
+      "expected_score": 2
+    },
+    {
+      "id": "wrong-job-output",
+      "actions": [
+        {
+          "kind": "delete-owned",
+          "args": {
+            "targets": [
+              {
+                "api_version": "batch/v1",
+                "kind": "Job",
+                "namespace": "${namespace}",
+                "name": "parcel-once"
+              }
+            ]
+          }
+        },
+        {
+          "kind": "apply",
+          "args": {
+            "path": "cases/wrong-output.yaml"
+          }
+        }
+      ],
+      "expected": {
+        "job-completed": "PASS",
+        "job-output": "FAIL",
+        "cron-template": "PASS",
+        "cron-fired": "PASS"
+      },
+      "expected_score": 3
+    },
+    {
+      "id": "scheduled-job-fails",
+      "actions": [
+        {
+          "kind": "apply",
+          "args": {
+            "path": "cases/failed-scheduled-job.yaml"
+          }
+        }
+      ],
+      "expected": {
+        "job-completed": "PASS",
+        "job-output": "PASS",
+        "cron-template": "PASS",
+        "cron-fired": "FAIL"
+      },
+      "expected_score": 3
+    },
+    {
+      "id": "alternative-every-minute",
+      "actions": [
+        {
+          "kind": "apply",
+          "args": {
+            "path": "cases/alternative.yaml"
+          }
+        }
+      ],
+      "expected": {
+        "job-completed": "PASS",
+        "job-output": "PASS",
+        "cron-template": "PASS",
+        "cron-fired": "PASS"
+      },
+      "expected_score": 4
+    }
+  ]
+}

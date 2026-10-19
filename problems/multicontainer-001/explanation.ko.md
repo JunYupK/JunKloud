@@ -1,0 +1,1 @@
+init container가 공유 emptyDir에 message를 만들고 종료하면 sidecar가 이를 읽어 ack를 만듭니다. app은 ack를 읽어 로그로 보여 줍니다. 서로 다른 emptyDir를 mount하면 컨테이너가 모두 실행되어도 데이터가 전달되지 않습니다. 같은 mount 구조에서 잘못된 데이터도 실제 출력 검사로 실패합니다. 명령 문자열 자체는 채점하지 않습니다.

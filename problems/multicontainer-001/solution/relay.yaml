@@ -1,0 +1,99 @@
+{
+  "apiVersion": "v1",
+  "kind": "Pod",
+  "metadata": {
+    "name": "relay",
+    "namespace": "${namespace}"
+  },
+  "spec": {
+    "restartPolicy": "Always",
+    "initContainers": [
+      {
+        "name": "seed",
+        "image": "docker.io/library/busybox:1.37.0@sha256:bdf57e528e45e4433820e045b29b4597825a1c9e38353532d90a01445013f82e",
+        "imagePullPolicy": "Never",
+        "command": [
+          "sh",
+          "-c",
+          "echo seeded > /work/message"
+        ],
+        "resources": {
+          "requests": {
+            "cpu": "10m",
+            "memory": "8Mi"
+          },
+          "limits": {
+            "cpu": "75m",
+            "memory": "32Mi"
+          }
+        },
+        "volumeMounts": [
+          {
+            "name": "shared",
+            "mountPath": "/work"
+          }
+        ]
+      }
+    ],
+    "containers": [
+      {
+        "name": "app",
+        "image": "docker.io/library/busybox:1.37.0@sha256:bdf57e528e45e4433820e045b29b4597825a1c9e38353532d90a01445013f82e",
+        "imagePullPolicy": "Never",
+        "command": [
+          "sh",
+          "-c",
+          "while true; do if [ -f /work/ack ]; then cat /work/ack; else echo awaiting-data; fi; sleep 1; done"
+        ],
+        "resources": {
+          "requests": {
+            "cpu": "10m",
+            "memory": "8Mi"
+          },
+          "limits": {
+            "cpu": "75m",
+            "memory": "32Mi"
+          }
+        },
+        "volumeMounts": [
+          {
+            "name": "shared",
+            "mountPath": "/work"
+          }
+        ]
+      },
+      {
+        "name": "sidecar",
+        "image": "docker.io/library/busybox:1.37.0@sha256:bdf57e528e45e4433820e045b29b4597825a1c9e38353532d90a01445013f82e",
+        "imagePullPolicy": "Never",
+        "command": [
+          "sh",
+          "-c",
+          "while true; do if [ -f /work/message ]; then printf \"delivered:%s\\n\" \"$(cat /work/message)\" > /work/ack; fi; sleep 1; done"
+        ],
+        "resources": {
+          "requests": {
+            "cpu": "10m",
+            "memory": "8Mi"
+          },
+          "limits": {
+            "cpu": "75m",
+            "memory": "32Mi"
+          }
+        },
+        "volumeMounts": [
+          {
+            "name": "shared",
+            "mountPath": "/work"
+          }
+        ]
+      }
+    ],
+    "volumes": [
+      {
+        "name": "shared",
+        "emptyDir": {}
+      }
+    ]
+  }
+}

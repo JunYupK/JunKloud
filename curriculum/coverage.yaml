@@ -1,0 +1,17 @@
+{
+  "groups": [
+    {
+      "id": "design-build",
+      "domain": "design-build",
+      "count": 5,
+      "points": 20,
+      "problems": [
+        "image-001",
+        "batch-001",
+        "daemonset-001",
+        "multicontainer-001",
+        "volume-001"
+      ]
+    }
+  ]
+}

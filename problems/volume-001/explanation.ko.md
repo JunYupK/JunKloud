@@ -1,0 +1,1 @@
+ledger-data PVC를 Deployment의 /data 디렉터리에 mount합니다. EmptyDir는 Pod 수명에 묶이고 다른 PVC는 요구한 claim이 아닙니다. 채점기는 쓰기 가능한 기존 디렉터리에 자체 임시 marker를 기록한 뒤 한 Pod의 교체와 새 Pod의 읽기를 실제 확인합니다. controller spec은 수정하지 않습니다. 초기 PVC 점수 1점과 reset 뒤 같은 초기 점수를 명시합니다.

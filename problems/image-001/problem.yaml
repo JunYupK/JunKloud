@@ -1,0 +1,177 @@
+{
+  "schema_version": 1,
+  "id": "image-001",
+  "version": "1.0.0",
+  "title": "Package a parcel command as a runnable image",
+  "domain": "design-build",
+  "difficulty": "medium",
+  "type": "build",
+  "tags": [
+    "design-build",
+    "image"
+  ],
+  "competencies": [
+    "Design and build workloads with observable application behavior"
+  ],
+  "capabilities": [
+    "image-build"
+  ],
+  "parameters": {
+    "namespace": [
+      "jk-image-001-a",
+      "jk-image-001-b"
+    ]
+  },
+  "namespace": "${namespace}",
+  "budget": {
+    "cpu": "300m",
+    "memory": "160Mi"
+  },
+  "criteria": [
+    {
+      "id": "execution",
+      "kind": "image",
+      "points": 2,
+      "feedback": "이미지 기본 실행의 종료 코드와 실제 출력을 확인하세요.",
+      "args": {
+        "reference": "junkloud.local/image-001:${namespace}",
+        "run": {
+          "timeout": "5s",
+          "stdout_contains": [
+            "parcel-ready"
+          ]
+        }
+      },
+      "timeout": "60s"
+    },
+    {
+      "id": "archive",
+      "kind": "image",
+      "points": 2,
+      "feedback": "image.tar에 요구한 태그의 실제 이미지가 저장되어야 합니다.",
+      "args": {
+        "archive": {
+          "path": "image.tar",
+          "repo_tag": "junkloud.local/image-001:${namespace}"
+        }
+      }
+    }
+  ],
+  "setup": [],
+  "solution": [
+    {
+      "kind": "file",
+      "args": {
+        "source": "solution/Dockerfile",
+        "path": "Dockerfile"
+      }
+    },
+    {
+      "kind": "image",
+      "args": {
+        "operation": "build",
+        "path": ".",
+        "reference": "junkloud.local/image-001:${namespace}"
+      }
+    },
+    {
+      "kind": "image",
+      "args": {
+        "operation": "save",
+        "path": "image.tar",
+        "reference": "junkloud.local/image-001:${namespace}"
+      }
+    }
+  ],
+  "initial_expected": {
+    "execution": "FAIL",
+    "archive": "FAIL"
+  },
+  "initial_score": 0,
+  "cases": [
+    {
+      "id": "wrong-output",
+      "actions": [
+        {
+          "kind": "image",
+          "args": {
+            "operation": "build",
+            "path": ".",
+            "reference": "junkloud.local/image-001:${namespace}"
+          }
+        },
+        {
+          "kind": "image",
+          "args": {
+            "operation": "save",
+            "path": "image.tar",
+            "reference": "junkloud.local/image-001:${namespace}"
+          }
+        }
+      ],
+      "expected": {
+        "execution": "FAIL",
+        "archive": "PASS"
+      },
+      "expected_score": 2
+    },
+    {
+      "id": "missing-archive",
+      "actions": [
+        {
+          "kind": "file",
+          "args": {
+            "source": "solution/Dockerfile",
+            "path": "Dockerfile"
+          }
+        },
+        {
+          "kind": "image",
+          "args": {
+            "operation": "build",
+            "path": ".",
+            "reference": "junkloud.local/image-001:${namespace}"
+          }
+        }
+      ],
+      "expected": {
+        "execution": "PASS",
+        "archive": "FAIL"
+      },
+      "expected_score": 2
+    },
+    {
+      "id": "alternative-printf",
+      "actions": [
+        {
+          "kind": "file",
+          "args": {
+            "source": "cases/alternative.Dockerfile",
+            "path": "Dockerfile"
+          }
+        },
+        {
+          "kind": "image",
+          "args": {
+            "operation": "build",
+            "path": ".",
+            "reference": "junkloud.local/image-001:${namespace}"
+          }
+        },
+        {
+          "kind": "image",
+          "args": {
+            "operation": "save",
+            "path": "image.tar",
+            "reference": "junkloud.local/image-001:${namespace}"
+          }
+        }
+      ],
+      "expected": {
+        "execution": "PASS",
+        "archive": "PASS"
+      },
+      "expected_score": 4
+    }
+  ]
+}

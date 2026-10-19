@@ -1,0 +1,39 @@
+{
+  "apiVersion": "v1",
+  "kind": "PersistentVolumeClaim",
+  "metadata": {
+    "name": "ledger-data",
+    "namespace": "${namespace}"
+  },
+  "spec": {
+    "accessModes": [
+      "ReadWriteOnce"
+    ],
+    "storageClassName": "standard",
+    "resources": {
+      "requests": {
+        "storage": "32Mi"
+      }
+    }
+  }
+}
+---
+{
+  "apiVersion": "v1",
+  "kind": "PersistentVolumeClaim",
+  "metadata": {
+    "name": "spare-data",
+    "namespace": "${namespace}"
+  },
+  "spec": {
+    "accessModes": [
+      "ReadWriteOnce"
+    ],
+    "storageClassName": "standard",
+    "resources": {
+      "requests": {
+        "storage": "32Mi"
+      }
+    }
+  }
+}

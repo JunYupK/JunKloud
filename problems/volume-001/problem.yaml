@@ -1,0 +1,195 @@
+{
+  "schema_version": 1,
+  "id": "volume-001",
+  "version": "1.0.0",
+  "title": "Keep ledger data through Pod replacement",
+  "domain": "design-build",
+  "difficulty": "medium",
+  "type": "build",
+  "tags": [
+    "design-build",
+    "volume"
+  ],
+  "competencies": [
+    "Design and build workloads with observable application behavior"
+  ],
+  "capabilities": [
+    "storage"
+  ],
+  "parameters": {
+    "namespace": [
+      "jk-volume-001-a",
+      "jk-volume-001-b"
+    ]
+  },
+  "namespace": "${namespace}",
+  "budget": {
+    "cpu": "300m",
+    "memory": "160Mi"
+  },
+  "criteria": [
+    {
+      "id": "claim",
+      "kind": "field",
+      "points": 1,
+      "feedback": "ledger-data PVC의 standard/RWO/32Mi 요구사항을 확인하세요.",
+      "target": {
+        "api_version": "v1",
+        "kind": "PersistentVolumeClaim",
+        "namespace": "${namespace}",
+        "name": "ledger-data"
+      },
+      "args": {
+        "fields": [
+          {
+            "path": "spec.storageClassName",
+            "equals": "standard"
+          },
+          {
+            "path": "spec.accessModes",
+            "equals": [
+              "ReadWriteOnce"
+            ]
+          },
+          {
+            "path": "spec.resources.requests.storage",
+            "equals": "32Mi"
+          }
+        ]
+      }
+    },
+    {
+      "id": "deployment",
+      "kind": "resource",
+      "points": 1,
+      "feedback": "ledger Deployment가 있어야 합니다.",
+      "target": {
+        "api_version": "apps/v1",
+        "kind": "Deployment",
+        "namespace": "${namespace}",
+        "name": "ledger"
+      }
+    },
+    {
+      "id": "ready",
+      "kind": "ready",
+      "points": 1,
+      "feedback": "ledger의 app 컨테이너가 안정적으로 Ready여야 합니다.",
+      "target": {
+        "api_version": "apps/v1",
+        "kind": "Deployment",
+        "namespace": "${namespace}",
+        "name": "ledger"
+      },
+      "args": {
+        "replicas": 1,
+        "stable_for": "2s"
+      },
+      "depends_on": [
+        "deployment"
+      ],
+      "timeout": "60s"
+    },
+    {
+      "id": "persistent-data",
+      "kind": "volume-persistence",
+      "points": 1,
+      "feedback": "/data는 ledger-data PVC 안의 쓰기 가능한 기존 디렉터리이며 Pod 교체 후 데이터가 남아야 합니다.",
+      "target": {
+        "api_version": "apps/v1",
+        "kind": "Deployment",
+        "namespace": "${namespace}",
+        "name": "ledger"
+      },
+      "args": {
+        "container": "app",
+        "path": "/data",
+        "claim": "ledger-data"
+      },
+      "depends_on": [
+        "claim",
+        "ready"
+      ],
+      "timeout": "120s"
+    }
+  ],
+  "setup": [
+    {
+      "kind": "apply",
+      "args": {
+        "path": "setup/claims.yaml"
+      }
+    }
+  ],
+  "solution": [
+    {
+      "kind": "apply",
+      "args": {
+        "path": "solution/ledger.yaml"
+      }
+    }
+  ],
+  "initial_expected": {
+    "claim": "PASS",
+    "deployment": "FAIL",
+    "ready": "FAIL",
+    "persistent-data": "FAIL"
+  },
+  "initial_score": 1,
+  "cases": [
+    {
+      "id": "emptydir-substitution",
+      "actions": [
+        {
+          "kind": "apply",
+          "args": {
+            "path": "cases/emptydir.yaml"
+          }
+        }
+      ],
+      "expected": {
+        "claim": "PASS",
+        "deployment": "PASS",
+        "ready": "PASS",
+        "persistent-data": "FAIL"
+      },
+      "expected_score": 3
+    },
+    {
+      "id": "wrong-claim",
+      "actions": [
+        {
+          "kind": "apply",
+          "args": {
+            "path": "cases/wrong-claim.yaml"
+          }
+        }
+      ],
+      "expected": {
+        "claim": "PASS",
+        "deployment": "PASS",
+        "ready": "PASS",
+        "persistent-data": "FAIL"
+      },
+      "expected_score": 3
+    },
+    {
+      "id": "alternative-command",
+      "actions": [
+        {
+          "kind": "apply",
+          "args": {
+            "path": "cases/alternative.yaml"
+          }
+        }
+      ],
+      "expected": {
+        "claim": "PASS",
+        "deployment": "PASS",
+        "ready": "PASS",
+        "persistent-data": "PASS"
+      },
+      "expected_score": 4
+    }
+  ]
+}

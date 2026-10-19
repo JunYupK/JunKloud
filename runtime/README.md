@@ -30,7 +30,7 @@ docker compose exec workspace bash
 ckad --help
 ckad doctor
 ckad list
-ckad start                     # 기본 mock-01, 시작 전 확인
+ckad start --mode practice --count 5  # 현재 design-build 5문제, 시작 전 확인
 ckad show Q4
 kubectl get namespaces         # JunKloud 전용 kubeconfig
 ckad grade
@@ -38,11 +38,22 @@ ckad review
 ckad review --problem Q4 --solution
 ```
 
-이 커밋에는 제품 문제 은행이 아직 없습니다. 작성된 은행은 `/src/problems/`와
-`/src/exams/`에 두며, 개발 fixture만 확인하려면 컨테이너에서
-`export CKAD_BANK_DIR=/src/tests/fixtures/dev-bank` 후 각 문제 ID에 대해
-`ckad bank validate <problem-id>`를 실행합니다. fixture는 5개 문제의
-`dev-mock` 모의시험과 훈련용이며 제품 모의시험으로 표시하지 않습니다.
+제품 은행 루트는 `/src`이며 그 안의 `problems/`에서 패키지를 읽습니다.
+현재 design-build 5문제(image, batch, DaemonSet, multi-container, PVC),
+총 20점이 포함되어 있습니다. 먼저 동일 환경에서 각 패키지를 검증하세요.
+
+```sh
+export CKAD_BANK_DIR=/src
+for id in image-001 batch-001 daemonset-001 multicontainer-001 volume-001; do
+  ckad bank validate "$id" || break
+done
+ckad list
+ckad start --mode practice --count 5
+```
+
+이 구성은 20문제 제품 모의시험을 아직 제공하지 않습니다. 개발 fixture를
+확인하려면 `CKAD_BANK_DIR=/src/tests/fixtures/dev-bank`를 사용하세요.
+fixture의 `dev-mock`은 제품 모의시험이 아닙니다.
 
 기본 상태 경로는 `$HOME/.local/share/junkloud`, 풀이 경로는 `$HOME/ckad`입니다.
 각각 `CKAD_STATE_DIR`, `CKAD_WORKSPACE`, 문제 은행은 `CKAD_BANK_DIR`로

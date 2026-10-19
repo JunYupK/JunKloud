@@ -418,6 +418,9 @@ const (
 //	          UTC, or CRON_TZ= in schedule). Irrelevant for a per-minute schedule.
 //	window:   REQUIRED, 5s..120s: how long the grader watches. The criterion's
 //	          own timeout must exceed it by 10s.
+//	require_success: optional (default false). A newly scheduled Job must
+//	          successfully complete inside this same window, not just appear.
+//	          Explicit Job failure is FAIL; unproven completion is ERROR.
 //
 // What the grader does: it first compares the LIVE CronJob (spec.schedule and
 // spec.timeZone) with the declared schedule by meaning ("*/1 * * * *" equals
@@ -441,9 +444,10 @@ const (
 //     annotations does not count. Manual Jobs are listed in the evidence as
 //     ignored.
 type cronScheduleArgs struct {
-	Schedule string `json:"schedule"`
-	TimeZone string `json:"time_zone"`
-	Window   string `json:"window"`
+	Schedule       string `json:"schedule"`
+	TimeZone       string `json:"time_zone"`
+	Window         string `json:"window"`
+	RequireSuccess bool   `json:"require_success"`
 
 	window time.Duration
 }
@@ -522,6 +526,9 @@ func (c *ArtifactChecker) checkCronSchedule(ctx context.Context, t Target, crit 
 	}
 	start := c.set.clock.Now()
 	expected := map[string]any{"cronjob": describeRef(ref), "window": a.Window, "schedule": a.Schedule}
+	if a.RequireSuccess {
+		expected["require_success"] = true
+	}
 	cron, err := c.obs.get(ctx, ref)
 	if isNotFound(err) {
 		return c.verdictResult(start, false, fmt.Sprintf("CronJob %q not found", ref.Name), expected, map[string]any{"exists": false}), nil
@@ -569,6 +576,8 @@ func (c *ArtifactChecker) checkCronSchedule(ctx context.Context, t Target, crit 
 	cronUID := uidOf(cron)
 	seen := map[string]bool{} // jobs that existed when the observation began
 	var runs []cronRun
+	var completed []string
+	var failed []string
 	manual := map[string]bool{}
 	first := true
 	for {
@@ -576,7 +585,13 @@ func (c *ArtifactChecker) checkCronSchedule(ctx context.Context, t Target, crit 
 		if err != nil {
 			return model.CheckResult{}, fmt.Errorf("list Jobs: %w", err)
 		}
+		// Slow API calls must not turn an observation after the declared
+		// deadline into evidence of completion within the window.
+		if a.RequireSuccess && c.set.clock.Now().After(deadline) {
+			break
+		}
 		runs = runs[:0]
+		completed, failed = nil, nil
 		for _, j := range jobs {
 			if controllerUID(j) != cronUID {
 				continue
@@ -595,9 +610,22 @@ func (c *ArtifactChecker) checkCronSchedule(ctx context.Context, t Target, crit 
 				continue
 			}
 			runs = append(runs, cronRun{Job: name, Scheduled: stringAt(j, "metadata", "annotations", annotationCronScheduled)})
+			if a.RequireSuccess {
+				state := jobStateOf(j)
+				if state.failed {
+					failed = append(failed, name)
+				}
+				want := intOr(j, 1, "spec", "completions")
+				if want < 1 {
+					want = 1
+				}
+				if state.complete && !state.failed && int64(state.succeeded) >= want {
+					completed = append(completed, name)
+				}
+			}
 		}
 		first = false
-		if len(runs) >= 1 || len(due) == 0 {
+		if len(due) == 0 || !a.RequireSuccess && len(runs) >= 1 || a.RequireSuccess && (len(completed) > 0 || len(failed) > 0) {
 			break // nothing is due: waiting cannot change the verdict
 		}
 		now := c.set.clock.Now()
@@ -624,8 +652,17 @@ func (c *ArtifactChecker) checkCronSchedule(ctx context.Context, t Target, crit 
 	if len(manual) > 0 {
 		actual["manual_jobs_ignored"] = len(manual)
 	}
+	if a.RequireSuccess {
+		actual["completed_jobs"], actual["failed_jobs"] = completed, failed
+		if len(failed) > 0 {
+			return finish(false, "a newly scheduled Job failed: "+strings.Join(failed, ", "), actual), nil
+		}
+		if len(completed) > 0 {
+			return finish(true, "", actual), nil
+		}
+	}
 	switch {
-	case len(runs) >= 1:
+	case len(runs) >= 1 && !a.RequireSuccess:
 		return finish(true, "", actual), nil
 	case len(due) == 0:
 		// The schedule equals the expected one and the window covers a period,
@@ -637,6 +674,10 @@ func (c *ArtifactChecker) checkCronSchedule(ctx context.Context, t Target, crit 
 	// manual Jobs that were ignored) kept as evidence.
 	res := finish(false, "", actual)
 	res.Status = model.StatusError
+	if a.RequireSuccess && len(runs) > 0 {
+		res.Reason = fmt.Errorf("%w: a newly scheduled Job did not prove successful completion within the %s observation window", ErrInsufficientEvidence, a.Window).Error()
+		return res, nil
+	}
 	res.Reason = fmt.Errorf("%w: a run of schedule %q was due at %s within the %s window but the CronJob controller created no Job (a late controller or a skipped run is not proven to be the answer's fault)",
 		ErrInsufficientEvidence, liveSchedule, strings.Join(dueText, ", "), a.Window).Error()
 	return res, nil

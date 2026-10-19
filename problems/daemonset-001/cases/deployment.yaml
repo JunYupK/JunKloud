@@ -1,0 +1,65 @@
+{
+  "apiVersion": "apps/v1",
+  "kind": "Deployment",
+  "metadata": {
+    "name": "node-notes",
+    "namespace": "${namespace}"
+  },
+  "spec": {
+    "selector": {
+      "matchLabels": {
+        "app": "node-notes"
+      }
+    },
+    "template": {
+      "metadata": {
+        "labels": {
+          "app": "node-notes"
+        }
+      },
+      "spec": {
+        "nodeSelector": {
+          "kubernetes.io/os": "linux"
+        },
+        "tolerations": [
+          {
+            "operator": "Exists"
+          }
+        ],
+        "containers": [
+          {
+            "name": "agent",
+            "image": "docker.io/library/busybox:1.37.0@sha256:bdf57e528e45e4433820e045b29b4597825a1c9e38353532d90a01445013f82e",
+            "imagePullPolicy": "Never",
+            "command": [
+              "sh",
+              "-c",
+              "echo \"node=$NODE_NAME\"; sleep 3600"
+            ],
+            "resources": {
+              "requests": {
+                "cpu": "10m",
+                "memory": "8Mi"
+              },
+              "limits": {
+                "cpu": "75m",
+                "memory": "32Mi"
+              }
+            },
+            "env": [
+              {
+                "name": "NODE_NAME",
+                "valueFrom": {
+                  "fieldRef": {
+                    "fieldPath": "spec.nodeName"
+                  }
+                }
+              }
+            ]
+          }
+        ]
+      }
+    },
+    "replicas": 1
+  }
+}
