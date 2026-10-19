@@ -591,6 +591,7 @@ func removeResource(inv model.Inventory, ref model.ObjectRef) model.Inventory {
 
 func cloneInventory(inv model.Inventory) model.Inventory {
 	inv.Images = slices.Clone(inv.Images)
+	inv.ObservedImages = slices.Clone(inv.ObservedImages)
 	inv.Volumes = slices.Clone(inv.Volumes)
 	inv.Resources = slices.Clone(inv.Resources)
 	inv.DockerIDs = slices.Clone(inv.DockerIDs)

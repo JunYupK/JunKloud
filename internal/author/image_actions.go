@@ -5,6 +5,7 @@ package author
 import (
 	"os"
 	"path/filepath"
+	"strings"
 
 	"github.com/JunYupK/JunKloud/internal/environment"
 	"github.com/JunYupK/JunKloud/internal/model"
@@ -15,6 +16,7 @@ type actionStep struct {
 	kind, operation, path, reference string
 	data                             []byte
 	cluster                          environment.Action
+	checkSaveReference               bool
 }
 
 // Build the entire list against a private virtual workspace before effects.
@@ -29,6 +31,8 @@ func preflightActions(p model.Problem, f model.FrozenProblem, ws string, actions
 		return nil, invalid("unsafe workspace: %v", err)
 	}
 	var steps []actionStep
+	builtReferences := map[string]bool{}
+	var savedOutputs []string
 	for _, a := range actions {
 		rendered, err := problem.RenderValue(a.Args, f.Parameters)
 		if err != nil {
@@ -96,9 +100,28 @@ func preflightActions(p model.Problem, f model.FrozenProblem, ws string, actions
 				return nil, err
 			}
 			if step.operation == "build" {
+				for _, saved := range savedOutputs {
+					rel, err := filepath.Rel(vp, saved)
+					if err == nil && rel != ".." && !strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
+						return nil, invalid("a build context cannot depend on an earlier save output")
+					}
+				}
 				if err = environment.ValidateBuildContext(vp, provided); err != nil {
 					return nil, err
 				}
+				builtReferences[step.reference] = true
+			} else {
+				if info, e := os.Stat(vp); e == nil && !info.Mode().IsRegular() {
+					return nil, invalid("image save output must be a regular file")
+				}
+				if err = os.MkdirAll(filepath.Dir(vp), 0700); err != nil {
+					return nil, invalid("image save parent is not a directory")
+				}
+				if err = os.WriteFile(vp, nil, 0600); err != nil {
+					return nil, invalid("image save output cannot be reserved")
+				}
+				savedOutputs = append(savedOutputs, vp)
+				step.checkSaveReference = !builtReferences[step.reference]
 			}
 		default:
 			step.cluster, err = buildAction(p.Files, f.Parameters, a)

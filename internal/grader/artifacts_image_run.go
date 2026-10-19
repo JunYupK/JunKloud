@@ -146,7 +146,18 @@ func (r *ClusterImageRunner) Run(ctx context.Context, req ImageRunRequest) (res 
 		return res, fmt.Errorf("tag the image for the run: %w", err)
 	}
 	cleanups = append(cleanups, func(c context.Context) error {
-		_, e := r.tool(c, "docker", "image", "rm", runTag)
+		proof, e := r.tool(c, "docker", "image", "inspect", "--format", "{{.Id}} {{.Os}}/{{.Architecture}}", runTag)
+		if e != nil {
+			if strings.Contains(e.Error(), "No such image") {
+				return nil
+			}
+			return e
+		}
+		fields := strings.Fields(string(proof.Stdout))
+		if len(fields) != 2 || fields[0] != imageID || fields[1] != "linux/"+r.arch {
+			return fmt.Errorf("retained per-run image tag: its exact native identity changed")
+		}
+		_, e = r.tool(c, "docker", "image", "rm", runTag)
 		return e
 	})
 	archive := filepath.Join(dir, "image.tar")

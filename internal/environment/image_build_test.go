@@ -33,6 +33,41 @@ func TestImageBuildPreflightRejectsRemoteAndSymlink(t *testing.T) {
 	}
 }
 
+func TestImageBuildRejectsSpacedFrontendBeforeEffects(t *testing.T) {
+	for _, directive := range []string{"# syntax = docker/dockerfile:1", "#\tSyNtAx\t=\tevil/frontend:1"} {
+		t.Run(directive, func(t *testing.T) {
+			dir := t.TempDir()
+			st := openTestStore(t, dir)
+			runner := &fakeRunner{}
+			m := New(dir, st, WithRunner(runner))
+			ws := t.TempDir()
+			testutil.NoError(t, os.WriteFile(filepath.Join(ws, "Dockerfile"), []byte(directive+"\nFROM scratch\n"), 0600))
+			_, err := m.BuildImage(bg, model.Inventory{EnvironmentID: "env", SessionID: "session", ProblemID: "image"}, ws, "app:v1", nil)
+			testutil.ErrorIs(t, err, ErrInvalidAction)
+			testutil.Equal(t, len(runner.Calls()), 0)
+		})
+	}
+}
+
+func TestImageObservationMatchingLabelsCannotManufactureCleanupProof(t *testing.T) {
+	dir := t.TempDir()
+	st := openTestStore(t, dir)
+	id := "sha256:" + strings.Repeat("b", 64)
+	inv := model.Inventory{EnvironmentID: "env", SessionID: "session", ProblemID: "image"}
+	raw, _ := json.Marshal([]buildImageRecord{{ID: id, RepoTags: []string{"app:v1"}, Config: buildImageConfig{Labels: map[string]string{LabelEnvironmentID: "env", LabelSessionID: "session", LabelProblemID: "image", labelImageBuild: "copied-operation"}}}})
+	runner := &fakeRunner{respond: func(_ string, args []string) (executil.Result, error) {
+		if args[1] == "rm" {
+			return executil.Result{}, nil
+		}
+		return executil.Result{Stdout: raw}, nil
+	}}
+	m := New(dir, st, WithRunner(runner))
+	observed, err := m.ObserveImages(bg, inv, []string{"app:v1"})
+	testutil.NoError(t, err)
+	testutil.ErrorIs(t, m.cleanupImages(bg, observed), ErrNotOwned)
+	testutil.Equal(t, runner.count("docker image rm"), 0)
+}
+
 func TestImageBuildJournalForeignRebuildAndRecovery(t *testing.T) {
 	dir := t.TempDir()
 	st := openTestStore(t, dir)
@@ -161,7 +196,8 @@ func TestImageObservationDoesNotAuthorizeDeletion(t *testing.T) {
 	inv := model.Inventory{EnvironmentID: "env", SessionID: "session", ProblemID: "image"}
 	observed, err := m.ObserveImages(bg, inv, []string{"app"})
 	testutil.NoError(t, err)
-	testutil.Equal(t, observed.Images[0].ID, id)
+	testutil.Equal(t, len(observed.Images), 0)
+	testutil.Equal(t, observed.ObservedImages[0].ID, id)
 	testutil.ErrorIs(t, m.cleanupImages(bg, observed), ErrNotOwned)
 	testutil.Equal(t, runner.count("docker image rm"), 0)
 }

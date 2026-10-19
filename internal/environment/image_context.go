@@ -18,6 +18,7 @@ func buildArch() string { return runtime.GOARCH }
 
 var buildReference = regexp.MustCompile(`^(?:[a-z0-9]+(?:[._-][a-z0-9]+)*(?::[0-9]+)?/)*[a-z0-9]+(?:[._-][a-z0-9]+)*:[A-Za-z0-9_][A-Za-z0-9._-]{0,127}$`)
 var observedReference = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._:/-]{0,254}$`)
+var syntaxDirective = regexp.MustCompile(`(?i)^#\s*syntax\s*=`)
 
 func ValidBuildReference(ref string) bool {
 	return buildReference.MatchString(ref) && !strings.Contains(ref, "..")
@@ -90,7 +91,7 @@ func ValidateBuildContext(dir string, provided []PinnedImage) error {
 			continue
 		}
 		if strings.HasPrefix(line, "#") {
-			if strings.Contains(strings.ToLower(line), "syntax=") {
+			if syntaxDirective.MatchString(line) {
 				return fmt.Errorf("%w: remote Dockerfile frontend forbidden", ErrInvalidAction)
 			}
 			continue

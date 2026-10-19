@@ -19,6 +19,7 @@ import (
 	"github.com/JunYupK/JunKloud/internal/model"
 	"github.com/JunYupK/JunKloud/internal/problem"
 	"github.com/JunYupK/JunKloud/internal/session"
+	"github.com/JunYupK/JunKloud/internal/store"
 	"github.com/JunYupK/JunKloud/internal/testutil"
 )
 
@@ -142,7 +143,23 @@ func TestTask14ImageWorkflow(t *testing.T) {
 	ctx := context.Background()
 	phase := func(s string) { t.Logf("PHASE %s at %s", s, time.Now().UTC().Format(time.RFC3339)) }
 	phase("boot isolated cluster")
-	m, id, state, st := bootEnvironmentState(t)
+	state := t.TempDir()
+	st, err := store.Open(filepath.Join(state, "sessions.db"))
+	testutil.NoError(t, err)
+	m := environment.New(state, st, hostCompatOptions(t)...)
+	t.Cleanup(func() {
+		defer st.Close()
+		if recorded, e := m.RecordedIdentity(); e == nil {
+			testutil.NoError(t, m.StopPlatform(ctx, recorded))
+		}
+		ops, e := st.ListOperations(ctx, environment.OperationCreate)
+		testutil.NoError(t, e)
+		for _, op := range ops {
+			kindDelete(t, environment.ClusterName(op.EnvironmentID), filepath.Join(state, "cleanup.kubeconfig"))
+		}
+	})
+	id, err := m.Ensure(ctx)
+	testutil.NoError(t, err)
 	bank, pid, ref := task14Bank(t, id.ID)
 	cfg := author.GraderConfig{StateDir: state}
 	rt, err := author.NewRuntime(ctx, m, st, id, cfg)

@@ -23,14 +23,16 @@ type OwnedResource struct {
 
 // Inventory lists everything JunKloud created for one session problem.
 type Inventory struct {
-	EnvironmentID string          `json:"environment_id"`
-	SessionID     string          `json:"session_id,omitempty"`
-	ProblemID     string          `json:"problem_id,omitempty"`
-	Images        []OwnedImage    `json:"images,omitempty"`
-	Volumes       []VolumeCleanup `json:"volumes,omitempty"`
-	Resources     []OwnedResource `json:"resources,omitempty"`
-	DockerIDs     []string        `json:"docker_ids,omitempty"`
-	ArtifactPaths []string        `json:"artifact_paths,omitempty"`
+	EnvironmentID string       `json:"environment_id"`
+	SessionID     string       `json:"session_id,omitempty"`
+	ProblemID     string       `json:"problem_id,omitempty"`
+	Images        []OwnedImage `json:"images,omitempty"`
+	// ObservedImages are declared artifacts, never evidence of ownership.
+	ObservedImages []OwnedImage    `json:"observed_images,omitempty"`
+	Volumes        []VolumeCleanup `json:"volumes,omitempty"`
+	Resources      []OwnedResource `json:"resources,omitempty"`
+	DockerIDs      []string        `json:"docker_ids,omitempty"`
+	ArtifactPaths  []string        `json:"artifact_paths,omitempty"`
 	// Attempts pins grading intent to each problem's submitted attempt.
 	// Existing journals without this optional field belong to attempt 1.
 	Attempts map[string]int `json:"attempts,omitempty"`

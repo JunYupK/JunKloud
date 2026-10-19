@@ -97,6 +97,8 @@ image deletion is used. Personal Dockerfiles, archives and old attempts stay.
 Ordinary `docker build` images can pass the same functional criteria without
 JunKloud labels. Declared image references are observed at grading and reset,
 so automatic reset reports a retained ownership error for an unproven image.
+Observations are stored separately and never grant deletion authority: cleanup
+also requires that exact ID/reference in the matching durable build operation.
 After inspecting and explicitly removing that image yourself, run
 `ckad reset --recover`. Use the managed command to obtain automatic owned
 cleanup. Save the required archive with ordinary
@@ -107,6 +109,8 @@ Author solution/case actions support `file {source,path}` and
 Sources must be private setup/solution/cases package paths. All actions are
 preflighted before writes; initial and reset assets stay original. File/image
 setup actions, Helm/Kustomize/patch action execution remain unsupported.
+Save outputs reserve regular-file paths during preflight; building a context
+that depends on an earlier save output is explicitly unsupported.
 Native image export uses the platform-selecting command. Only Docker's exact
 pre-API-1.48 unsupported-platform error enables legacy save, after immutable
 ID, unchanged tag and Linux/native-architecture checks; all other errors fail.

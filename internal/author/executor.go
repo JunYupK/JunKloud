@@ -21,6 +21,7 @@ type ActionExecutor interface {
 type ImageActions interface {
 	BuildImage(context.Context, model.Inventory, string, string, []environment.PinnedImage) (model.OwnedImage, error)
 	SaveImage(context.Context, string, string) error
+	PreflightSaveReference(context.Context, string) error
 }
 type executor struct {
 	env      Applier
@@ -56,6 +57,11 @@ func (e *executor) Execute(ctx context.Context, id model.Identity, owner environ
 				if err = checker.PreflightImageReference(ctx, inv, step.reference); err != nil {
 					return inv, err
 				}
+			}
+		}
+		if step.checkSaveReference {
+			if err = e.images.PreflightSaveReference(ctx, step.reference); err != nil {
+				return inv, err
 			}
 		}
 	}

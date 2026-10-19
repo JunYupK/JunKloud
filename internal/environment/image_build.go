@@ -295,8 +295,8 @@ func (m *Manager) ObserveImages(ctx context.Context, inv model.Inventory, refs [
 			continue
 		}
 		image := model.OwnedImage{Reference: ref, ID: got.ID}
-		if !slices.Contains(inv.Images, image) {
-			inv.Images = append(inv.Images, image)
+		if !slices.Contains(inv.Images, image) && !slices.Contains(inv.ObservedImages, image) {
+			inv.ObservedImages = append(inv.ObservedImages, image)
 		}
 	}
 	return inv, m.store.PutInventory(ctx, inv)
