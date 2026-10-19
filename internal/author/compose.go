@@ -348,6 +348,7 @@ func NewRuntime(ctx context.Context, m *environment.Manager, st *store.Store, id
 	j := environment.ManagedJanitor{Manager: m, Identity: id, Options: janitor}
 	v, err := NewValidator(Config{
 		Identity: id, Env: m, Janitor: j, Engine: g.Engine, Store: st,
+		Actions:  NewActionExecutor(m, m, cfg.ProvidedImages()...),
 		LockPath: LockPath(cfg.StateDir), GraderVersion: grader.GraderVersion, EnvironmentHash: envHash,
 		ProvidedImages: cfg.providedNames(),
 		Prepare:        func(ctx context.Context) error { return PrepareEnvironment(ctx, m, id, cfg.Images) },

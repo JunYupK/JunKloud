@@ -9,6 +9,7 @@ import (
 	"io"
 	"strings"
 
+	"github.com/JunYupK/JunKloud/internal/environment"
 	"github.com/JunYupK/JunKloud/internal/model"
 	"github.com/JunYupK/JunKloud/internal/session"
 	"github.com/JunYupK/JunKloud/internal/store"
@@ -64,6 +65,12 @@ func startOptions(c *cobra.Command, args []string) (session.StartOptions, error)
 
 func validateRequest(c *cobra.Command, args []string) error {
 	switch c.Name() {
+	case "build":
+		pid, _ := c.Flags().GetString("problem")
+		tag, _ := c.Flags().GetString("tag")
+		if pid == "" || !environment.ValidBuildReference(tag) {
+			return fail(2, "image build에는 --problem과 유효한 --tag가 필요합니다.")
+		}
 	case "start":
 		_, err := startOptions(c, args)
 		return err

@@ -73,3 +73,40 @@ E2E는 실제 Docker·kind·kubectl과 클러스터 자원이 필요하며 사�
 실패를 반환합니다. 생략된 검증을 통과로 표시하지 않습니다.
 `make test-e2e`는 고정 이미지 준비와 문제 검증을 포함하므로 Go 테스트의 기본
 10분 대신 명시적인 25분 상한을 사용합니다.
+# Image practice ownership
+
+Use `ckad image build --problem Q1 --context . --tag junkloud.local/app:practice`
+to build the Dockerfile in the problem's current attempt. Context paths are
+relative to that attempt, regardless of the terminal's working directory.
+The command uses Docker with a five-minute limit, native Linux platform,
+no build network and locally provided pinned bases (or `scratch`). A context
+is limited to 32 MiB and 4096 regular files/directories; symlinks are rejected.
+This first slice supports one FROM stage and local COPY; ADD, external stages,
+remote frontends and RUN isolation overrides are explicit errors.
+
+Managed builds record intent before Docker effects and attach environment,
+session, problem and build-operation labels. The exact tag and image ID are
+saved. Rebuilding the same owned tag removes its proven prior ID before the
+new build; a failed replacement therefore needs a fresh build after recovery.
+Foreign or shared tags are preserved. Interrupted builds block new starts;
+`ckad status` shows the intent and `ckad reset --recover` reconciles only that
+record. A moved/missing reference whose ID remains, foreign labels or shared
+tags retain the operation and report an ownership error. No prune or forced
+image deletion is used. Personal Dockerfiles, archives and old attempts stay.
+
+Ordinary `docker build` images can pass the same functional criteria without
+JunKloud labels. Declared image references are observed at grading and reset,
+so automatic reset reports a retained ownership error for an unproven image.
+After inspecting and explicitly removing that image yourself, run
+`ckad reset --recover`. Use the managed command to obtain automatic owned
+cleanup. Save the required archive with ordinary
+`docker save --output image.tar junkloud.local/app:practice`.
+
+Author solution/case actions support `file {source,path}` and
+`image {operation: build|save,path,reference}` in the staged grader workspace.
+Sources must be private setup/solution/cases package paths. All actions are
+preflighted before writes; initial and reset assets stay original. File/image
+setup actions, Helm/Kustomize/patch action execution remain unsupported.
+Native image export uses the platform-selecting command. Only Docker's exact
+pre-API-1.48 unsupported-platform error enables legacy save, after immutable
+ID, unchanged tag and Linux/native-architecture checks; all other errors fail.

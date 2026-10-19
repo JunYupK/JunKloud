@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/JunYupK/JunKloud/internal/author"
+	"github.com/JunYupK/JunKloud/internal/environment"
 	"github.com/JunYupK/JunKloud/internal/lock"
 	"github.com/JunYupK/JunKloud/internal/model"
 	"github.com/JunYupK/JunKloud/internal/store"
@@ -131,13 +132,15 @@ func (s *Service) Status(ctx context.Context, sessionID string, now time.Time) (
 		return Status{}, err
 	}
 	st.Pending = s.pending(rec, hist)
-	ops, err := s.cfg.Store.ListOperations(ctx, ResetOperationKind)
-	if err != nil {
-		return Status{}, err
-	}
-	for _, op := range ops {
-		if op.SessionID == rec.ID && op.Phase != PhaseDone {
-			st.Pending = append(st.Pending, Pending{OperationID: op.ID, ProblemID: op.Planned.ProblemID, Phase: op.Phase, Since: op.CreatedAt, Recorded: true, Guidance: "ckad reset --recover"})
+	for _, kind := range []string{ResetOperationKind, environment.OperationImageBuild} {
+		ops, err := s.cfg.Store.ListOperations(ctx, kind)
+		if err != nil {
+			return Status{}, err
+		}
+		for _, op := range ops {
+			if op.SessionID == rec.ID && op.Phase != PhaseDone {
+				st.Pending = append(st.Pending, Pending{OperationID: op.ID, ProblemID: op.Planned.ProblemID, Phase: op.Phase, Since: op.CreatedAt, Recorded: true, Guidance: "ckad reset --recover"})
+			}
 		}
 	}
 	return st, nil

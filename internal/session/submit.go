@@ -400,6 +400,13 @@ func (s *Service) execute(ctx context.Context, rec model.SessionRecord, hist his
 		}
 		extra = append(extra, problem)
 	} else {
+		for _, f := range p.problems {
+			if len(imageReferences(f)) > 0 {
+				if _, err := s.problemInventory(ctx, rec, f); err != nil {
+					extra = append(extra, s.synthetic(at, "!image-observation", fmt.Sprintf("image cleanup inventory could not be recorded: %v", err)))
+				}
+			}
+		}
 		ev = s.evaluate(ctx, items)
 		switch {
 		case len(unreadable) > 0:

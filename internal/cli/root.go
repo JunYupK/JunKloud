@@ -88,7 +88,7 @@ func newRoot(d *Dependencies, in io.Reader, out, errOut io.Writer) *cobra.Comman
 		}
 		return validateRequest(c, args)
 	}
-	root.AddCommand(startCommand(d), statusCommand(d), showCommand(d), markCommand(d), gradeCommand(d), reviewCommand(d), doctorCommand(d), listCommand(d), bankCommand(d), resetCommand(d))
+	root.AddCommand(startCommand(d), statusCommand(d), showCommand(d), markCommand(d), gradeCommand(d), reviewCommand(d), doctorCommand(d), listCommand(d), bankCommand(d), resetCommand(d), imageCommand(d))
 	return root
 }
 
@@ -113,7 +113,7 @@ func publicError(err error) error {
 	switch {
 	case errors.Is(err, environment.ErrNoEnvironment):
 		return fail(3, "기록된 전용 환경 ID가 없습니다. 최초 환경 생성이 중단됐다면 ckad doctor로 기록된 생성 작업을 재개하세요. 생성 기록과 리소스를 보존했습니다.")
-	case errors.Is(err, session.ErrResetPending):
+	case errors.Is(err, session.ErrResetPending), errors.Is(err, environment.ErrImageBuildPending):
 		return fail(3, "초기화가 중단되었습니다. 기존 풀이와 정리 기록을 보존했습니다. ckad status 확인 후 ckad reset --recover로 재개하세요.")
 	case errors.Is(err, environment.ErrCleanupTimeout), errors.Is(err, environment.ErrStorageRetained), errors.Is(err, environment.ErrNotOwned):
 		return fail(3, "초기화를 완료하지 못했습니다: "+err.Error()+". 남은 대상과 소유권을 확인한 뒤 ckad reset --recover로 재개하세요.")

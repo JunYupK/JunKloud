@@ -39,7 +39,22 @@ func (r *recTools) Run(_ context.Context, call ToolCall) (ToolResult, error) {
 			return ToolResult{ExitCode: code, Stderr: []byte(msg)}, nil
 		}
 	}
+	if strings.HasPrefix(line, "docker image inspect --format") {
+		id := "sha256:" + strings.Repeat("1", 64)
+		count := len(call.Args) - 4
+		return ToolResult{Stdout: []byte(strings.Repeat(id+" linux/amd64\n", count))}, nil
+	}
 	return ToolResult{}, nil
+}
+
+func TestImageRunDocker24VerifiedExport(t *testing.T) {
+	tools := &recTools{fail: map[string]int{"docker save --platform": 1}, stderr: `"--platform" requires API version 1.48, but the Docker daemon API version is 1.43`}
+	pods := newFakePods()
+	pods.onCreate = exited(0, "Completed", "")
+	result, err := runnerFor(t, tools, pods, nil, "native run").Run(context.Background(), runRequest())
+	testutil.NoError(t, err)
+	testutil.Equal(t, result.Completed, true)
+	testutil.Equal(t, tools.has("docker save --output"), 1)
 }
 
 func (r *recTools) has(prefix string) int {
@@ -108,7 +123,7 @@ func TestImageRunSequenceAndCleanup(t *testing.T) {
 	testutil.Equal(t, res.Output, "hello from shop\n")
 
 	// Order: tag, save (current architecture only), load, then clean-up.
-	tag, save, load := tools.index("docker tag shop:1 junkloud.local/grade-image:"), tools.index("docker save --platform linux/amd64"), tools.index("kind load image-archive")
+	tag, save, load := tools.index("docker tag sha256:"), tools.index("docker save --platform linux/amd64"), tools.index("kind load image-archive")
 	rmi, rm := tools.index("docker exec "+testNode+" crictl rmi junkloud.local/grade-image:"), tools.index("docker image rm junkloud.local/grade-image:")
 	if !(tag >= 0 && tag < save && save < load && load < rmi && load < rm) {
 		t.Fatalf("unexpected order: %v", tools.calls)
@@ -124,7 +139,7 @@ func TestImageRunSequenceAndCleanup(t *testing.T) {
 		if (strings.Contains(c, " rm ") || strings.Contains(c, " rmi ")) && !strings.Contains(c, "junkloud.local/grade-image:") {
 			t.Errorf("removes something that is not this run's tag: %s", c)
 		}
-		if strings.HasSuffix(c, " shop:1") && !strings.HasPrefix(c, "docker tag ") {
+		if strings.HasSuffix(c, " shop:1") && !strings.HasPrefix(c, "docker image inspect ") {
 			t.Errorf("touches the learner's tag: %s", c)
 		}
 	}

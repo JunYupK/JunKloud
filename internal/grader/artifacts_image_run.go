@@ -15,6 +15,7 @@ import (
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 
+	"github.com/JunYupK/JunKloud/internal/imageexport"
 	"github.com/JunYupK/JunKloud/internal/model"
 )
 
@@ -132,7 +133,16 @@ func (r *ClusterImageRunner) Run(ctx context.Context, req ImageRunRequest) (res 
 		}
 	}()
 
-	if _, err := r.tool(ctx, "docker", "tag", req.LocalRef, runTag); err != nil {
+	inspect, err := r.tool(ctx, "docker", "image", "inspect", "--format", "{{.Id}} {{.Os}}/{{.Architecture}}", req.LocalRef)
+	if err != nil {
+		return res, err
+	}
+	fields := strings.Fields(string(inspect.Stdout))
+	if len(fields) != 2 || fields[1] != "linux/"+r.arch {
+		return res, fmt.Errorf("image is not native linux/%s", r.arch)
+	}
+	imageID := fields[0]
+	if _, err := r.tool(ctx, "docker", "tag", imageID, runTag); err != nil {
 		return res, fmt.Errorf("tag the image for the run: %w", err)
 	}
 	cleanups = append(cleanups, func(c context.Context) error {
@@ -140,7 +150,10 @@ func (r *ClusterImageRunner) Run(ctx context.Context, req ImageRunRequest) (res 
 		return e
 	})
 	archive := filepath.Join(dir, "image.tar")
-	if _, err := r.tool(ctx, "docker", "save", "--platform", "linux/"+r.arch, "--output", archive, runTag); err != nil {
+	if err := imageexport.Save(ctx, func(c context.Context, args []string) ([]byte, error) {
+		out, e := r.tool(c, "docker", args...)
+		return out.Stdout, e
+	}, runTag, imageID, r.arch, archive); err != nil {
 		return res, fmt.Errorf("save the image: %w", err)
 	}
 	// Registered before the load: a load that fails half way may still have

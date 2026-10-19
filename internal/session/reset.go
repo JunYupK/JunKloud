@@ -121,7 +121,7 @@ func (s *Service) Reset(ctx context.Context, sessionID string, opts ResetOptions
 }
 
 func (s *Service) requireNoPendingReset(ctx context.Context) error {
-	for _, kind := range []string{ResetOperationKind, environment.OperationCleanup} {
+	for _, kind := range []string{ResetOperationKind, environment.OperationCleanup, environment.OperationImageBuild} {
 		ops, err := s.cfg.Store.ListOperations(ctx, kind)
 		if err != nil {
 			return err
@@ -146,7 +146,8 @@ func (s *Service) problemInventory(ctx context.Context, rec model.SessionRecord,
 	} else if err != nil {
 		return inv, err
 	}
-	return environment.NamespaceInventory(inv, append([]string{f.Namespace}, f.Definition.Scope.Namespaces...), slices.Clone(f.Definition.Scope.ClusterResources)), nil
+	inv = environment.NamespaceInventory(inv, append([]string{f.Namespace}, f.Definition.Scope.Namespaces...), slices.Clone(f.Definition.Scope.ClusterResources))
+	return s.observeProblemImages(ctx, inv, f)
 }
 
 func (s *Service) resumeReset(ctx context.Context, rec model.SessionRecord, op model.Operation) error {
@@ -279,6 +280,11 @@ func (s *Service) Recover(ctx context.Context, environmentID string) error {
 		return err
 	}
 	defer release()
+	if recoverer, ok := s.cfg.Env.(imageRecoverer); ok {
+		if err = recoverer.RecoverImageBuilds(ctx, environmentID); err != nil {
+			return err
+		}
+	}
 	ops, err := s.cfg.Store.ListOperations(ctx, ResetOperationKind)
 	if err != nil {
 		return err

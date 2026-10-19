@@ -101,7 +101,7 @@ func Run(ctx context.Context, args []string, in io.Reader, out, errOut io.Writer
 			}
 		}
 		cfg := author.GraderConfig{StateDir: state}
-		if c.Name() == "grade" || c.Name() == "reset" {
+		if c.Name() == "grade" || c.Name() == "reset" || (c.Name() == "build" && c.Parent().Name() == "image") {
 			// Grade must record unavailable/stale environments as ERROR runs. Use
 			// the local recorded identity to compose clients without an API call;
 			// Service.Grade performs live ownership and version checks after intent.

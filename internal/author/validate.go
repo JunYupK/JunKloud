@@ -103,7 +103,8 @@ type Config struct {
 	// Identity is the verified environment (Manager.Ensure).
 	Identity model.Identity
 	// Env applies setup, solution and case actions (the Manager).
-	Env Applier
+	Env     Applier
+	Actions ActionExecutor
 	// Janitor resets the temporary bundle between and after the steps.
 	Janitor Janitor
 	// Engine is the grader engine, built with the composition options the
@@ -144,6 +145,9 @@ func NewValidator(cfg Config) (*Validator, error) {
 		return nil, errors.New("author: validator needs the environment lock path")
 	case cfg.GraderVersion == "", cfg.EnvironmentHash == "":
 		return nil, errors.New("author: validator needs the grader version and the environment hash")
+	}
+	if cfg.Actions == nil {
+		cfg.Actions = NewActionExecutor(cfg.Env, nil)
 	}
 	return &Validator{cfg: cfg}, nil
 }
@@ -307,7 +311,24 @@ func (v *Validator) staticActionFindings(p model.Problem, f model.FrozenProblem)
 	}
 	var findings []string
 	for _, g := range groups {
-		built, err := BuildActions(p.Files, f.Parameters, g.actions)
+		if g.label == "setup" {
+			for _, a := range g.actions {
+				if a.Kind == model.ActionFile || a.Kind == model.ActionImage {
+					findings = append(findings, "setup: file/image setup is unsupported by the learner runtime")
+				}
+			}
+		}
+		ws, remove, err := ScratchWorkspace(v.cfg.ScratchDir, f)
+		if err != nil {
+			findings = append(findings, err.Error())
+			continue
+		}
+		bases := make([]environment.PinnedImage, 0, len(v.cfg.ProvidedImages))
+		for _, name := range v.cfg.ProvidedImages {
+			bases = append(bases, environment.PinnedImage{Name: name})
+		}
+		built, err := preflightActions(p, f, ws, g.actions, bases)
+		remove()
 		if err != nil {
 			findings = append(findings, fmt.Sprintf("%s: %v", g.label, err))
 			continue
@@ -316,7 +337,7 @@ func (v *Validator) staticActionFindings(p model.Problem, f model.FrozenProblem)
 			continue
 		}
 		for _, a := range built {
-			for _, obj := range a.Objects {
+			for _, obj := range a.cluster.Objects {
 				for _, image := range ObjectImages(obj) {
 					if !provided[grader.NormalizeImageRef(image)] {
 						findings = append(findings, fmt.Sprintf("%s: image %q is not among the images the environment provides (pinned and preloaded); use one of them", g.label, image))
@@ -422,9 +443,14 @@ func (s *seedRun) stage(ctx context.Context, st stageSpec) error {
 	if err := s.reset(ctx); err != nil {
 		return err
 	}
-	finding, err := s.apply(ctx, "setup", s.p.Setup, true)
+	ws, remove, err := ScratchWorkspace(s.v.cfg.ScratchDir, s.f)
+	if err != nil {
+		return err
+	}
+	defer remove()
+	finding, err := s.apply(ctx, "setup", s.p.Setup, true, ws)
 	if err == nil && finding == "" && st.actions != nil {
-		finding, err = s.apply(ctx, st.what, st.actions, false)
+		finding, err = s.apply(ctx, st.what, st.actions, false, ws)
 	}
 	if err != nil {
 		return err
@@ -436,11 +462,6 @@ func (s *seedRun) stage(ctx context.Context, st stageSpec) error {
 	// The workspace a learner has right after Start: the provided files,
 	// rendered, and nothing else (the same helper a session's preparation
 	// uses), fresh for every stage.
-	ws, remove, err := ScratchWorkspace(s.v.cfg.ScratchDir, s.f)
-	if err != nil {
-		return err
-	}
-	defer remove()
 	ev, err := s.v.cfg.Engine.Evaluate(ctx, grader.Target{Identity: s.v.cfg.Identity, Problem: s.f, Workspace: ws})
 	if errors.Is(err, grader.ErrInvalidCriteria) {
 		s.finding(label, "%v", err)
@@ -456,15 +477,11 @@ func (s *seedRun) stage(ctx context.Context, st stageSpec) error {
 
 // apply builds and applies one action list. Setup (create true) is the only
 // step that may create the bundle's namespaces.
-func (s *seedRun) apply(ctx context.Context, what string, actions []model.Action, create bool) (finding string, err error) {
-	built, berr := BuildActions(s.p.Files, s.f.Parameters, actions)
-	if berr != nil {
-		return fmt.Sprintf("%s: %v", what, berr), nil
-	}
+func (s *seedRun) apply(ctx context.Context, what string, actions []model.Action, create bool, ws string) (finding string, err error) {
 	owner := s.owner
 	owner.CreateNamespaces = create
 	s.clean = false
-	inv, aerr := s.v.cfg.Env.Apply(ctx, s.v.cfg.Identity, owner, built)
+	inv, aerr := s.v.cfg.Actions.Execute(ctx, s.v.cfg.Identity, owner, s.p, s.f, ws, actions)
 	s.owner.Inventory = inv // what is owned now, also after a partial failure
 	switch {
 	case aerr == nil:
