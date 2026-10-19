@@ -177,3 +177,10 @@ func TestCurrentCertificate(t *testing.T) {
 	testutil.NoError(t, err)
 	testutil.Equal(t, ok, false)
 }
+
+func TestVolumeSemanticsInvalidateImageCertificates(t *testing.T) {
+	record := passedRecord("sha256:volume", "grader-3", "env")
+	if author.CertificateMatches(record, "sha256:volume", grader.GraderVersion, "env") {
+		t.Fatal("pre-volume grader certificate is still current")
+	}
+}

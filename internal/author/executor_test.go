@@ -81,6 +81,7 @@ func TestValidationStagesShareWorkspaceAndResetOriginalAssets(t *testing.T) {
 	p.Solution = append(p.Solution, model.Action{Kind: model.ActionFile, Args: map[string]any{"source": "solution/answer.txt", "path": "answer.txt"}})
 	var seen []string
 	h.cluster.onEvaluate = func(target grader.Target) {
+		testutil.Equal(t, target.SessionID, author.SessionID)
 		b, _ := os.ReadFile(filepath.Join(target.Workspace, "answer.txt"))
 		seen = append(seen, string(b))
 		testutil.Equal(t, string(target.Problem.Assets["answer.txt"]), "initial")

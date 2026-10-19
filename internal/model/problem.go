@@ -39,22 +39,23 @@ const (
 // Criterion kinds. Schema v1 enumerates all of them; each kind's Args are
 // validated by the checker that implements it.
 const (
-	CriterionResource        = "resource"
-	CriterionField           = "field"
-	CriterionReady           = "ready"
-	CriterionHTTP            = "http"
-	CriterionTCP             = "tcp"
-	CriterionNetworkPolicy   = "network-policy"
-	CriterionFile            = "file"
-	CriterionImage           = "image"
-	CriterionHelm            = "helm"
-	CriterionKustomize       = "kustomize"
-	CriterionLogs            = "logs"
-	CriterionJob             = "job"
-	CriterionCronJobTemplate = "cronjob-template"
-	CriterionCronJobSchedule = "cronjob-schedule"
-	CriterionAuthorization   = "authorization"
-	CriterionSecurityContext = "security-context"
+	CriterionResource          = "resource"
+	CriterionField             = "field"
+	CriterionReady             = "ready"
+	CriterionHTTP              = "http"
+	CriterionTCP               = "tcp"
+	CriterionNetworkPolicy     = "network-policy"
+	CriterionFile              = "file"
+	CriterionImage             = "image"
+	CriterionHelm              = "helm"
+	CriterionKustomize         = "kustomize"
+	CriterionLogs              = "logs"
+	CriterionJob               = "job"
+	CriterionCronJobTemplate   = "cronjob-template"
+	CriterionCronJobSchedule   = "cronjob-schedule"
+	CriterionAuthorization     = "authorization"
+	CriterionSecurityContext   = "security-context"
+	CriterionVolumePersistence = "volume-persistence"
 )
 
 // Action kinds used by setup, solution and cases. There is deliberately no
@@ -89,7 +90,7 @@ func CriterionKinds() []string {
 		CriterionResource, CriterionField, CriterionReady, CriterionHTTP, CriterionTCP,
 		CriterionNetworkPolicy, CriterionFile, CriterionImage, CriterionHelm, CriterionKustomize,
 		CriterionLogs, CriterionJob, CriterionCronJobTemplate, CriterionCronJobSchedule,
-		CriterionAuthorization, CriterionSecurityContext,
+		CriterionAuthorization, CriterionSecurityContext, CriterionVolumePersistence,
 	}
 }
 

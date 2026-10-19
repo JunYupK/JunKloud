@@ -487,6 +487,7 @@ func TestGradeUsesTheFrozenPackage(t *testing.T) {
 	testutil.Equal(t, run.Evaluation.Complete, true)
 	graded := h.eng.targets[prepared:]
 	for _, target := range graded {
+		testutil.Equal(t, target.SessionID, id)
 		var frozen model.FrozenProblem
 		for _, f := range rec.Problems {
 			if f.Definition.ID == target.Problem.Definition.ID {
@@ -732,6 +733,7 @@ func TestMissingAttemptDirectory(t *testing.T) {
 		graded := h.eng.targets[prepared:]
 		testutil.Equal(t, len(graded), len(ids))
 		for _, target := range graded {
+			testutil.Equal(t, target.SessionID, id)
 			if target.Problem.Definition.ID != ids[1] {
 				continue
 			}

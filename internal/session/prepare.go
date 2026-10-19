@@ -331,7 +331,7 @@ func (s *Service) verifyInitialStates(ctx context.Context, id model.Identity, re
 		if err != nil {
 			return fmt.Errorf("prepare the scratch workspace of %q: %w", f.Definition.ID, err)
 		}
-		ev, err := s.cfg.Engine.Evaluate(ctx, grader.Target{Identity: id, Problem: f, Workspace: dir})
+		ev, err := s.cfg.Engine.Evaluate(ctx, grader.Target{Identity: id, SessionID: rec.ID, Problem: f, Workspace: dir})
 		remove()
 		if err != nil {
 			return fmt.Errorf("evaluate the initial state of %q: %w", f.Definition.ID, err)

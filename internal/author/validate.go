@@ -462,7 +462,7 @@ func (s *seedRun) stage(ctx context.Context, st stageSpec) error {
 	// The workspace a learner has right after Start: the provided files,
 	// rendered, and nothing else (the same helper a session's preparation
 	// uses), fresh for every stage.
-	ev, err := s.v.cfg.Engine.Evaluate(ctx, grader.Target{Identity: s.v.cfg.Identity, Problem: s.f, Workspace: ws})
+	ev, err := s.v.cfg.Engine.Evaluate(ctx, grader.Target{Identity: s.v.cfg.Identity, SessionID: SessionID, Problem: s.f, Workspace: ws})
 	if errors.Is(err, grader.ErrInvalidCriteria) {
 		s.finding(label, "%v", err)
 		return nil

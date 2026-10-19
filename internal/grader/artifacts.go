@@ -102,7 +102,7 @@ func AddArtifactCheckers(checkers map[string]Checker, c *ArtifactChecker) {
 
 var artifactKinds = []string{
 	model.CriterionFile, model.CriterionImage, model.CriterionHelm, model.CriterionKustomize,
-	model.CriterionLogs, model.CriterionJob, model.CriterionCronJobTemplate, model.CriterionCronJobSchedule,
+	model.CriterionLogs, model.CriterionJob, model.CriterionCronJobTemplate, model.CriterionCronJobSchedule, model.CriterionVolumePersistence,
 }
 
 // Close removes the scratch directory helm uses for its caches.
@@ -122,6 +122,9 @@ func (c *ArtifactChecker) scratchDir() (string, error) {
 // Mutates implements MutatingChecker: running an image creates a pod, an
 // engine tag and a node image, so such criteria run alone.
 func (c *ArtifactChecker) Mutates(crit model.Criterion) bool {
+	if crit.Kind == model.CriterionVolumePersistence {
+		return true
+	}
 	if crit.Kind != model.CriterionImage {
 		return false
 	}
@@ -133,6 +136,9 @@ func (c *ArtifactChecker) Mutates(crit model.Criterion) bool {
 // without touching a cluster or a tool.
 func (c *ArtifactChecker) ValidateCriterion(crit model.Criterion) error {
 	switch crit.Kind {
+	case model.CriterionVolumePersistence:
+		_, err := parseVolumeArgs(crit)
+		return err
 	case model.CriterionFile:
 		_, err := parseFileArgs(crit)
 		return err
@@ -167,6 +173,8 @@ func (c *ArtifactChecker) Check(ctx context.Context, t Target, crit model.Criter
 		return model.CheckResult{}, err
 	}
 	switch crit.Kind {
+	case model.CriterionVolumePersistence:
+		return c.checkVolume(ctx, t, crit)
 	case model.CriterionFile:
 		return c.checkFile(ctx, t, crit)
 	case model.CriterionLogs:

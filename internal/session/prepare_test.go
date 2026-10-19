@@ -76,6 +76,7 @@ func TestPrepareHidesQuestions(t *testing.T) {
 		testutil.Equal(t, len(entries), 0)
 	}
 	for _, tgt := range h.eng.targets {
+		testutil.Equal(t, tgt.SessionID, prepared.ID)
 		if strings.HasPrefix(tgt.Workspace, h.workspace) {
 			t.Errorf("evaluated inside the learner workspace: %s", tgt.Workspace)
 		}

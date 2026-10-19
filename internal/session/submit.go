@@ -489,7 +489,7 @@ func (s *Service) items(rec model.SessionRecord, problems []model.FrozenProblem)
 	items := make([]gradeItem, 0, len(problems))
 	for _, f := range problems {
 		id := f.Definition.ID
-		it := gradeItem{frozen: f, target: grader.Target{Identity: s.cfg.Identity, Problem: f}}
+		it := gradeItem{frozen: f, target: grader.Target{Identity: s.cfg.Identity, SessionID: rec.ID, Problem: f}}
 		dir, _, err := LatestAttempt(s.cfg.Workspace, rec.ID, id)
 		switch {
 		case err == nil:

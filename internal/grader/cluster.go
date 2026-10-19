@@ -13,6 +13,7 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/kubernetes/scheme"
 	"k8s.io/client-go/rest"
@@ -210,4 +211,13 @@ func (k *clusterClients) TokenUser(ctx context.Context, token string) (string, b
 		return "", false, nil
 	}
 	return out.Status.User.Username, true, nil
+}
+
+// DeletePodUID uses the API UID precondition; a reused name is never deleted.
+func (k *clusterClients) DeletePodUID(ctx context.Context, namespace, name, uid string) error {
+	if uid == "" {
+		return ErrInsufficientEvidence
+	}
+	expected := types.UID(uid)
+	return k.cs.CoreV1().Pods(namespace).Delete(ctx, name, metav1.DeleteOptions{Preconditions: &metav1.Preconditions{UID: &expected}})
 }

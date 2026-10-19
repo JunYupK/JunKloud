@@ -342,6 +342,7 @@ func TestResetDeletedNewAttemptNeverGradesArchivedFiles(t *testing.T) {
 	_, err = h.svc.Grade(ctx, v.ID, session.GradeOptions{ProblemID: pid})
 	testutil.NoError(t, err)
 	testutil.Equal(t, h.eng.targets[len(h.eng.targets)-1].Workspace, dir)
+	testutil.Equal(t, h.eng.targets[len(h.eng.targets)-1].SessionID, v.ID)
 }
 
 func TestResetNeverReusesSubmittedAttemptAfterDirectoryDisappears(t *testing.T) {

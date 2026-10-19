@@ -108,7 +108,7 @@
           "enum": [
             "resource", "field", "ready", "http", "tcp", "network-policy", "file", "image",
             "helm", "kustomize", "logs", "job", "cronjob-template", "cronjob-schedule",
-            "authorization", "security-context"
+            "authorization", "security-context", "volume-persistence"
           ]
         },
         "target": { "$ref": "#/$defs/object_ref" },
