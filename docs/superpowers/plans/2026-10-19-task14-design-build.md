@@ -61,7 +61,7 @@
 
 **Files:** Create `internal/grader/volume_persistence.go` and focused tests; `tests/integration/task14_volume_test.go`. Modify model/schema criterion enumeration, existing grader registration/composition and input capture/versioning only as needed.
 
-**Interfaces:** New criterion kind `volume-persistence`; Target is one owned `apps/v1 Deployment`; strict Args `{container,path,claim}`. `path` is absolute inside that container's PVC mount, not its root filesystem, EmptyDir, another volume or an escaping subPath. Package timeout is **120s**. Follow the current Checker/ArgsValidator/MutatingChecker conventions; no separate grader engine.
+**Interfaces:** New criterion kind `volume-persistence`; Target is one owned `apps/v1 Deployment`; strict Args `{container,path,claim}`. Add `grader.Target.SessionID string` for the expected session: runtime evaluations use SessionRecord.ID, author stages use author.SessionID; other checkers remain compatible. `path` is absolute inside that container's PVC mount, not its root filesystem, EmptyDir, another volume or an escaping subPath. Package timeout is **120s**. Follow the current Checker/ArgsValidator/MutatingChecker conventions; no separate grader engine.
 
 - [ ] Write failing tests: persistent marker after actual owned Pod replacement, EmptyDir/wrong claim/wrong container refusal, no replacement or unreadable marker, unknown args with zero effects, foreign/replaced object UID refusal, cancellation/cleanup, and intentional child replacement does not invalidate an unchanged submitted controller.
 - [ ] Run the focused grader/model/schema selections and record RED from the absent behavior.
