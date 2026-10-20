@@ -141,7 +141,8 @@ func (s *Service) Catalog(ctx context.Context) (Catalog, error) {
 		available[p.ID] = true
 	}
 	entries, err := os.ReadDir(filepath.Join(s.cfg.BankDir, ExamsDir))
-	if err != nil {
+	// Practice-only banks may not have mock exams yet.
+	if err != nil && !os.IsNotExist(err) {
 		return Catalog{}, err
 	}
 	for _, entry := range entries {
