@@ -63,7 +63,54 @@ exec 3< "$resolved" || exit 2
 opened=$(readlink -f -- /proc/self/fd/3) || exit 2
 case "$opened" in "$root"/*) ;; *) exit 2;; esac
 [ -f /proc/self/fd/3 ] || exit 2
+shift 2
+best=''
+prefix='!'
+while [ "$#" -ge 2 ]; do
+  mount=$1
+  identity=$2
+  shift 2
+  case "$opened" in "$mount"|"$mount"/*)
+    if [ "${#mount}" -gt "${#best}" ]; then best=$mount; prefix=$identity; fi;;
+  esac
+done
+[ -n "$best" ] && [ "$prefix" != '!' ] || exit 2
+relative=${opened#"$best"/}
+# Identity is a separate bounded metadata line; it cannot contain a newline.
+case "$relative" in *'
+'*) exit 2;; esac
+printf '%s/%s\n' "$prefix" "$relative"
 head -c 4097 <&3 || exit 5`
+
+// The script chooses the effective mount of its resolved FD before reading.
+// A non-shared nested volume is explicitly denied, rather than inferred from
+// the original lexical path. Shared aliases carry their actual subPath prefix.
+func sharedMountRules(p object, container, volume string) ([]string, bool) {
+	var rules []string
+	for _, raw := range listAt(p, "spec", "containers") {
+		c := asMap(raw)
+		if stringAt(c, "name") != container {
+			continue
+		}
+		for _, raw := range listAt(c, "volumeMounts") {
+			m := asMap(raw)
+			root := stringAt(m, "mountPath")
+			if !safeVolumePath(root) {
+				return nil, false
+			}
+			identity := "!"
+			if stringAt(m, "name") == volume {
+				sub := stringAt(m, "subPath")
+				if stringAt(m, "subPathExpr") != "" || sub != "" && (path.IsAbs(sub) || path.Clean(sub) != sub || sub == ".." || strings.HasPrefix(sub, "../") || strings.ContainsAny(sub, "\x00\r\n\\")) {
+					return nil, false
+				}
+				identity = "./" + path.Clean(sub)
+			}
+			rules = append(rules, root, identity)
+		}
+	}
+	return rules, len(rules) > 0
+}
 
 // Select the effective longest mount, so nested mounts cannot hide a different
 // volume behind the shared path. Return an identity within the shared volume,
@@ -111,6 +158,7 @@ func (c *ArtifactChecker) checkSharedFiles(ctx context.Context, ns string, p obj
 		return []string{"required shared volume is not an emptyDir"}, nil
 	}
 	identities := map[string]string{}
+	resolvedIdentities := map[string]string{}
 	for _, container := range a.Containers {
 		running := false
 		for _, raw := range listAt(p, "status", "containerStatuses") {
@@ -121,6 +169,10 @@ func (c *ArtifactChecker) checkSharedFiles(ctx context.Context, ns string, p obj
 		}
 		if !running {
 			return []string{"shared-file container is not running"}, nil
+		}
+		rules, ok := sharedMountRules(p, container, a.Volume)
+		if !ok {
+			return []string{"shared mount rules cannot be proven safe"}, nil
 		}
 		for _, f := range a.Files {
 			root, identity, ok := sharedFileMount(p, container, f.Path, a.Volume)
@@ -140,14 +192,24 @@ func (c *ArtifactChecker) checkSharedFiles(ctx context.Context, ns string, p obj
 				return nil, ErrTargetChanged
 			}
 			ectx, cancel := context.WithTimeout(ctx, 3*time.Second)
-			result, err := c.cfg.Pods.Exec(ectx, ns, nameOf(p), container, []string{"sh", "-c", sharedReadScript, "shared-read", root, f.Path})
+			command := append([]string{"sh", "-c", sharedReadScript, "shared-read", root, f.Path}, rules...)
+			result, err := c.cfg.Pods.Exec(ectx, ns, nameOf(p), container, command)
 			cancel()
 			if err != nil {
 				return nil, fmt.Errorf("%w: shared-file exec unavailable", ErrInsufficientEvidence)
 			}
 			switch result.ExitCode {
 			case 0:
-				if len(result.Stdout) > 4096 || result.Stdout != f.Equals && strings.TrimSuffix(result.Stdout, "\n") != f.Equals {
+				resolved, content, ok := strings.Cut(result.Stdout, "\n")
+				if !ok || len(resolved) > 4096 || path.IsAbs(resolved) || path.Clean(resolved) == ".." || strings.HasPrefix(path.Clean(resolved), "../") {
+					return nil, fmt.Errorf("%w: shared-file identity response is invalid", ErrInsufficientEvidence)
+				}
+				resolved = path.Clean(resolved)
+				if old, ok := resolvedIdentities[f.Path]; ok && old != resolved {
+					return []string{"resolved files use different shared-volume paths"}, nil
+				}
+				resolvedIdentities[f.Path] = resolved
+				if len(content) > 4096 || content != f.Equals && strings.TrimSuffix(content, "\n") != f.Equals {
 					return []string{"shared file has unexpected content"}, nil
 				}
 			case 2:

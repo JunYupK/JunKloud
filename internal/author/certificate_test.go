@@ -198,3 +198,10 @@ func TestLogBehaviorSemanticsInvalidateScheduleCertificates(t *testing.T) {
 		t.Fatal("pre-shared-file/node behavior certificate is still current")
 	}
 }
+
+func TestResolvedMountSemanticsInvalidatePriorLogCertificates(t *testing.T) {
+	record := passedRecord("sha256:resolved-mount", "grader-6", "env")
+	if author.CertificateMatches(record, "sha256:resolved-mount", grader.GraderVersion, "env") {
+		t.Fatal("pre-resolved-mount log certificate is still current")
+	}
+}

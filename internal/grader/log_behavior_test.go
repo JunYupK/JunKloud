@@ -1,14 +1,47 @@
 package grader_test
 
 import (
+	"context"
 	"fmt"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/JunYupK/JunKloud/internal/grader"
 	"github.com/JunYupK/JunKloud/internal/model"
 	"github.com/JunYupK/JunKloud/internal/testutil"
 )
+
+func TestLogsWaitForNodeAssignment(t *testing.T) {
+	unassigned := podDoc(t, "app", "", "Running", "app")
+	assigned := podDoc(t, "app", "", "Running", "app")
+	assigned["spec"].(map[string]any)["nodeName"] = "kind-a"
+	for _, tc := range []struct {
+		name string
+		docs []any
+		want string
+		wait time.Duration
+	}{
+		{"assignment converges", []any{unassigned, assigned}, "PASS", time.Second},
+		{"assignment never observed", []any{unassigned}, "ERROR", 5 * time.Second},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			clock := newClock()
+			pods := newPods()
+			pods.logs["jk-p1/app/app"] = "node=kind-a\n"
+			reader := newReader().put(podRef, tc.docs...)
+			engine, _ := artifactEngine(grader.ArtifactConfig{Reader: reader, Pods: pods}, clock)
+			c := logsCrit(podRef, map[string]any{"wait": true, "node_name_prefix": "node="})
+			c.Timeout = 5 * time.Second
+			ev, err := engine.Evaluate(context.Background(), artifactTarget("", c))
+			testutil.NoError(t, err)
+			testutil.Equal(t, ev.Results[0].Status, tc.want)
+			if clock.slept() < tc.wait {
+				t.Fatalf("observed for %v, want at least %v", clock.slept(), tc.wait)
+			}
+		})
+	}
+}
 
 func TestLogsActualNodeName(t *testing.T) {
 	for _, tc := range []struct{ log, want string }{{"node=kind-a\n", "PASS"}, {"node=\n", "FAIL"}, {"node=kind-other\n", "FAIL"}, {"node=kind-a-suffix\n", "FAIL"}, {"notnode=kind-a\n", "FAIL"}} {
@@ -34,10 +67,10 @@ func sharedLogFixture(t *testing.T) (map[string]any, *fakePods, model.Criterion)
 	pods := newPods()
 	pods.logs["jk-p1/app/app"] = "delivered:seeded\n"
 	pods.execFn = func(_ string, cmd []string) (grader.ExecResult, error) {
-		if cmd[len(cmd)-1] == "/work/message" {
-			return grader.ExecResult{Stdout: "seeded\n"}, nil
+		if cmd[5] == "/work/message" {
+			return grader.ExecResult{Stdout: "message\nseeded\n"}, nil
 		}
-		return grader.ExecResult{Stdout: "delivered:seeded\n"}, nil
+		return grader.ExecResult{Stdout: "ack\ndelivered:seeded\n"}, nil
 	}
 	c := logsCrit(podRef, map[string]any{"container": "app", "contains": []any{"delivered:seeded"}, "shared_files": map[string]any{"volume": "shared", "containers": []any{"app", "sidecar"}, "files": []any{map[string]any{"path": "/work/message", "equals": "seeded\n"}, map[string]any{"path": "/work/ack", "equals": "delivered:seeded\n"}}}})
 	return p, pods, c
@@ -53,8 +86,8 @@ func TestLogsSharedFiles(t *testing.T) {
 			p.execFn = func(string, []string) (grader.ExecResult, error) { return grader.ExecResult{ExitCode: 3}, nil }
 		}},
 		{"wrong shared content", "FAIL", func(_ map[string]any, p *fakePods) {
-			p.execFn = func(string, []string) (grader.ExecResult, error) {
-				return grader.ExecResult{Stdout: "private-wrong-value"}, nil
+			p.execFn = func(_ string, cmd []string) (grader.ExecResult, error) {
+				return grader.ExecResult{Stdout: strings.TrimPrefix(cmd[5], "/work/") + "\nprivate-wrong-value"}, nil
 			}
 		}},
 		{"sidecar cannot read shared file", "FAIL", func(_ map[string]any, p *fakePods) {
@@ -62,7 +95,7 @@ func TestLogsSharedFiles(t *testing.T) {
 				if strings.HasSuffix(key, "/sidecar") {
 					return grader.ExecResult{ExitCode: 3}, nil
 				}
-				return grader.ExecResult{Stdout: "seeded\n"}, nil
+				return grader.ExecResult{Stdout: "message\nseeded\n"}, nil
 			}
 		}},
 		{"symlink outside mount", "FAIL", func(_ map[string]any, p *fakePods) {

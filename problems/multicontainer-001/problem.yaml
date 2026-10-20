@@ -218,6 +218,24 @@
       "expected_score": 3
     },
     {
+      "id": "nested-private-symlinks",
+      "actions": [
+        {
+          "kind": "apply",
+          "args": {
+            "path": "cases/nested-private-symlinks.yaml"
+          }
+        }
+      ],
+      "expected": {
+        "pod": "PASS",
+        "shared-layout": "PASS",
+        "ready": "PASS",
+        "shared-behavior": "FAIL"
+      },
+      "expected_score": 3
+    },
+    {
       "id": "alternative-file-tools",
       "actions": [
         {

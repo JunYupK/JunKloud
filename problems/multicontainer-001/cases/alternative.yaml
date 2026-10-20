@@ -15,7 +15,7 @@
         "command": [
           "sh",
           "-c",
-          "printf \"seeded\\n\" > /work/message"
+          "printf \"seeded\\n\" > /work/source; ln -s source /work/message"
         ],
         "resources": {
           "requests": {

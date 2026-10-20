@@ -265,6 +265,12 @@ func (c *ArtifactChecker) logsRound(ctx context.Context, ref model.ObjectRef, a 
 			r.missing = append(r.missing, nameOf(p))
 			continue
 		}
+		// Assignment is normal setup convergence. With wait enabled, obtain
+		// a fresh Pod snapshot rather than judging the stale pre-log snapshot.
+		if a.NodeNamePrefix != "" && stringAt(p, "spec", "nodeName") == "" {
+			r.unreadable = append(r.unreadable, p)
+			continue
+		}
 		text, err := c.cfg.Pods.Logs(ctx, ref.Namespace, nameOf(p), container, LogOptions{TailLines: a.TailLines, Previous: a.Previous})
 		if errors.Is(err, ErrContainerNotStarted) {
 			r.unreadable = append(r.unreadable, p)
@@ -276,9 +282,6 @@ func (c *ArtifactChecker) logsRound(ctx context.Context, ref model.ObjectRef, a 
 		lines, unmet := a.evaluate(text)
 		if a.NodeNamePrefix != "" {
 			node := stringAt(p, "spec", "nodeName")
-			if node == "" {
-				return r, target, fmt.Errorf("%w: Pod has no assigned node", ErrInsufficientEvidence)
-			}
 			found := false
 			for _, line := range strings.Split(text, "\n") {
 				if strings.TrimSpace(line) == a.NodeNamePrefix+node {
