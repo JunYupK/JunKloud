@@ -376,16 +376,16 @@ Task 2에서 `internal/model`에 아래 타입을 정의한다. 패키지 간에
 
 **Interfaces:** Consumes schema v1과 Validator.Validate. Produces 검증된 5 package와 Design & Build 역량 연결. 공통 tests는 `loadGroup(t,ids []string)`와 `validateGroup(t,problems []model.Problem)`를 이 test 파일에 정의하고 다른 batch가 쓸 공통 부분만 `tests/integration/bank_helpers_test.go`로 이동한다.
 
-- [ ] **실패 테스트 작성:** `TestBuildBank`가 빈 목록·배점·역량·오답 rejection을 확인하도록 작성한다. 모든 package의 검증 결과 `Passed=true`, 점수 합20, 개수5를 assert한다.
+- [x] **실패 테스트 작성:** `TestBuildBank`가 빈 목록·배점·역량·오답 rejection을 확인하도록 작성한다. 모든 package의 검증 결과 `Passed=true`, 점수 합20, 개수5를 assert한다.
   ```go
   testutil.Equal(t, len(problems), 5)
   testutil.Equal(t, sumPoints(problems), 20)
   for _, record := range records { testutil.Equal(t, record.Passed, true) }
   ```
-- [ ] **실패 확인:** `go test -tags=integration ./tests/integration -run TestBuildBank -count=1 -v`에서 문제 부재/잘못된 사례 실패 확인.
-- [ ] **문제 작성:** 영어 요구사항·한국어 진단과 해설·초기값·정답·오답·대표 seed를 작성한다. Linux 두 아키텍처 이미지와 작은 resource budget 사용. 실제 CronJob 발동 검사는 최대120초의 명시적 관찰 창을 쓰며 schedule template 검사와 구분한다. 영속 볼륨은 Pod 재생성 후 보존과 reset 후 제거를 모두 검사한다.
-- [ ] **통과 확인:** `TestBuildBank` PASS. 문항·검사 사이 숨은 조건 없음, 대체 답안과 reset 후 initial 점수 일치. 아직 전체 mock을 완료했다고 표시하지 않는다.
-- [ ] **커밋:** `content: add validated design and build problems`.
+- [x] **실패 확인:** `go test -tags=integration ./tests/integration -run TestBuildBank -count=1 -v`에서 문제 부재/잘못된 사례 실패 확인.
+- [x] **문제 작성:** 영어 요구사항·한국어 진단과 해설·초기값·정답·오답·대표 seed를 작성한다. Linux 두 아키텍처 이미지와 작은 resource budget 사용. 실제 CronJob 발동 검사는 최대120초의 명시적 관찰 창을 쓰며 schedule template 검사와 구분한다. 영속 볼륨은 Pod 재생성 후 보존과 reset 후 제거를 모두 검사한다.
+- [x] **통과 확인:** exact085401f의 다섯 실제 문제별 subtest·모든 seed/정답/오답/대체답안/reset은 PASS. 최종 CLI gate에서 top-level TestBuildBank는 FAIL이었으며 이를 전체 PASS로 표시하지 않는다. 후속0bf9a9c에서 실제 Doctor·이미지 검증·CLI 출제 가능 목록 및 전체 Go suite PASS로 경계 수정을 확인했다. 전체5문제 CLI 시작은 수정 후 재실행하지 않았다. 자세한 근거는 2026-10-19-task14-design-build.md의 Verified milestones 참조. 문항·검사 사이 숨은 조건 없음, 대체 답안과 reset 후 initial 점수 일치. 아직 전체 mock을 완료했다고 표시하지 않는다.
+- [x] **커밋:** `content: add validated design and build problems`.
 
 ### Task 15: Application Deployment 4문제 / 20점
 
