@@ -58,6 +58,7 @@
         "volumes": [
           {
             "name": "storage",
+            "emptyDir": null,
             "persistentVolumeClaim": {
               "claimName": "ledger-data"
             }
