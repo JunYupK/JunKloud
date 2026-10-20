@@ -250,7 +250,11 @@ func (e *executor) preflightTools(ctx context.Context, id model.Identity, o envi
 			if prior := seen[ref]; prior != "" && (prior == model.ActionHelm || s.kind == model.ActionHelm) {
 				return invalid("action list collides with Helm object")
 			}
-			if s.tool != nil && seen[ref] == "" {
+			// Every native target must be authorized against the initial live
+			// inventory, even when an earlier ordinary apply names that target.
+			// A reference in this plan never grants ownership; initial absence
+			// is what permits an earlier action to create it safely.
+			if s.tool != nil {
 				live, err := e.tools.Reader.Get(ctx, ref)
 				if err != nil && !errors.Is(err, grader.ErrNotFound) {
 					return err

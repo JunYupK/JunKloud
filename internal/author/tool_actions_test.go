@@ -44,6 +44,7 @@ type actionTools struct {
 	failInstall  bool
 	installExit  int
 	output       string
+	helmOutput   string
 	renderBytes  []string
 }
 
@@ -71,6 +72,9 @@ func (r *actionTools) Run(ctx context.Context, c grader.ToolCall) (grader.ToolRe
 		return grader.ToolResult{}, nil
 	}
 	out := r.output
+	if c.Exe == "helm" && r.helmOutput != "" {
+		out = r.helmOutput
+	}
 	if c.Exe == "helm" {
 		for i, a := range c.Args {
 			if a == "template" {
@@ -419,5 +423,58 @@ func TestToolRecoveryDoesNotAddDuplicateNamespacesToNextSetup(t *testing.T) {
 	}
 	if len(h.cluster.applies) == 0 {
 		t.Fatalf("no fresh setup reached: %v", err)
+	}
+}
+
+type mixedCollisionReader struct{ live map[string]any }
+
+func (r mixedCollisionReader) Get(ctx context.Context, ref model.ObjectRef) (map[string]any, error) {
+	if ref.Kind == "Namespace" {
+		return (actionReader{uid: "ns-uid"}).Get(ctx, ref)
+	}
+	if ref.Kind == "ConfigMap" && ref.Name == "answer" && r.live != nil {
+		return r.live, nil
+	}
+	return nil, grader.ErrNotFound
+}
+func (r mixedCollisionReader) List(context.Context, grader.ListQuery) ([]map[string]any, error) {
+	return nil, nil
+}
+
+func TestToolMixedListChecksInitialIdentityBeforeAnyEffects(t *testing.T) {
+	for _, state := range []string{"same-mark-replaced", "unmarked-collision", "initially-absent"} {
+		t.Run(state, func(t *testing.T) {
+			h, ws, o, p, f := toolFixture(t)
+			p.Files["solution/stage"] = []byte("stage changed")
+			p.Files["solution/answer.yaml"] = []byte("apiVersion: v1\nkind: ConfigMap\nmetadata: {name: answer}\ndata: {value: initial}\n")
+			ref := model.ObjectRef{APIVersion: "v1", Kind: "ConfigMap", Namespace: o.Namespace, Name: "answer"}
+			var live map[string]any
+			if state != "initially-absent" {
+				o.Inventory.Resources = append(o.Inventory.Resources, model.OwnedResource{Ref: ref, UID: "recorded-A"})
+				if state == "same-mark-replaced" {
+					live, _ = (actionReader{uid: "replacement-B"}).Get(context.Background(), model.ObjectRef{Kind: "Namespace"})
+				} else {
+					live = map[string]any{"metadata": map[string]any{"uid": "foreign-B"}}
+				}
+			}
+			r := &actionTools{helmOutput: "apiVersion: v1\nkind: ConfigMap\nmetadata: {name: unrelated-helm}\ndata: {value: helper}\n"}
+			ex := configuredActions(h, r, mixedCollisionReader{live: live})
+			actions := []model.Action{t15UnitFile("solution/stage", "stage.txt"), helmAction(), {Kind: model.ActionApply, Args: map[string]any{"path": "solution/answer.yaml"}}, kzAction()}
+			_, err := ex.Execute(context.Background(), h.id, o, p, f, ws, actions)
+			if state == "initially-absent" {
+				testutil.NoError(t, err)
+				testutil.Equal(t, len(h.cluster.applies), 2)
+				testutil.Equal(t, len(r.installBytes), 1)
+				return
+			}
+			if !errors.Is(err, environment.ErrNotOwned) {
+				t.Fatalf("earlier apply bypassed initial %s identity: %v", state, err)
+			}
+			if _, err := os.Stat(filepath.Join(ws, "stage.txt")); !os.IsNotExist(err) {
+				t.Fatal("stage file changed before identity rejection")
+			}
+			testutil.Equal(t, len(h.cluster.applies), 0)
+			testutil.Equal(t, len(r.installBytes), 0)
+		})
 	}
 }

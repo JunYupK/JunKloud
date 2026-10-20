@@ -120,7 +120,8 @@ patches:
   patch: '[{"op":"replace","path":"/spec/template/spec/volumes/0","value":{"name":"data","configMap":{"name":"content"}}}]'
 `
 	alternative := overlay + `patches:
-- patch: |-
+- target: {kind: Deployment, name: web}
+  patch: |-
     apiVersion: apps/v1
     kind: Deployment
     metadata: {name: web}
@@ -147,29 +148,49 @@ patches:
 // Fixture-only compile/render checks are safe to iterate before the frozen live run.
 func TestTask15ToolFixtureRenders(t *testing.T) {
 	for _, p := range []model.Problem{t15HelmProblem("jk-t15helm"), t15OverlayProblem("jk-t15overlay")} {
-		f, err := problem.Freeze(p, 1)
-		testutil.NoError(t, err)
-		ws, remove, err := author.ScratchWorkspace(t.TempDir(), f)
-		testutil.NoError(t, err)
-		defer remove()
-		for _, a := range p.Solution {
-			if a.Kind == model.ActionFile {
-				testutil.NoError(t, os.WriteFile(filepath.Join(ws, a.Args["path"].(string)), p.Files[a.Args["source"].(string)], 0600))
-			}
+		groups := []struct {
+			name    string
+			actions []model.Action
+		}{{"solution", p.Solution}}
+		for _, c := range p.Cases {
+			groups = append(groups, struct {
+				name    string
+				actions []model.Action
+			}{"case-" + c.ID, c.Actions})
 		}
-		var call grader.ToolCall
-		if strings.HasSuffix(p.ID, "helm") {
-			call = grader.ToolCall{Exe: "helm", Args: []string{"template", "answer", filepath.Join(ws, "chart"), "--namespace", f.Namespace, "--values", filepath.Join(ws, "values.yaml")}}
-		} else {
-			call = grader.ToolCall{Exe: "kubectl", Args: []string{"kustomize", "--load-restrictor=LoadRestrictionsRootOnly", filepath.Join(ws, "overlay")}}
-		}
-		out, err := grader.NewToolRunner().Run(context.Background(), call)
-		testutil.NoError(t, err)
-		if out.ExitCode != 0 {
-			t.Fatalf("fixture render failed: %s", out.Stderr)
-		}
-		if !strings.Contains(string(out.Stdout), "kind: Deployment") {
-			t.Fatal("missing workload")
+		for _, g := range groups {
+			t.Run(p.ID+"/"+g.name, func(t *testing.T) {
+				f, err := problem.Freeze(p, 1)
+				testutil.NoError(t, err)
+				ws, remove, err := author.ScratchWorkspace(t.TempDir(), f)
+				testutil.NoError(t, err)
+				defer remove()
+				for _, a := range g.actions {
+					if a.Kind == model.ActionFile {
+						testutil.NoError(t, os.WriteFile(filepath.Join(ws, a.Args["path"].(string)), p.Files[a.Args["source"].(string)], 0600))
+					}
+					var call grader.ToolCall
+					switch a.Kind {
+					case model.ActionHelm:
+						call = grader.ToolCall{Exe: "helm", Args: []string{"template", a.Args["release"].(string), filepath.Join(ws, a.Args["chart"].(string)), "--namespace", f.Namespace}}
+						for _, v := range a.Args["values"].([]any) {
+							call.Args = append(call.Args, "--values", filepath.Join(ws, v.(string)))
+						}
+					case model.ActionKustomize:
+						call = grader.ToolCall{Exe: "kubectl", Args: []string{"kustomize", "--load-restrictor=LoadRestrictionsRootOnly", filepath.Join(ws, a.Args["path"].(string))}}
+					default:
+						continue
+					}
+					out, err := grader.NewToolRunner().Run(context.Background(), call)
+					testutil.NoError(t, err)
+					if out.ExitCode != 0 {
+						t.Fatalf("fixture native render failed (exit %d)\nSTDOUT:\n%s\nSTDERR:\n%s", out.ExitCode, out.Stdout, out.Stderr)
+					}
+					if !strings.Contains(string(out.Stdout), "kind: Deployment") {
+						t.Fatal("missing workload")
+					}
+				}
+			})
 		}
 	}
 }
