@@ -27,22 +27,31 @@ type executor struct {
 	env      Applier
 	images   ImageActions
 	provided []environment.PinnedImage
+	tools    ToolActionConfig
 }
 
 func NewActionExecutor(env Applier, images ImageActions, provided ...environment.PinnedImage) ActionExecutor {
 	return &executor{env: env, images: images, provided: provided}
 }
 
+func NewActionExecutorWithTools(env Applier, images ImageActions, tools ToolActionConfig, provided ...environment.PinnedImage) ActionExecutor {
+	return &executor{env: env, images: images, tools: tools, provided: provided}
+}
+
 func (e *executor) Execute(ctx context.Context, id model.Identity, owner environment.Owner, p model.Problem, f model.FrozenProblem, ws string, actions []model.Action) (model.Inventory, error) {
-	steps, err := preflightActions(p, f, ws, actions, e.provided)
+	steps, remove, err := preflightToolActions(ctx, p, f, ws, actions, e.provided, e.tools)
 	if err != nil {
+		return owner.Inventory, err
+	}
+	defer remove()
+	if err = e.preflightTools(ctx, id, owner, steps); err != nil {
 		return owner.Inventory, err
 	}
 	inv := owner.Inventory
 	var clusterActions []environment.Action
 	clusterOnly := true
 	for _, step := range steps {
-		if step.kind == model.ActionFile || step.kind == model.ActionImage {
+		if step.kind == model.ActionFile || step.kind == model.ActionImage || step.tool != nil {
 			clusterOnly = false
 		} else {
 			clusterActions = append(clusterActions, step.cluster)
@@ -97,6 +106,15 @@ func (e *executor) Execute(ctx context.Context, id model.Identity, owner environ
 			} else {
 				if err = os.MkdirAll(filepath.Dir(s.path), 0700); err == nil {
 					err = e.images.SaveImage(ctx, s.reference, s.path)
+				}
+			}
+		case model.ActionHelm, model.ActionKustomize:
+			owner.Inventory = inv
+			if err = e.verifyToolNamespace(ctx, id, owner); err == nil {
+				if s.kind == model.ActionHelm {
+					err = e.installHelm(ctx, owner, s.tool)
+				} else {
+					inv, err = e.env.Apply(ctx, id, owner, []environment.Action{s.cluster})
 				}
 			}
 		default:

@@ -58,6 +58,17 @@ type bankRuntime struct {
 	cfg author.GraderConfig
 }
 
+func bankActionExecutor(t *testing.T, b bankRuntime) author.ActionExecutor {
+	t.Helper()
+	reader, err := grader.NewClusterReader(b.m.KubeconfigPath(), b.id.Context)
+	testutil.NoError(t, err)
+	tools := b.cfg.Tools
+	if tools == nil {
+		tools = grader.NewToolRunner()
+	}
+	return author.NewActionExecutorWithTools(b.m, b.m, author.ToolActionConfig{Tools: tools, Reader: reader, KubeconfigPath: b.m.KubeconfigPath(), Context: b.id.Context}, b.cfg.ProvidedImages()...)
+}
+
 func openBankRuntime(t *testing.T) bankRuntime {
 	t.Helper()
 	requireTools(t, "docker", "kind", "kubectl", "helm")
@@ -109,7 +120,7 @@ func smokeBank(t *testing.T, b bankRuntime, problems []model.Problem) {
 			ws, remove, err := author.ScratchWorkspace(b.dir, f)
 			testutil.NoError(t, err)
 			defer remove()
-			executor := author.NewActionExecutor(b.m, b.m, b.cfg.ProvidedImages()...)
+			executor := bankActionExecutor(t, b)
 			owner.Inventory, err = executor.Execute(ctx, b.id, owner, p, f, ws, p.Setup)
 			testutil.NoError(t, err)
 			if p.ID != "volume-001" {
@@ -202,7 +213,7 @@ func validateGroup(t *testing.T, problems []model.Problem) {
 				names = append(names, img.Name, img.Ref())
 			}
 			v, err := author.NewValidator(author.Config{Identity: id, Env: m, Janitor: environment.ManagedJanitor{Manager: m, Identity: id}, Engine: progress, Store: st,
-				Actions: author.NewActionExecutor(m, m, cfg.ProvidedImages()...), LockPath: author.LockPath(dir), GraderVersion: grader.GraderVersion, EnvironmentHash: rt.EnvironmentHash,
+				Actions: bankActionExecutor(t, b), LockPath: author.LockPath(dir), GraderVersion: grader.GraderVersion, EnvironmentHash: rt.EnvironmentHash,
 				ProvidedImages: names, Prepare: func(ctx context.Context) error { return author.PrepareEnvironment(ctx, m, id, cfg.Images) }, ScratchDir: filepath.Join(dir, "validate")})
 			testutil.NoError(t, err)
 			record, err := v.Validate(ctx, p, seeds)

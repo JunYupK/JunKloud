@@ -103,8 +103,9 @@ type Config struct {
 	// Identity is the verified environment (Manager.Ensure).
 	Identity model.Identity
 	// Env applies setup, solution and case actions (the Manager).
-	Env     Applier
-	Actions ActionExecutor
+	Env         Applier
+	Actions     ActionExecutor
+	ToolActions ToolActionConfig
 	// Janitor resets the temporary bundle between and after the steps.
 	Janitor Janitor
 	// Engine is the grader engine, built with the composition options the
@@ -147,7 +148,10 @@ func NewValidator(cfg Config) (*Validator, error) {
 		return nil, errors.New("author: validator needs the grader version and the environment hash")
 	}
 	if cfg.Actions == nil {
-		cfg.Actions = NewActionExecutor(cfg.Env, nil)
+		cfg.Actions = NewActionExecutorWithTools(cfg.Env, nil, cfg.ToolActions)
+	}
+	if e, ok := cfg.Actions.(*executor); ok && !cfg.ToolActions.configured() {
+		cfg.ToolActions = e.tools
 	}
 	return &Validator{cfg: cfg}, nil
 }
@@ -240,7 +244,7 @@ func (v *Validator) Validate(ctx context.Context, p model.Problem, seeds []uint6
 		// Every manifest of every seed must render and may use only the
 		// provided images, before any of it is applied.
 		before := len(problems)
-		for _, msg := range v.staticActionFindings(p, f) {
+		for _, msg := range v.staticActionFindings(ctx, p, f) {
 			problems = append(problems, fmt.Sprintf("seed %d: %s", seed, msg))
 		}
 		if len(problems) == before {
@@ -300,7 +304,7 @@ type actionGroup struct {
 // the environment does not provide. Wrong-answer cases may use any image (a
 // wrong image is a typical planted error); setup, the solution and
 // alternative answers (cases scoring the maximum) may not.
-func (v *Validator) staticActionFindings(p model.Problem, f model.FrozenProblem) []string {
+func (v *Validator) staticActionFindings(ctx context.Context, p model.Problem, f model.FrozenProblem) []string {
 	groups := []actionGroup{{"setup", p.Setup, true}, {"solution", p.Solution, true}}
 	for _, c := range p.Cases {
 		groups = append(groups, actionGroup{fmt.Sprintf("case %q actions", c.ID), c.Actions, c.ExpectedScore >= maxScore(p)})
@@ -313,8 +317,8 @@ func (v *Validator) staticActionFindings(p model.Problem, f model.FrozenProblem)
 	for _, g := range groups {
 		if g.label == "setup" {
 			for _, a := range g.actions {
-				if a.Kind == model.ActionFile || a.Kind == model.ActionImage {
-					findings = append(findings, "setup: file/image setup is unsupported by the learner runtime")
+				if a.Kind == model.ActionFile || a.Kind == model.ActionImage || a.Kind == model.ActionHelm || a.Kind == model.ActionKustomize {
+					findings = append(findings, "setup: file/image/helm/kustomize setup is unsupported by the learner runtime")
 				}
 			}
 		}
@@ -327,7 +331,10 @@ func (v *Validator) staticActionFindings(p model.Problem, f model.FrozenProblem)
 		for _, name := range v.cfg.ProvidedImages {
 			bases = append(bases, environment.PinnedImage{Name: name})
 		}
-		built, err := preflightActions(p, f, ws, g.actions, bases)
+		built, cleanup, err := preflightToolActions(ctx, p, f, ws, g.actions, bases, v.cfg.ToolActions)
+		if cleanup != nil {
+			cleanup()
+		}
 		remove()
 		if err != nil {
 			findings = append(findings, fmt.Sprintf("%s: %v", g.label, err))
@@ -401,6 +408,11 @@ func (s *seedRun) execute(ctx context.Context) (err error) {
 		Namespace: s.f.Namespace,
 		Scope:     s.f.Definition.Scope,
 	}
+	if hasToolActions(s.p) {
+		if err := s.restoreToolInventory(ctx); err != nil {
+			return err
+		}
+	}
 	// Whatever happens, including cancellation, the bundle must not stay.
 	defer func() {
 		cctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), finalCleanupBudget)
@@ -414,6 +426,10 @@ func (s *seedRun) execute(ctx context.Context) (err error) {
 	if err := s.reset(ctx); err != nil {
 		return err
 	}
+	// Recovery used the interrupted seed's recorded parent bundle. Fresh
+	// stages use only the current frozen problem's declared scope.
+	s.owner.Namespace = s.f.Namespace
+	s.owner.Scope = s.f.Definition.Scope
 	stages := []stageSpec{
 		{"initial", KeyInitial, nil, "", s.checkInitial},
 		{"solved", KeySolved, s.p.Solution, "solution", s.checkSolved},

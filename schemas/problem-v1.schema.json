@@ -123,7 +123,7 @@
       "additionalProperties": false,
       "required": ["kind"],
       "properties": {
-        "kind": { "enum": ["apply", "delete-owned", "helm", "image", "file", "patch"] },
+        "kind": { "enum": ["apply", "delete-owned", "helm", "kustomize", "image", "file", "patch"] },
         "args": { "type": "object" }
       }
     },

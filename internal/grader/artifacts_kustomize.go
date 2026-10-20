@@ -12,7 +12,7 @@ import (
 	"sort"
 	"strings"
 
-	"sigs.k8s.io/yaml"
+	"github.com/JunYupK/JunKloud/internal/localoverlay"
 
 	"github.com/JunYupK/JunKloud/internal/model"
 	"github.com/JunYupK/JunKloud/internal/problem"
@@ -131,119 +131,6 @@ func (a kustomizeArgs) live(e kzExpect) bool {
 func (b kzBase) protect() bool { return b.Protect == nil || *b.Protect }
 func (b kzBase) uses() bool    { return b.Uses == nil || *b.Uses }
 
-var kustomizationNames = []string{"kustomization.yaml", "kustomization.yml", "Kustomization"}
-
-// kzGraph is what scanning an overlay's kustomization files found.
-type kzGraph struct {
-	dirs   map[string]bool // real directories reached (including the overlay)
-	remote string          // first remote reference, if any
-	escape string          // first path leading out of the workspace, if any
-}
-
-// scanKustomizations follows resources/bases/components directories from dir.
-// It never renders anything; it only reads the kustomization files.
-func scanKustomizations(ws, dir string, g *kzGraph, depth int) error {
-	realWS, err := filepath.EvalSymlinks(ws)
-	if err != nil {
-		return err
-	}
-	if g.dirs[dir] || depth > 8 {
-		return nil
-	}
-	g.dirs[dir] = true
-	var raw []byte
-	for _, n := range kustomizationNames {
-		if b, err := os.ReadFile(filepath.Join(dir, n)); err == nil {
-			raw = b
-			break
-		}
-	}
-	if raw == nil {
-		return nil // a plain directory of resources, or no kustomization yet: kustomize reports it
-	}
-	var doc map[string]any
-	if err := yaml.Unmarshal(raw, &doc); err != nil {
-		return nil // kustomize will report the syntax error with its own message
-	}
-	for _, key := range []string{"resources", "bases", "components"} {
-		list, _ := doc[key].([]any)
-		for _, e := range list {
-			entry, _ := e.(string)
-			if entry == "" {
-				continue
-			}
-			if isRemoteResource(entry) {
-				if g.remote == "" {
-					g.remote = entry
-				}
-				continue
-			}
-			target := filepath.Join(dir, filepath.FromSlash(entry))
-			rel, err := filepath.Rel(realWS, target)
-			if err != nil || !filepath.IsLocal(rel) && rel != "." {
-				if g.escape == "" {
-					g.escape = entry
-				}
-				continue
-			}
-			real, err := problem.ResolveAsset(realWS, filepath.ToSlash(rel))
-			if errors.Is(err, problem.ErrAssetEscape) {
-				if g.escape == "" {
-					g.escape = entry
-				}
-				continue
-			}
-			if err != nil {
-				continue // missing: kustomize reports it
-			}
-			if st, err := os.Stat(real); err == nil && st.IsDir() {
-				if err := scanKustomizations(ws, real, g, depth+1); err != nil {
-					return err
-				}
-			}
-		}
-	}
-	return nil
-}
-
-func isRemoteResource(s string) bool {
-	l := strings.ToLower(s)
-	return strings.Contains(l, "://") || strings.HasPrefix(l, "git@") || strings.HasPrefix(l, "git::") ||
-		strings.HasPrefix(l, "github.com/") || strings.HasPrefix(l, "gitlab.com/") || strings.HasPrefix(l, "bitbucket.org/")
-}
-
-// symlinkEscape walks dir (without following links) and returns the first
-// symlink that resolves outside the workspace.
-func symlinkEscape(ws, dir string) (string, error) {
-	realWS, err := filepath.EvalSymlinks(ws)
-	if err != nil {
-		return "", err
-	}
-	var bad string
-	n := 0
-	err = filepath.WalkDir(dir, func(p string, d fs.DirEntry, err error) error {
-		if err != nil {
-			return err
-		}
-		if n++; n > maxTreeEntries {
-			return fmt.Errorf("directory has more than %d entries", maxTreeEntries)
-		}
-		if d.Type()&fs.ModeSymlink == 0 {
-			return nil
-		}
-		rel, err := filepath.Rel(realWS, p)
-		if err != nil {
-			return err
-		}
-		if _, err := problem.ResolveAsset(realWS, filepath.ToSlash(rel)); errors.Is(err, problem.ErrAssetEscape) {
-			bad = filepath.ToSlash(rel)
-			return fs.SkipAll
-		}
-		return nil
-	})
-	return bad, err
-}
-
 func (c *ArtifactChecker) checkKustomize(ctx context.Context, t Target, crit model.Criterion) (model.CheckResult, error) {
 	a, err := parseKustomizeArgs(crit)
 	if err != nil {
@@ -282,22 +169,22 @@ func (c *ArtifactChecker) checkKustomize(ctx context.Context, t Target, crit mod
 	}
 
 	// Look at the overlay's references before rendering anything.
-	g := &kzGraph{dirs: map[string]bool{}}
-	if err := scanKustomizations(t.Workspace, overlay, g, 0); err != nil {
-		return model.CheckResult{}, fmt.Errorf("scan %s: %w", a.Path, err)
-	}
-	if g.remote != "" {
-		return fail("overlay %s references a remote resource (%s); remote bases are not available when grading", a.Path, g.remote)
-	}
-	if g.escape != "" {
-		return fail("overlay %s references %s, which is outside the session workspace", a.Path, g.escape)
-	}
-	for dir := range g.dirs {
-		if bad, err := symlinkEscape(t.Workspace, dir); err != nil {
-			return model.CheckResult{}, fmt.Errorf("scan %s: %w", a.Path, err)
-		} else if bad != "" {
-			return fail("%s is a symlink to a location outside the session workspace", bad)
+	g, guardErr := localoverlay.Inspect(t.Workspace, overlay)
+	if guardErr != nil {
+		var violation *localoverlay.Violation
+		if errors.As(guardErr, &violation) {
+			if a.Base != nil && a.Base.protect() {
+				mods, err := baseModifications(t, a.Base.Path, baseDir)
+				if err != nil {
+					return model.CheckResult{}, err
+				}
+				if len(mods) > 0 {
+					return fail("base %s was modified (%s); overlay %s: %s", a.Base.Path, strings.Join(boundedList(mods, 5), ", "), a.Path, violation.Reason)
+				}
+			}
+			return fail("overlay %s: %s", a.Path, violation.Reason)
 		}
+		return model.CheckResult{}, guardErr
 	}
 
 	var failures []string
@@ -311,7 +198,7 @@ func (c *ArtifactChecker) checkKustomize(ctx context.Context, t Target, crit mod
 				failures = append(failures, fmt.Sprintf("the provided base %s was modified (%s); change it with an overlay instead", a.Base.Path, strings.Join(boundedList(mods, 5), ", ")))
 			}
 		}
-		if a.Base.uses() && baseDir != "" && !g.dirs[baseDir] {
+		if a.Base.uses() && baseDir != "" && !g.Dirs[baseDir] {
 			failures = append(failures, fmt.Sprintf("overlay %s does not use the provided base %s", a.Path, a.Base.Path))
 		}
 	}

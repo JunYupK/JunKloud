@@ -64,6 +64,7 @@ const (
 	ActionApply       = "apply"
 	ActionDeleteOwned = "delete-owned"
 	ActionHelm        = "helm"
+	ActionKustomize   = "kustomize"
 	ActionImage       = "image"
 	ActionFile        = "file"
 	ActionPatch       = "patch"
@@ -96,7 +97,7 @@ func CriterionKinds() []string {
 
 // ActionKinds lists every action kind known to schema v1.
 func ActionKinds() []string {
-	return []string{ActionApply, ActionDeleteOwned, ActionHelm, ActionImage, ActionFile, ActionPatch}
+	return []string{ActionApply, ActionDeleteOwned, ActionHelm, ActionKustomize, ActionImage, ActionFile, ActionPatch}
 }
 
 // ObjectRef names one Kubernetes object.
