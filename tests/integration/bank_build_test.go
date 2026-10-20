@@ -11,6 +11,8 @@ import (
 	"testing"
 	"time"
 
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+
 	"github.com/JunYupK/JunKloud/internal/author"
 	"github.com/JunYupK/JunKloud/internal/cli"
 	"github.com/JunYupK/JunKloud/internal/environment"
@@ -47,7 +49,16 @@ func (p *bankProgress) Evaluate(ctx context.Context, target grader.Target) (mode
 	return ev, err
 }
 
-func validateGroup(t *testing.T, problems []model.Problem) {
+type bankRuntime struct {
+	m   *environment.Manager
+	id  model.Identity
+	dir string
+	st  *store.Store
+	rt  *author.Runtime
+	cfg author.GraderConfig
+}
+
+func openBankRuntime(t *testing.T) bankRuntime {
 	t.Helper()
 	requireTools(t, "docker", "kind", "kubectl", "helm")
 	ctx := context.Background()
@@ -72,7 +83,107 @@ func validateGroup(t *testing.T, problems []model.Problem) {
 	cfg := author.GraderConfig{StateDir: dir}
 	rt, err := author.NewRuntime(ctx, m, st, id, cfg)
 	testutil.NoError(t, err)
-	defer rt.Close()
+	t.Cleanup(func() { testutil.NoError(t, rt.Close()) })
+	return bankRuntime{m, id, dir, st, rt, cfg}
+}
+
+// Run once before all seed/case cycles: prove the actual provided images run
+// offline and the initial storage fixture has observable, cleanable backing.
+// This does not issue certificates or replace full Validator certification.
+func smokeBank(t *testing.T, b bankRuntime, problems []model.Problem) {
+	t.Helper()
+	ctx := context.Background()
+	for _, p := range problems {
+		if p.ID == "image-001" {
+			continue
+		} // certified by its actual Docker build/run cases
+		t.Run("smoke-"+p.ID, func(t *testing.T) {
+			seeds, err := author.CoveringSeeds(p)
+			testutil.NoError(t, err)
+			f, err := problem.Freeze(p, seeds[0])
+			testutil.NoError(t, err)
+			owner := environment.Owner{Inventory: model.Inventory{EnvironmentID: b.id.ID, SessionID: author.SessionID, ProblemID: p.ID}, Namespace: f.Namespace, Scope: f.Definition.Scope, CreateNamespaces: true}
+			defer func() {
+				testutil.NoError(t, (environment.ManagedJanitor{Manager: b.m, Identity: b.id}).Cleanup(ctx, owner))
+			}()
+			ws, remove, err := author.ScratchWorkspace(b.dir, f)
+			testutil.NoError(t, err)
+			defer remove()
+			executor := author.NewActionExecutor(b.m, b.m, b.cfg.ProvidedImages()...)
+			owner.Inventory, err = executor.Execute(ctx, b.id, owner, p, f, ws, p.Setup)
+			testutil.NoError(t, err)
+			if p.ID != "volume-001" {
+				owner.CreateNamespaces = false
+				owner.Inventory, err = executor.Execute(ctx, b.id, owner, p, f, ws, p.Solution)
+				testutil.NoError(t, err)
+			}
+			var chosen []model.Criterion
+			for _, c := range f.Definition.Criteria {
+				if c.Kind == model.CriterionReady || c.Kind == model.CriterionJob || c.Kind == model.CriterionLogs {
+					c.DependsOn = nil
+					c.Timeout = 30 * time.Second
+					chosen = append(chosen, c)
+				}
+			}
+			if p.ID == "volume-001" {
+				chosen = f.Definition.Criteria
+			}
+			f.Definition.Criteria = chosen
+			t.Logf("SMOKE %s seed=%d actual offline readiness START", p.ID, seeds[0])
+			ev, err := b.rt.Grader.Engine.Evaluate(ctx, grader.Target{Identity: b.id, SessionID: author.SessionID, Problem: f, Workspace: ws})
+			testutil.NoError(t, err)
+			for _, r := range ev.Results {
+				t.Logf("SMOKE %s %s %s: %s", p.ID, r.CriterionID, r.Status, r.Reason)
+				want := model.StatusPass
+				if p.ID == "volume-001" {
+					want = p.InitialExpected[r.CriterionID]
+				}
+				testutil.Equal(t, r.Status, want)
+			}
+			if p.ID == "volume-001" {
+				testutil.Equal(t, ev.Complete, true)
+				testutil.Equal(t, *ev.Score, p.InitialScore)
+				client := kubeClient(t, b.m, b.id)
+				for _, name := range []string{"ledger-data", "spare-data"} {
+					claim, err := client.CoreV1().PersistentVolumeClaims(f.Namespace).Get(ctx, name, metav1.GetOptions{})
+					testutil.NoError(t, err)
+					testutil.Equal(t, string(claim.Status.Phase), "Bound")
+					if claim.Spec.VolumeName == "" {
+						t.Fatal("bound claim has no backing PV")
+					}
+					t.Logf("SMOKE %s claim=%s phase=%s volume=%s", p.ID, name, claim.Status.Phase, claim.Spec.VolumeName)
+				}
+				target := grader.Target{Identity: b.id, SessionID: author.SessionID, Problem: f, Workspace: ws}
+				before, err := b.rt.Grader.Artifacts.CaptureInputs(ctx, target)
+				testutil.NoError(t, err)
+				again, err := b.rt.Grader.Engine.Evaluate(ctx, target)
+				testutil.NoError(t, err)
+				testutil.Equal(t, evaluationStatuses(again), p.InitialExpected)
+				after, err := b.rt.Grader.Artifacts.CaptureInputs(ctx, target)
+				testutil.NoError(t, err)
+				testutil.Equal(t, after, before)
+				t.Logf("SMOKE volume-001 full initial3/4 and stable binding/PV input capture PASS")
+			}
+		})
+		if t.Failed() {
+			t.Fatal("runtime smoke failed; refusing full bank cycles")
+		}
+	}
+}
+
+func TestBuildBankSmoke(t *testing.T) {
+	b := openBankRuntime(t)
+	testutil.NoError(t, author.PrepareEnvironment(context.Background(), b.m, b.id, b.cfg.Images))
+	smokeBank(t, b, loadGroup(t, buildIDs))
+}
+
+func validateGroup(t *testing.T, problems []model.Problem) {
+	t.Helper()
+	b := openBankRuntime(t)
+	m, id, dir, st, rt, cfg := b.m, b.id, b.dir, b.st, b.rt, b.cfg
+	ctx := context.Background()
+	testutil.NoError(t, author.PrepareEnvironment(ctx, m, id, cfg.Images))
+	smokeBank(t, b, problems)
 	for _, p := range problems {
 		t.Run(p.ID, func(t *testing.T) {
 			seeds, err := author.CoveringSeeds(p)

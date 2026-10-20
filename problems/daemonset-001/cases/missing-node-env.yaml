@@ -1,0 +1,54 @@
+{
+  "apiVersion": "apps/v1",
+  "kind": "DaemonSet",
+  "metadata": {
+    "name": "node-notes",
+    "namespace": "${namespace}"
+  },
+  "spec": {
+    "selector": {
+      "matchLabels": {
+        "app": "node-notes"
+      }
+    },
+    "template": {
+      "metadata": {
+        "labels": {
+          "app": "node-notes"
+        }
+      },
+      "spec": {
+        "nodeSelector": {
+          "kubernetes.io/os": "linux"
+        },
+        "tolerations": [
+          {
+            "operator": "Exists"
+          }
+        ],
+        "containers": [
+          {
+            "name": "agent",
+            "image": "docker.io/library/busybox:1.37.0",
+            "imagePullPolicy": "Never",
+            "command": [
+              "sh",
+              "-c",
+              "echo node=; sleep 3600"
+            ],
+            "resources": {
+              "requests": {
+                "cpu": "10m",
+                "memory": "8Mi"
+              },
+              "limits": {
+                "cpu": "75m",
+                "memory": "32Mi"
+              }
+            }
+          }
+        ]
+      }
+    }
+  }
+}

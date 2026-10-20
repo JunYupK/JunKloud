@@ -191,3 +191,10 @@ func TestCronSuccessSemanticsInvalidateVolumeCertificates(t *testing.T) {
 		t.Fatal("pre-scheduled-success grader certificate is still current")
 	}
 }
+
+func TestLogBehaviorSemanticsInvalidateScheduleCertificates(t *testing.T) {
+	record := passedRecord("sha256:logs", "grader-5", "env")
+	if author.CertificateMatches(record, "sha256:logs", grader.GraderVersion, "env") {
+		t.Fatal("pre-shared-file/node behavior certificate is still current")
+	}
+}

@@ -53,7 +53,7 @@
         "fields": [
           {
             "path": "spec.volumes[name=shared].emptyDir",
-            "equals": {}
+            "exists": true
           },
           {
             "path": "spec.initContainers[name=seed].volumeMounts[name=shared].mountPath",
@@ -114,7 +114,24 @@
         "contains": [
           "delivered:seeded"
         ],
-        "wait": true
+        "wait": true,
+        "shared_files": {
+          "volume": "shared",
+          "containers": [
+            "app",
+            "sidecar"
+          ],
+          "files": [
+            {
+              "path": "/work/message",
+              "equals": "seeded"
+            },
+            {
+              "path": "/work/ack",
+              "equals": "delivered:seeded"
+            }
+          ]
+        }
       },
       "depends_on": [
         "ready"
@@ -171,6 +188,24 @@
           "kind": "apply",
           "args": {
             "path": "cases/wrong-data.yaml"
+          }
+        }
+      ],
+      "expected": {
+        "pod": "PASS",
+        "shared-layout": "PASS",
+        "ready": "PASS",
+        "shared-behavior": "FAIL"
+      },
+      "expected_score": 3
+    },
+    {
+      "id": "phony-log-no-files",
+      "actions": [
+        {
+          "kind": "apply",
+          "args": {
+            "path": "cases/phony-log.yaml"
           }
         }
       ],

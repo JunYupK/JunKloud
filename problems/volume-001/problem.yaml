@@ -5,7 +5,7 @@
   "title": "Keep ledger data through Pod replacement",
   "domain": "design-build",
   "difficulty": "medium",
-  "type": "build",
+  "type": "modify",
   "tags": [
     "design-build",
     "volume"
@@ -54,9 +54,15 @@
           {
             "path": "spec.resources.requests.storage",
             "equals": "32Mi"
+          },
+          {
+            "path": "status.phase",
+            "equals": "Bound"
           }
-        ]
-      }
+        ],
+        "wait": true
+      },
+      "timeout": "60s"
     },
     {
       "id": "deployment",
@@ -131,11 +137,11 @@
   ],
   "initial_expected": {
     "claim": "PASS",
-    "deployment": "FAIL",
-    "ready": "FAIL",
+    "deployment": "PASS",
+    "ready": "PASS",
     "persistent-data": "FAIL"
   },
-  "initial_score": 1,
+  "initial_score": 3,
   "cases": [
     {
       "id": "emptydir-substitution",

@@ -55,6 +55,41 @@ func TestBuildBankPreflight(t *testing.T) {
 var buildIDs = []string{"image-001", "batch-001", "daemonset-001", "multicontainer-001", "volume-001"}
 var bankRoot = filepath.Join("..", "..")
 
+// The native offline archive is imported under Name; the manifest-list digest
+// remains pinned by EnvironmentManifest, but is not a runnable node alias.
+func TestBuildBankOfflineWorkloadImages(t *testing.T) {
+	for _, p := range loadGroup(t, buildIDs) {
+		seeds, err := author.CoveringSeeds(p)
+		testutil.NoError(t, err)
+		for _, seed := range seeds {
+			f, err := problem.Freeze(p, seed)
+			testutil.NoError(t, err)
+			groups := [][]model.Action{p.Setup, p.Solution}
+			for _, c := range p.Cases {
+				groups = append(groups, c.Actions)
+			}
+			for _, group := range groups {
+				for _, a := range group {
+					if a.Kind != model.ActionApply {
+						continue
+					}
+					built, err := author.BuildActions(p.Files, f.Parameters, []model.Action{a})
+					testutil.NoError(t, err)
+					for _, step := range built {
+						for _, o := range step.Objects {
+							for _, image := range author.ObjectImages(o) {
+								if image != environment.ProbeImage.Name {
+									t.Errorf("%s seed=%d: workload image %q is not the native offline provided alias %q", p.ID, seed, image, environment.ProbeImage.Name)
+								}
+							}
+						}
+					}
+				}
+			}
+		}
+	}
+}
+
 func loadGroup(t *testing.T, ids []string) []model.Problem {
 	t.Helper()
 	var out []model.Problem
