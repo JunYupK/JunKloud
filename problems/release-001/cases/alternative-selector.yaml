@@ -37,7 +37,7 @@
             "command": [
               "sh",
               "-c",
-              "mkdir -p /www; printf \"%s\" \"$RELEASE\" > /www/index.html; exec httpd -f -p 8080 -h /www"
+              "mkdir -p /www; printf \"%s\" \"$RELEASE\" > /www/index.html; exec httpd -f -p 9090 -h /www"
             ],
             "env": [
               {
@@ -58,10 +58,17 @@
             "readinessProbe": {
               "httpGet": {
                 "path": "/",
-                "port": 8080
+                "port": "backend"
               },
               "periodSeconds": 1
-            }
+            },
+            "ports": [
+              {
+                "name": "backend",
+                "containerPort": 9090,
+                "protocol": "TCP"
+              }
+            ]
           }
         ]
       }
@@ -108,7 +115,7 @@
             "command": [
               "sh",
               "-c",
-              "mkdir -p /www; printf \"%s\" \"$RELEASE\" > /www/index.html; exec httpd -f -p 8080 -h /www"
+              "mkdir -p /www; printf \"%s\" \"$RELEASE\" > /www/index.html; exec httpd -f -p 9090 -h /www"
             ],
             "env": [
               {
@@ -129,10 +136,17 @@
             "readinessProbe": {
               "httpGet": {
                 "path": "/",
-                "port": 8080
+                "port": "backend"
               },
               "periodSeconds": 1
-            }
+            },
+            "ports": [
+              {
+                "name": "backend",
+                "containerPort": 9090,
+                "protocol": "TCP"
+              }
+            ]
           }
         ]
       }
@@ -149,15 +163,14 @@
   },
   "spec": {
     "selector": {
-      "app": null,
-      "track": null,
+      "app": "release",
       "exposure": "release"
     },
     "ports": [
       {
         "name": "http",
         "port": 80,
-        "targetPort": 8080,
+        "targetPort": "backend",
         "protocol": "TCP"
       }
     ]

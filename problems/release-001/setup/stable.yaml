@@ -78,8 +78,7 @@
   },
   "spec": {
     "selector": {
-      "app": "release",
-      "track": "stable"
+      "app": "release"
     },
     "ports": [
       {

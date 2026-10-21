@@ -149,13 +149,22 @@ func smokeBank(t *testing.T, b bankRuntime, problems []model.Problem) {
 			t.Logf("SMOKE %s seed=%d actual offline readiness START", p.ID, seeds[0])
 			ev, err := b.rt.Grader.Engine.Evaluate(ctx, grader.Target{Identity: b.id, SessionID: author.SessionID, Problem: f, Workspace: ws})
 			testutil.NoError(t, err)
+			unexpected := false
 			for _, r := range ev.Results {
 				t.Logf("SMOKE %s %s %s: %s", p.ID, r.CriterionID, r.Status, r.Reason)
 				want := model.StatusPass
 				if p.ID == "volume-001" {
 					want = p.InitialExpected[r.CriterionID]
 				}
-				testutil.Equal(t, r.Status, want)
+				if p.Domain == model.DomainDeployment && r.Status != want {
+					unexpected = true
+					t.Errorf("%s got %s want %s", r.CriterionID, r.Status, want)
+				} else {
+					testutil.Equal(t, r.Status, want)
+				}
+			}
+			if unexpected {
+				deploymentSmokeState(t, b, f.Namespace)
 			}
 			if p.ID == "volume-001" {
 				testutil.Equal(t, ev.Complete, true)
@@ -182,7 +191,7 @@ func smokeBank(t *testing.T, b bankRuntime, problems []model.Problem) {
 				t.Logf("SMOKE volume-001 full initial3/4 and stable binding/PV input capture PASS")
 			}
 		})
-		if t.Failed() {
+		if t.Failed() && p.Domain != model.DomainDeployment {
 			t.Fatal("runtime smoke failed; refusing full bank cycles")
 		}
 	}

@@ -86,6 +86,70 @@ func (r offlineBankReader) List(context.Context, grader.ListQuery) ([]map[string
 
 func TestDeploymentBankPreflight(t *testing.T) { preflightBank(t, loadGroup(t, deploymentIDs)) }
 
+func TestDeploymentReleaseContracts(t *testing.T) {
+	p := loadGroup(t, []string{"release-001"})[0]
+	f, err := problem.Freeze(p, 1)
+	testutil.NoError(t, err)
+	for _, g := range append([][]model.Action{p.Setup, p.Solution}, func() [][]model.Action {
+		var groups [][]model.Action
+		for _, c := range p.Cases {
+			groups = append(groups, c.Actions)
+		}
+		return groups
+	}()...) {
+		for _, a := range g {
+			if a.Kind != model.ActionApply {
+				continue
+			}
+			built, err := author.BuildActions(p.Files, f.Parameters, []model.Action{a})
+			testutil.NoError(t, err)
+			for _, step := range built {
+				for _, o := range step.Objects {
+					if o["kind"] != "Service" {
+						continue
+					}
+					for key, value := range o["spec"].(map[string]any)["selector"].(map[string]any) {
+						if value == nil || value == "" {
+							t.Errorf("%s selector %s uses null/empty string: native Service string maps retain an empty label requirement", a.Args["path"], key)
+						}
+					}
+				}
+			}
+		}
+	}
+	for _, path := range []string{problem.QuestionFile, "setup/provided/README.txt"} {
+		if !strings.Contains(string(p.Files[path]), "backend port is flexible") {
+			t.Errorf("%s must disclose flexible backend port", path)
+		}
+	}
+	for _, c := range p.Cases {
+		if c.ID == "alternative-selector" {
+			built, err := author.BuildActions(p.Files, f.Parameters, c.Actions)
+			testutil.NoError(t, err)
+			var workloads, services int
+			for _, step := range built {
+				for _, o := range step.Objects {
+					spec := o["spec"].(map[string]any)
+					switch o["kind"] {
+					case "Deployment":
+						container := spec["template"].(map[string]any)["spec"].(map[string]any)["containers"].([]any)[0].(map[string]any)
+						if !strings.Contains(container["command"].([]any)[2].(string), "9090") {
+							t.Error("alternative must actually serve on9090")
+						}
+						workloads++
+					case "Service":
+						port := spec["ports"].([]any)[0].(map[string]any)
+						testutil.Equal(t, port["targetPort"], any("backend"))
+						services++
+					}
+				}
+			}
+			testutil.Equal(t, workloads, 2)
+			testutil.Equal(t, services, 1)
+		}
+	}
+}
+
 func TestDeploymentCoverage(t *testing.T) {
 	var cov struct {
 		Groups []struct {

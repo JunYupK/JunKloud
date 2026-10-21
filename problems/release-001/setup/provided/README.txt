@@ -1,1 +1,1 @@
-Service release: port80 -> TCP8080. Stable body STABLE, canary body CANARY. Both named Deployments have exactly one replica. Native image docker.io/library/busybox:1.37.0. Requests have no required traffic percentage.
+Service release: TCP port 80. The backend port is flexible; select a valid numeric or named targetPort matching both HTTP servers (the supplied fixture uses 8080). Stable body STABLE, canary body CANARY. Both named Deployments have exactly one replica. Native image docker.io/library/busybox:1.37.0. No required traffic percentage.
