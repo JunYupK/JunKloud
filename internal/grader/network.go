@@ -193,7 +193,7 @@ type NetworkChecker struct {
 	runner ProbeRunner
 }
 
-// NewNetworkChecker returns the checker for http, tcp and network-policy.
+// NewNetworkChecker returns the checker for http, tcp, network-policy and endpoint-membership.
 // Use AddNetworkCheckers to register it. WithProbeControlNamespace names the
 // namespace of the neutral DNS control probes; without it a DNS failure of a
 // source can never be attributed and is ERROR.
@@ -201,11 +201,12 @@ func NewNetworkChecker(reader ObjectReader, runner ProbeRunner, opts ...Option) 
 	return &NetworkChecker{observer: observer{reader: reader, set: newSettings(opts)}, runner: runner}
 }
 
-// AddNetworkCheckers registers c for the http, tcp and network-policy kinds.
+// AddNetworkCheckers registers c for http, tcp, network-policy and endpoint-membership.
 func AddNetworkCheckers(checkers map[string]Checker, c *NetworkChecker) {
 	checkers[model.CriterionHTTP] = c
 	checkers[model.CriterionTCP] = c
 	checkers[model.CriterionNetworkPolicy] = c
+	checkers[model.CriterionEndpointMembership] = c
 }
 
 // Mutates implements MutatingChecker: probe pods are created and removed.
@@ -476,6 +477,10 @@ func (c *NetworkChecker) planPolicy(p *netPlan, a policyCriterionArgs) error {
 
 // ValidateCriterion implements ArgsValidator.
 func (c *NetworkChecker) ValidateCriterion(crit model.Criterion) error {
+	if crit.Kind == model.CriterionEndpointMembership {
+		_, err := parseMembership(crit)
+		return err
+	}
 	_, err := c.plan(crit)
 	return err
 }

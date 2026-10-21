@@ -86,6 +86,8 @@ func (c *ArtifactChecker) CaptureInputs(ctx context.Context, t Target) (map[stri
 
 func (c *ArtifactChecker) captureCriterion(ctx context.Context, t Target, crit model.Criterion, out map[string]string) error {
 	switch crit.Kind {
+	case model.CriterionEndpointMembership:
+		return c.captureMembership(ctx, t, crit, out)
 	case model.CriterionVolumePersistence:
 		return c.captureVolume(ctx, t, crit, out)
 	case model.CriterionResource, model.CriterionField, model.CriterionReady, model.CriterionHTTP, model.CriterionTCP,

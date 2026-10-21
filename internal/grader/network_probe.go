@@ -15,6 +15,7 @@ import (
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/kubernetes"
 )
 
@@ -60,6 +61,15 @@ type podClient interface {
 }
 
 type kubePods struct{ cs kubernetes.Interface }
+
+type probeUIDDeleter interface {
+	DeleteUID(context.Context, string, string, types.UID) error
+}
+
+func (k kubePods) DeleteUID(ctx context.Context, ns, name string, uid types.UID) error {
+	zero := int64(0)
+	return k.cs.CoreV1().Pods(ns).Delete(ctx, name, metav1.DeleteOptions{GracePeriodSeconds: &zero, Preconditions: &metav1.Preconditions{UID: &uid}})
+}
 
 func (k kubePods) Create(ctx context.Context, ns string, pod *corev1.Pod) (*corev1.Pod, error) {
 	return k.cs.CoreV1().Pods(ns).Create(ctx, pod, metav1.CreateOptions{FieldManager: "junkloud"})
@@ -173,17 +183,19 @@ func (r *podProbeRunner) Probe(ctx context.Context, req ProbeRequest) (res Probe
 		limit = min(limit, remaining)
 	}
 	pod := r.buildPod("jk-probe-"+id, id, req, limit)
+	var createdUID types.UID
 	defer func() {
 		// The pod may exist even if Create failed or was cancelled in
 		// flight, so removal is always attempted, and with a context that
 		// survives the caller's cancellation.
-		if cerr := r.cleanup(ctx, req.Namespace, pod.Name); cerr != nil {
+		if cerr := r.cleanupProbe(ctx, req.Namespace, pod.Name, createdUID); cerr != nil {
 			cerr = probeFailed("could not remove probe pod %s/%s: %v", req.Namespace, pod.Name, cerr)
 			res, err = ProbeResult{}, errors.Join(err, cerr)
 		}
 	}()
 
-	if _, err := r.pods.Create(ctx, req.Namespace, pod); err != nil {
+	created, createErr := r.pods.Create(ctx, req.Namespace, pod)
+	if err := createErr; err != nil {
 		switch {
 		case ctx.Err() != nil:
 			return ProbeResult{}, fmt.Errorf("create probe pod: %w", errors.Join(ctx.Err(), err))
@@ -193,11 +205,15 @@ func (r *podProbeRunner) Probe(ctx context.Context, req ProbeRequest) (res Probe
 			return ProbeResult{}, probeFailed("create probe pod in %s: %v", req.Namespace, err)
 		}
 	}
-	return r.await(ctx, req, pod.Name, limit)
+	if created == nil || created.UID == "" {
+		return ProbeResult{}, probeFailed("Create returned no confirmed Pod UID; retained any existing Pod")
+	}
+	createdUID = created.UID
+	return r.await(ctx, req, pod.Name, createdUID, limit)
 }
 
 // await polls the pod until it reports or an environment fault is clear.
-func (r *podProbeRunner) await(ctx context.Context, req ProbeRequest, name string, limit time.Duration) (ProbeResult, error) {
+func (r *podProbeRunner) await(ctx context.Context, req ProbeRequest, name string, uid types.UID, limit time.Duration) (ProbeResult, error) {
 	clock := r.set.clock
 	start := clock.Now()
 	apiErrors := 0
@@ -208,6 +224,9 @@ func (r *podProbeRunner) await(ctx context.Context, req ProbeRequest, name strin
 		pod, err := r.pods.Get(ctx, req.Namespace, name)
 		switch {
 		case err == nil:
+			if pod.UID != uid {
+				return ProbeResult{}, probeFailed("probe Pod UID changed; replacement retained")
+			}
 			apiErrors = 0
 			res, done, perr := r.outcome(pod, req, clock.Now().Sub(start))
 			if perr != nil {
@@ -235,6 +254,56 @@ func (r *podProbeRunner) await(ctx context.Context, req ProbeRequest, name strin
 			return ProbeResult{}, err
 		}
 	}
+}
+
+// cleanupProbe never adopts an ambiguous Create or deletes a replacement. The
+// UID precondition closes the race between the final Get and Delete.
+func (r *podProbeRunner) cleanupProbe(ctx context.Context, ns, name string, uid types.UID) error {
+	ctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), cleanupBudget)
+	defer cancel()
+	deleter, ok := r.pods.(probeUIDDeleter)
+	if !ok {
+		return probeFailed("native probe UID deletion is not configured; Pod retained")
+	}
+	var last error
+	for attempt := 0; attempt < cleanupAttempts; attempt++ {
+		p, err := r.pods.Get(ctx, ns, name)
+		if apierrors.IsNotFound(err) {
+			return nil
+		}
+		if err == nil {
+			if uid == "" {
+				return probeFailed("Create UID was not confirmed; found Pod retained")
+			}
+			if p.UID != uid {
+				return probeFailed("probe Pod UID changed; replacement retained")
+			}
+			err = deleter.DeleteUID(ctx, ns, name, uid)
+			if apierrors.IsNotFound(err) {
+				return nil
+			}
+			if apierrors.IsConflict(err) {
+				return probeFailed("probe Pod UID precondition rejected; replacement retained")
+			}
+			if err == nil {
+				p, err = r.pods.Get(ctx, ns, name)
+				if apierrors.IsNotFound(err) {
+					return nil
+				}
+				if err == nil && p.UID != uid {
+					return probeFailed("replacement appeared after cleanup; retained")
+				}
+				if err == nil {
+					err = errors.New("pod still exists")
+				}
+			}
+		}
+		last = err
+		if err := r.set.clock.Sleep(ctx, cleanupPoll); err != nil {
+			return errors.Join(last, err)
+		}
+	}
+	return last
 }
 
 // outcome reads a probe pod's state: not done yet, a result, or a probe

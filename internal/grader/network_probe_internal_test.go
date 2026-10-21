@@ -11,6 +11,7 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/runtime/schema"
+	"k8s.io/apimachinery/pkg/types"
 
 	"github.com/JunYupK/JunKloud/internal/testutil"
 )
@@ -71,6 +72,7 @@ func (f *fakePods) Create(ctx context.Context, ns string, pod *corev1.Pod) (*cor
 	}
 	cp := pod.DeepCopy()
 	cp.Namespace = ns
+	cp.UID = types.UID("created-" + cp.Name)
 	if f.onCreate != nil {
 		f.onCreate(cp)
 	}
@@ -114,6 +116,17 @@ func (f *fakePods) Delete(ctx context.Context, ns, name string) error {
 	}
 	delete(f.pods, ns+"/"+name)
 	return nil
+}
+
+func (f *fakePods) DeleteUID(ctx context.Context, ns, name string, uid types.UID) error {
+	f.mu.Lock()
+	p := f.pods[ns+"/"+name]
+	if p != nil && p.UID != uid {
+		f.mu.Unlock()
+		return errors.New("UID precondition failed")
+	}
+	f.mu.Unlock()
+	return f.Delete(ctx, ns, name)
 }
 
 func (f *fakePods) remaining() int {
@@ -345,7 +358,7 @@ func TestProbeCleanupAfterCancel(t *testing.T) {
 		f.onCreate = func(*corev1.Pod) { cancel() }
 		_, err := testRunner(t, f).Probe(ctx, httpRequest())
 		testutil.Equal(t, err != nil, true)
-		testutil.Equal(t, f.remaining(), 0)
+		testutil.Equal(t, f.remaining(), 1) // No confirmed Create UID: retain ambiguous Pod.
 	})
 	t.Run("create answered with an error after storing the pod", func(t *testing.T) {
 		f := newFakePods()
@@ -354,7 +367,7 @@ func TestProbeCleanupAfterCancel(t *testing.T) {
 		if !errors.Is(err, ErrProbeFailed) {
 			t.Fatalf("Probe = %v", err)
 		}
-		testutil.Equal(t, f.remaining(), 0)
+		testutil.Equal(t, f.remaining(), 1) // Matching labels alone cannot authorize deletion.
 	})
 	t.Run("a failing delete is retried", func(t *testing.T) {
 		f := newFakePods()

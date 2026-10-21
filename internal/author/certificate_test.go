@@ -55,6 +55,15 @@ var manifest = map[string]string{
 	"probe-image": "docker.io/library/busybox:1.37.0@sha256:bb",
 }
 
+// The Task15 shared Kustomize guard and native membership/probe semantics
+// cannot reuse certificates issued under grader-7.
+func TestTask15InvalidatesGrader7Certificates(t *testing.T) {
+	old := passedRecord("problem", "grader-7", "environment")
+	if author.CertificateMatches(old, "problem", grader.GraderVersion, "environment") {
+		t.Fatal("grader-7 certificate accepted after Task15 semantics change")
+	}
+}
+
 func TestEnvironmentHash(t *testing.T) {
 	base := author.EnvironmentHash(manifest)
 	if len(base) != len("sha256:")+64 || base[:7] != "sha256:" {
