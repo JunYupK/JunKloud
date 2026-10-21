@@ -1,0 +1,4 @@
+resources: [../base]
+patches:
+- path: settings.yaml
+  target: {kind: ConfigMap, name: overlay-settings}

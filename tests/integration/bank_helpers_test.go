@@ -24,7 +24,11 @@ import (
 // stopping at Prepare before any runtime effects. The actual live test does not
 // replace or bypass this gate.
 func TestBuildBankPreflight(t *testing.T) {
-	ps := loadGroup(t, buildIDs)
+	preflightBank(t, loadGroup(t, buildIDs))
+}
+
+func preflightBank(t *testing.T, ps []model.Problem) {
+	t.Helper()
 	dir := t.TempDir()
 	st, err := store.Open(filepath.Join(dir, "sessions.db"))
 	testutil.NoError(t, err)
@@ -34,11 +38,13 @@ func TestBuildBankPreflight(t *testing.T) {
 	artifacts := grader.NewArtifactChecker(grader.ArtifactConfig{})
 	defer artifacts.Close()
 	grader.AddArtifactCheckers(checks, artifacts)
+	grader.AddNetworkCheckers(checks, grader.NewNetworkChecker(nil, nil))
 	engine := grader.NewEngine(checks)
 	stop := errors.New("static preflight complete; no runtime effects")
 	v, err := author.NewValidator(author.Config{Identity: model.Identity{ID: "0123456789ab"}, Env: m, Janitor: environment.ManagedJanitor{Manager: m}, Engine: engine, Store: st,
 		LockPath: author.LockPath(dir), GraderVersion: grader.GraderVersion, EnvironmentHash: "static-preflight", ProvidedImages: []string{environment.ProbeImage.Name, environment.ProbeImage.Ref()},
-		Prepare: func(context.Context) error { return stop }})
+		ToolActions: author.ToolActionConfig{Tools: grader.NewToolRunner(), Reader: offlineBankReader{t}, KubeconfigPath: "/unused-offline", Context: "offline"},
+		Prepare:     func(context.Context) error { return stop }})
 	testutil.NoError(t, err)
 	for _, p := range ps {
 		t.Run(p.ID, func(t *testing.T) {
@@ -165,8 +171,19 @@ func TestBuildCoverage(t *testing.T) {
 	b, err := os.ReadFile(filepath.Join(bankRoot, "curriculum", "coverage.yaml"))
 	testutil.NoError(t, err)
 	testutil.NoError(t, yaml.UnmarshalStrict(b, &cov))
-	testutil.Equal(t, len(cov.Groups), 1)
-	g := cov.Groups[0]
+	var index = -1
+	for i, g := range cov.Groups {
+		if g.Domain == model.DomainDesignBuild {
+			if index >= 0 {
+				t.Fatal("duplicate design-build coverage")
+			}
+			index = i
+		}
+	}
+	if index < 0 {
+		t.Fatal("missing design-build coverage")
+	}
+	g := cov.Groups[index]
 	testutil.Equal(t, g.ID, "design-build")
 	testutil.Equal(t, g.Domain, model.DomainDesignBuild)
 	testutil.Equal(t, g.Count, 5)

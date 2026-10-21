@@ -1,0 +1,5 @@
+Use the provided Kustomize files in `${namespace}`. Preserve every file under `base/` byte-for-byte, without adding or removing files. Modify `overlay/` while keeping its resources graph referencing the supplied `base/` (the reference `copy/` directory is not a substitute).
+
+The overlay must render apps/v1 Deployment `overlay-web` with exactly 2 replicas and container `web` using `docker.io/library/busybox:1.37.0`, and ConfigMap `overlay-settings` with `data.message: overlay-ready`. Deploy these objects in this namespace. Their live specs/data, labels and annotations must agree with the overlay render. `overlay-web` must complete its current rollout and stay Ready without restart for 10 seconds, within a 60-second observation limit.
+
+Base protection and use, Deployment render, ConfigMap render, rendered/live agreement, and stable readiness each earn 1 point. The initial valid overlay references an unchanged base, but has draft settings and no Deployment deployed, for 1/5. Equivalent valid patches and render/apply commands are accepted; correct live objects alone do not replace the overlay requirements.

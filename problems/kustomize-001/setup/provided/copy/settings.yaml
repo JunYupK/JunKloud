@@ -1,0 +1,11 @@
+{
+  "apiVersion": "v1",
+  "kind": "ConfigMap",
+  "metadata": {
+    "name": "overlay-settings",
+    "namespace": "${namespace}"
+  },
+  "data": {
+    "message": "draft"
+  }
+}

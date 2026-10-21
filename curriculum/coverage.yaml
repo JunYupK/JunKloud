@@ -12,6 +12,18 @@
         "multicontainer-001",
         "volume-001"
       ]
+    },
+    {
+      "id": "deployment",
+      "domain": "deployment",
+      "count": 4,
+      "points": 20,
+      "problems": [
+        "rollout-001",
+        "release-001",
+        "helm-001",
+        "kustomize-001"
+      ]
     }
   ]
 }

@@ -30,7 +30,7 @@ docker compose exec workspace bash
 ckad --help
 ckad doctor
 ckad list
-ckad start --mode practice --count 5  # 현재 design-build 5문제, 시작 전 확인
+ckad start --mode practice --count 5  # 검증된 혼합 은행에서 5문제, 시작 전 확인
 ckad show Q4
 kubectl get namespaces         # JunKloud 전용 kubeconfig
 ckad grade
@@ -39,18 +39,23 @@ ckad review --problem Q4 --solution
 ```
 
 제품 은행 루트는 `/src`이며 그 안의 `problems/`에서 패키지를 읽습니다.
-현재 design-build 5문제(image, batch, DaemonSet, multi-container, PVC),
-총 20점이 포함되어 있습니다. 먼저 동일 환경에서 각 패키지를 검증하세요.
+현재 Design & Build 5문제/20점과 Deployment 4문제/20점(rollout, release,
+Helm, Kustomize), 합계 9문제/40점의 부분 은행이 포함되어 있습니다. 먼저 동일
+환경에서 각 패키지를 검증하세요. 이전 grader의 검증 기록은 새 grader에서
+유효하지 않으므로 현재 환경에서 아래 ID별 명령으로 다시 검증해야 합니다.
 
 ```sh
 export CKAD_BANK_DIR=/src
-for id in image-001 batch-001 daemonset-001 multicontainer-001 volume-001; do
+for id in image-001 batch-001 daemonset-001 multicontainer-001 volume-001 \
+          rollout-001 release-001 helm-001 kustomize-001; do
   ckad bank validate "$id" || break
 done
 ckad list
 ckad start --mode practice --count 5
 ```
 
+Deployment 4문제만으로는 일반 훈련의 최소 5문제를 충족하지 않습니다.
+검증된 혼합 은행에서 5개 이상 선택하거나 더 큰 은행을 사용하세요.
 이 구성은 20문제 제품 모의시험을 아직 제공하지 않습니다. 개발 fixture를
 확인하려면 `CKAD_BANK_DIR=/src/tests/fixtures/dev-bank`를 사용하세요.
 fixture의 `dev-mock`은 제품 모의시험이 아닙니다.
@@ -119,7 +124,10 @@ Author solution/case actions support `file {source,path}` and
 `image {operation: build|save,path,reference}` in the staged grader workspace.
 Sources must be private setup/solution/cases package paths. All actions are
 preflighted before writes; initial and reset assets stay original. File/image
-setup actions, Helm/Kustomize/patch action execution remain unsupported.
+setup actions remain unsupported. Bounded Helm install and Kustomize
+solution/case actions are supported as described in
+[author-tool-actions.md](../docs/author-tool-actions.md); tool setup and arbitrary
+patch actions remain unsupported.
 Save outputs reserve regular-file paths during preflight; building a context
 that depends on an earlier save output is explicitly unsupported.
 Native image export uses the platform-selecting command. Only Docker's exact

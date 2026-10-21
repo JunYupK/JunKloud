@@ -1,0 +1,93 @@
+{
+  "apiVersion": "apps/v1",
+  "kind": "Deployment",
+  "metadata": {
+    "name": "canary",
+    "namespace": "${namespace}"
+  },
+  "spec": {
+    "replicas": 1,
+    "selector": {
+      "matchLabels": {
+        "app": "release",
+        "track": "canary"
+      }
+    },
+    "strategy": {
+      "type": "RollingUpdate",
+      "rollingUpdate": {
+        "maxSurge": 1,
+        "maxUnavailable": 0
+      }
+    },
+    "template": {
+      "metadata": {
+        "labels": {
+          "app": "release",
+          "track": "canary",
+          "exposure": "release"
+        }
+      },
+      "spec": {
+        "containers": [
+          {
+            "name": "web",
+            "image": "docker.io/library/busybox:1.37.0",
+            "imagePullPolicy": "Never",
+            "command": [
+              "sh",
+              "-c",
+              "mkdir -p /www; printf \"%s\" \"$RELEASE\" > /www/index.html; exec httpd -f -p 8080 -h /www"
+            ],
+            "env": [
+              {
+                "name": "RELEASE",
+                "value": "CANARY"
+              }
+            ],
+            "resources": {
+              "requests": {
+                "cpu": "10m",
+                "memory": "8Mi"
+              },
+              "limits": {
+                "cpu": "100m",
+                "memory": "32Mi"
+              }
+            },
+            "readinessProbe": {
+              "httpGet": {
+                "path": "/",
+                "port": 8080
+              },
+              "periodSeconds": 1
+            }
+          }
+        ]
+      }
+    }
+  }
+}
+---
+{
+  "apiVersion": "v1",
+  "kind": "Service",
+  "metadata": {
+    "name": "release",
+    "namespace": "${namespace}"
+  },
+  "spec": {
+    "selector": {
+      "app": "release",
+      "track": null
+    },
+    "ports": [
+      {
+        "name": "http",
+        "port": 80,
+        "targetPort": 8080,
+        "protocol": "TCP"
+      }
+    ]
+  }
+}

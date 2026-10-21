@@ -139,6 +139,12 @@ func smokeBank(t *testing.T, b bankRuntime, problems []model.Problem) {
 			if p.ID == "volume-001" {
 				chosen = f.Definition.Criteria
 			}
+			// Deployment smoke proves native Helm release/value state and real
+			// stable/canary UID membership + HTTP, in addition to native image
+			// readiness. Preserve the actual criteria's dependency graph/budgets.
+			if p.Domain == model.DomainDeployment {
+				chosen = f.Definition.Criteria
+			}
 			f.Definition.Criteria = chosen
 			t.Logf("SMOKE %s seed=%d actual offline readiness START", p.ID, seeds[0])
 			ev, err := b.rt.Grader.Engine.Evaluate(ctx, grader.Target{Identity: b.id, SessionID: author.SessionID, Problem: f, Workspace: ws})
@@ -189,12 +195,18 @@ func TestBuildBankSmoke(t *testing.T) {
 }
 
 func validateGroup(t *testing.T, problems []model.Problem) {
+	validateGroupAfterSmoke(t, problems, true)
+}
+
+func validateGroupAfterSmoke(t *testing.T, problems []model.Problem, smoke bool) {
 	t.Helper()
 	b := openBankRuntime(t)
 	m, id, dir, st, rt, cfg := b.m, b.id, b.dir, b.st, b.rt, b.cfg
 	ctx := context.Background()
 	testutil.NoError(t, author.PrepareEnvironment(ctx, m, id, cfg.Images))
-	smokeBank(t, b, problems)
+	if smoke {
+		smokeBank(t, b, problems)
+	}
 	for _, p := range problems {
 		t.Run(p.ID, func(t *testing.T) {
 			seeds, err := author.CoveringSeeds(p)
@@ -252,7 +264,8 @@ func validateGroup(t *testing.T, problems []model.Problem) {
 			}
 		})
 	}
-	if t.Failed() {
+	if t.Failed() || len(problems) < problem.PracticeMinCount {
+		// Certification of a four-package domain never authorizes practice4.
 		return
 	}
 	t.Setenv("CKAD_HOST_COMPAT", os.Getenv("JUNKLOUD_TEST_HOST_COMPAT"))

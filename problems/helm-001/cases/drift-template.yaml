@@ -1,0 +1,27 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ .Release.Name }}-web
+  namespace: {{ .Release.Namespace }}
+spec:
+  replicas: {{ .Values.replicas }}
+  selector:
+    matchLabels: {app: parcel}
+  template:
+    metadata:
+      labels: {app: parcel}
+    spec:
+      containers:
+      - name: web
+        image: {{ .Values.image | quote }}
+        imagePullPolicy: Never
+        command: ["sh", "-c", 'printf "message=%s\n" "$MESSAGE"; exec sleep 3600']
+        env:
+        - name: MESSAGE
+          value: "drifted"
+        readinessProbe:
+          exec: {command: ["sh", "-c", "true"]}
+          periodSeconds: 1
+        resources:
+          requests: {cpu: 10m, memory: 8Mi}
+          limits: {cpu: 100m, memory: 32Mi}
