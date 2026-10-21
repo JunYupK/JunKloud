@@ -323,7 +323,7 @@ Task 2에서 `internal/model`에 아래 타입을 정의한다. 패키지 간에
 
 **실행 기록:** 2026-10-18 완료. 구현 `1d581c7`, 독립 리뷰의 두 지적 수정 `e003745`; 수정 재리뷰에서 두 지적 해결 및 새 중요 결함 없음. 수정 후 `go test ./... -count=1` 통과. 실제 Docker/kind CLI 전체 흐름 `TestReset`은 `1d581c7`에서 1066.73초 통과, 수정 커밋의 `TestResetStorageReconciliation`은 `e003745`에서 190.19초 통과했다. 시도 폴더 삭제·이동 후 번호 재사용 방지는 수정 전 실패/수정 후 통과 회귀로 확인했다. 전체 흐름을 수정 후 다시 실행했다고 주장하지 않는다.
 
-실측 환경은 Windows/WSL2, Docker 24/API 1.43, cgroup v2이며 IPv6 비활성 환경에 필요한 `no-ipv6` 옵션만 사용했다. 개인 파일·과거 풀이/성적 보존, 실패 문제의 동일/새 seed 재도전, 확인 후 클러스터 재생성, PVC backing 제거, 삭제된 PVC의 Released Retain PV 거부와 미완료 정리 중 새 시작 차단을 검증했다. 확인할 수 없는 backing과 finalizer는 강제 삭제하지 않고 오류·기록을 보존한다. 사용자의 요청에 따라 이번 구현은 Task 13까지이며, 제품 문제은행과 M2/4GiB 최소 사양 검증은 미완료다.
+실측 환경은 Windows/WSL2, Docker 24/API 1.43, cgroup v2이며 IPv6 비활성 환경에 필요한 `no-ipv6` 옵션만 사용했다. 개인 파일·과거 풀이/성적 보존, 실패 문제의 동일/새 seed 재도전, 확인 후 클러스터 재생성, PVC backing 제거, 삭제된 PVC의 Released Retain PV 거부와 미완료 정리 중 새 시작 차단을 검증했다. 확인할 수 없는 backing과 finalizer는 강제 삭제하지 않고 오류·기록을 보존한다. 당시 요청 범위는 Task13까지였다. 이후 추가 승인된 Task14–15의 제품 문제은행 구현과 검증 기록은 아래에 별도로 기술한다. M2/4GiB 최소 사양 검증은 여전히 미완료다.
 
 **Files:** Create environment cleanup, session reset/recover 및 tests, `tests/integration/reset_test.go`; Modify author validation cleanup과 CLI reset wiring.
 
@@ -389,20 +389,22 @@ Task 2에서 `internal/model`에 아래 타입을 정의한다. 패키지 간에
 
 ### Task 15: Application Deployment 4문제 / 20점
 
+**실행 기록:** 2026-10-21 완료. 제품 소스 `7bef126`에서 실제 4문제 smoke 314.83초, 전체 `TestDeploymentBank` 3478.45초/EXIT0 및 마지막 `go test ./... -count=1` PASS/EXIT0. 두 covering seed의 초기·정답·오답·대안·reset 62단계와 Validator 기록 검증을 모두 통과했다. 결합 리뷰의 중요 지적 1개는 수정 재리뷰에서 해결됐고 새 지적은 없다. 배포 4문제/20점이 기존 Design & Build와 합쳐 9문제/40점이며, 전체20문항 mock은 아직 미완성이다. 정확한 seed·실패 후 수정 이력·제한은 2026-10-21-task15-deployment.md 참조. Task16은 별도 구현을 위해 남긴다.
+
 **Files:** Create Task 15 ID 네 package, `tests/integration/bank_deployment_test.go`; Modify coverage.
 
 **Interfaces:** Consumes Task 8 artifact checker와 Task 9 Validator. Produces Deployment 역량 package.
 
-- [ ] **실패 테스트 작성:** `TestDeploymentBank`: count4, total20, Helm raw-apply 오답, overlay/base 보호, canary 누락과 rollout 미완료를 실패로 assert한다.
+- [x] **실패 테스트 작성:** `TestDeploymentBank`: count4, total20, Helm raw-apply 오답, overlay/base 보호, canary 누락과 rollout 미완료를 실패로 assert한다.
   ```go
   testutil.Equal(t, len(problems), 4)
   testutil.Equal(t, sumPoints(problems), 20)
   testutil.Equal(t, helmBypass.Status, "FAIL")
   ```
-- [ ] **실패 확인:** `go test -tags=integration ./tests/integration -run TestDeploymentBank -count=1 -v` 실패 확인.
-- [ ] **문제 작성:** 외부 chart repository 장애를 채점에 섞지 않도록 검토된 자체 작은 chart를 제공한다. Helm 값·release와 최종 상태를 모두 요구사항에 명시한다. rollout/rollback은 필요한 목표 상태·revision evidence를 정의하고 과거 명령 이력을 추측하지 않는다.
-- [ ] **통과 확인:** `TestDeploymentBank` PASS; base를 훼손하지 않는 다른 유효 overlay와 다른 명령으로 같은 목표를 이룬 풀이를 인정한다.
-- [ ] **커밋:** `content: add validated deployment problems`.
+- [x] **실패 확인:** 실제 `TestDeploymentBankContent`에서 문제 부재 RED, native render 실패 및 첫 실제 smoke FAIL199.36초를 확인했다. exact 전체 `TestDeploymentBank`의 최초 실행은 수정 후 PASS였으며, 누락 상태에서 전체 native RED를 실행했다고 표시하지 않는다.
+- [x] **문제 작성:** 외부 chart repository 장애를 채점에 섞지 않도록 검토된 자체 작은 chart를 제공한다. Helm 값·release와 최종 상태를 모두 요구사항에 명시한다. rollout/rollback은 필요한 목표 상태·revision evidence를 정의하고 과거 명령 이력을 추측하지 않는다.
+- [x] **통과 확인:** `TestDeploymentBank` PASS; base를 훼손하지 않는 다른 유효 overlay와 다른 명령으로 같은 목표를 이룬 풀이를 인정한다.
+- [x] **커밋:** `content: add validated deployment problems`.
 
 ### Task 16: Observability & Maintenance 3문제 / 15점
 
