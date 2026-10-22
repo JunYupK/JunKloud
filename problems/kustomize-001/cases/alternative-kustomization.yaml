@@ -1,0 +1,12 @@
+resources: [../base]
+patches:
+- target: {kind: Deployment, name: overlay-web}
+  patch: |-
+    - op: replace
+      path: /spec/replicas
+      value: 2
+- target: {kind: ConfigMap, name: overlay-settings}
+  patch: |-
+    - op: replace
+      path: /data/message
+      value: overlay-ready

@@ -301,39 +301,45 @@ Task 2에서 `internal/model`에 아래 타입을 정의한다. 패키지 간에
 
 ### Task 12: CLI 전체 학습 흐름과 한국어 피드백
 
+**실행 기록:** 2026-10-18 완료. 구현 c71de14, Windows 수정 f28d270; 독립 리뷰 및 수정 재리뷰 통과. 단위·workspace·개발용 5문항 실제 CLI E2E(8/29 → 29/29), Windows PowerShell 5.1 시작 경로 11개 회귀 시나리오 통과. 제품 문제은행과 M2 최소 사양 검증은 후속 Task 범위다.
+
 **Files:** Create cmd/ckad main, CLI root/start/status/show/mark/grade/review/doctor/bank/reset 파일·tests; Modify Dockerfile의 workspace 실행 파일 packaging; Create `tests/e2e/cli_flow_test.go`.
 
 **Interfaces:** Produces `cli.NewRoot(deps Dependencies,in io.Reader,out,errOut io.Writer) *cobra.Command`; `Dependencies{Session *session.Service; Environment *environment.Manager; Author *author.Validator; Store *store.Store; Now func() time.Time}`. root에서 명령을 조립하고 구성요소 구현은 각 패키지 호출에 한정한다.
 
-- [ ] **실패 테스트 작성:** `TestEnglishPromptKoreanFeedback`, `TestModeRestrictions`, `TestMarkDoesNotGrade`, `TestCLIExitCodes`, `TestTwoTerminalRead`, `TestNoPrivateContentInErrors`. 실제 명령 인자·입력·출력을 기록한다.
+- [x] **실패 테스트 작성:** `TestEnglishPromptKoreanFeedback`, `TestModeRestrictions`, `TestMarkDoesNotGrade`, `TestCLIExitCodes`, `TestTwoTerminalRead`, `TestNoPrivateContentInErrors`. 실제 명령 인자·입력·출력을 기록한다.
   ```go
   testutil.Equal(t, strings.Contains(questionOutput, "Namespace"), true)
   testutil.Equal(t, strings.Contains(failureOutput, "요구사항"), true)
   testutil.Equal(t, gradeCallsAfterMark, 0)
   testutil.Equal(t, codeForUnmetLearningCriteria, 1)
   ```
-- [ ] **실패 확인:** `go test ./internal/cli -v`에서 누락된 명령/공개 규칙 실패 확인.
-- [ ] **최소 구현:** spec 10장의 명령·옵션 모두 연결. exit 0=성공한 조작 또는 만점 채점, 1=정상 채점의 미충족, 2=사용법/모드 오류, 3=환경·저장·채점 불가. 모의시험 참고 66% 표시는 100점과 별도이며 합격 예측 문구 없음. solution은 명시 열람 후만 출력. stdout에는 사용자 결과, 진단은 stderr. context 취소를 모든 작업으로 전달한다.
-- [ ] **통과 확인:** `go test ./internal/cli -v`; `go test -tags=e2e ./tests/e2e -run TestCLIFlow -count=1 -v` PASS. 5개 개발 fixture로 start→풀이→grade→review가 동작한다. reset 연결은 Task 13 완료 전에는 미구현 오류를 명확히 반환하며 완료로 표시하지 않는다.
-- [ ] **커밋:** `feat: expose the terminal training workflow`.
+- [x] **실패 확인:** `go test ./internal/cli -v`에서 누락된 명령/공개 규칙 실패 확인.
+- [x] **최소 구현:** spec 10장의 명령·옵션 모두 연결. exit 0=성공한 조작 또는 만점 채점, 1=정상 채점의 미충족, 2=사용법/모드 오류, 3=환경·저장·채점 불가. 모의시험 참고 66% 표시는 100점과 별도이며 합격 예측 문구 없음. solution은 명시 열람 후만 출력. stdout에는 사용자 결과, 진단은 stderr. context 취소를 모든 작업으로 전달한다.
+- [x] **통과 확인:** `go test ./internal/cli -v`; `go test -tags=e2e ./tests/e2e -run TestCLIFlow -count=1 -v` PASS. 5개 개발 fixture로 start→풀이→grade→review가 동작한다. reset 연결은 Task 13 완료 전에는 미구현 오류를 명확히 반환하며 완료로 표시하지 않는다.
+- [x] **커밋:** `feat: expose the terminal training workflow`.
 
 ### Task 13: 문제별 reset·전체 복구·재도전
+
+**실행 기록:** 2026-10-18 완료. 구현 `1d581c7`, 독립 리뷰의 두 지적 수정 `e003745`; 수정 재리뷰에서 두 지적 해결 및 새 중요 결함 없음. 수정 후 `go test ./... -count=1` 통과. 실제 Docker/kind CLI 전체 흐름 `TestReset`은 `1d581c7`에서 1066.73초 통과, 수정 커밋의 `TestResetStorageReconciliation`은 `e003745`에서 190.19초 통과했다. 시도 폴더 삭제·이동 후 번호 재사용 방지는 수정 전 실패/수정 후 통과 회귀로 확인했다. 전체 흐름을 수정 후 다시 실행했다고 주장하지 않는다.
+
+실측 환경은 Windows/WSL2, Docker 24/API 1.43, cgroup v2이며 IPv6 비활성 환경에 필요한 `no-ipv6` 옵션만 사용했다. 개인 파일·과거 풀이/성적 보존, 실패 문제의 동일/새 seed 재도전, 확인 후 클러스터 재생성, PVC backing 제거, 삭제된 PVC의 Released Retain PV 거부와 미완료 정리 중 새 시작 차단을 검증했다. 확인할 수 없는 backing과 finalizer는 강제 삭제하지 않고 오류·기록을 보존한다. 당시 요청 범위는 Task13까지였다. 이후 추가 승인된 Task14–15의 제품 문제은행 구현과 검증 기록은 아래에 별도로 기술한다. M2/4GiB 최소 사양 검증은 여전히 미완료다.
 
 **Files:** Create environment cleanup, session reset/recover 및 tests, `tests/integration/reset_test.go`; Modify author validation cleanup과 CLI reset wiring.
 
 **Interfaces:** Adds `Manager.Cleanup(ctx,id model.Identity,inventory model.Inventory) error`; `Service.Reset(ctx,sessionID string,opts ResetOptions) error`, `Recover(ctx,environmentID string) error`; `ResetOptions{ProblemID string; Cluster bool; ConfirmedEnvironmentID string}`. 기존 StartOptions.RetrySessionID/NewSeed로 retry 세션 생성.
 
-- [ ] **실패 테스트 작성:** `TestResetNamespaceBundle`, `TestPVCDataRemoved`, `TestFinalizerIsNotForced`, `TestPersonalFilesPreserved`, `TestRetryOneWrongProblem`, `TestCrashAfterDelete`, `TestForeignResourcesPreserved`.
+- [x] **실패 테스트 작성:** `TestResetNamespaceBundle`, `TestPVCDataRemoved`, `TestFinalizerIsNotForced`, `TestPersonalFilesPreserved`, `TestRetryOneWrongProblem`, `TestCrashAfterDelete`, `TestForeignResourcesPreserved`.
   ```go
   testutil.Equal(t, strings.Contains(newVolumeContents, "old-attempt-marker"), false)
   testutil.Equal(t, personalAliasAfter, personalAliasBefore)
   testutil.Equal(t, len(retry.Problems), 1)
   testutil.Equal(t, foreignSentinelAfter, foreignSentinelBefore)
   ```
-- [ ] **실패 확인:** `go test ./internal/session ./internal/environment -run 'TestReset|TestPVC|TestFinalizer|TestPersonal|TestRetryOne|TestCrashAfter|TestForeign' -v` 실패 확인.
-- [ ] **최소 구현:** UID·owner 검증→정리 intent→namespaced 묶음 삭제 완료 대기→소유 cluster-scoped/스토리지/이미지 정리→새 attempt 작업 폴더. 과거 풀이·점수·개인 설정은 archive로 보존한다. platform 공유 리소스와 다른 Docker 리소스는 제외. 현재 시험의 개별 reset 거부, 전체 포기 확인. `--cluster`는 별도 전용 environment ID 확인 후만 재생성한다. 중단된 단계는 실제 상태를 확인해 재개한다.
-- [ ] **통과 확인:** `go test -tags=integration ./tests/integration -run TestReset -count=1 -v`와 CLI 전체 flow PASS. 정리 실패 상태에서 새로운 시험을 덮어 시작하지 않는다. 새 seed와 동일 seed 재도전, missing package 거부 확인.
-- [ ] **커밋:** `feat: reset owned practice state without losing user work`.
+- [x] **실패 확인:** 복구 단계에서 교체 환경 재검증, 재생성 journal 분리, 초기 생성 복구 안내, 시도 경계, 디렉터리 삭제·이동 후 번호 재사용, 삭제/미연결 PVC 회귀의 수정 전 실패와 수정 후 통과를 확인했다. 최초 구현 전 위 테스트 전체의 RED 실행 기록은 복구 기록에서 확인하지 못했으며 그 실행을 확인한 것으로 표시하지 않는다.
+- [x] **최소 구현:** UID·owner 검증→정리 intent→namespaced 묶음 삭제 완료 대기→소유 cluster-scoped/스토리지/이미지 정리→새 attempt 작업 폴더. 과거 풀이·점수·개인 설정은 archive로 보존한다. platform 공유 리소스와 다른 Docker 리소스는 제외. 현재 시험의 개별 reset 거부, 전체 포기 확인. `--cluster`는 별도 전용 environment ID 확인 후만 재생성한다. 중단된 단계는 실제 상태를 확인해 재개한다.
+- [x] **통과 확인:** `JUNKLOUD_TEST_HOST_COMPAT=no-ipv6 go test -tags=integration ./tests/integration -run '^TestReset$' -count=1 -timeout=45m -v`와 `-run '^TestResetStorageReconciliation$' -timeout=15m` PASS. 정리 실패 상태에서 새로운 시험을 덮어 시작하지 않는다. 새 seed와 동일 seed 재도전, missing package 거부 확인. 실행별 커밋은 위 기록과 같다.
+- [x] **커밋:** `feat: reset owned practice state without losing user work` (`1d581c7`), `fix: preserve reset attempt and storage cleanup proof` (`e003745`).
 
 ## 4. 제품 문제은행: 20문항 구성
 
@@ -370,33 +376,35 @@ Task 2에서 `internal/model`에 아래 타입을 정의한다. 패키지 간에
 
 **Interfaces:** Consumes schema v1과 Validator.Validate. Produces 검증된 5 package와 Design & Build 역량 연결. 공통 tests는 `loadGroup(t,ids []string)`와 `validateGroup(t,problems []model.Problem)`를 이 test 파일에 정의하고 다른 batch가 쓸 공통 부분만 `tests/integration/bank_helpers_test.go`로 이동한다.
 
-- [ ] **실패 테스트 작성:** `TestBuildBank`가 빈 목록·배점·역량·오답 rejection을 확인하도록 작성한다. 모든 package의 검증 결과 `Passed=true`, 점수 합20, 개수5를 assert한다.
+- [x] **실패 테스트 작성:** `TestBuildBank`가 빈 목록·배점·역량·오답 rejection을 확인하도록 작성한다. 모든 package의 검증 결과 `Passed=true`, 점수 합20, 개수5를 assert한다.
   ```go
   testutil.Equal(t, len(problems), 5)
   testutil.Equal(t, sumPoints(problems), 20)
   for _, record := range records { testutil.Equal(t, record.Passed, true) }
   ```
-- [ ] **실패 확인:** `go test -tags=integration ./tests/integration -run TestBuildBank -count=1 -v`에서 문제 부재/잘못된 사례 실패 확인.
-- [ ] **문제 작성:** 영어 요구사항·한국어 진단과 해설·초기값·정답·오답·대표 seed를 작성한다. Linux 두 아키텍처 이미지와 작은 resource budget 사용. 실제 CronJob 발동 검사는 최대120초의 명시적 관찰 창을 쓰며 schedule template 검사와 구분한다. 영속 볼륨은 Pod 재생성 후 보존과 reset 후 제거를 모두 검사한다.
-- [ ] **통과 확인:** `TestBuildBank` PASS. 문항·검사 사이 숨은 조건 없음, 대체 답안과 reset 후 initial 점수 일치. 아직 전체 mock을 완료했다고 표시하지 않는다.
-- [ ] **커밋:** `content: add validated design and build problems`.
+- [x] **실패 확인:** `go test -tags=integration ./tests/integration -run TestBuildBank -count=1 -v`에서 문제 부재/잘못된 사례 실패 확인.
+- [x] **문제 작성:** 영어 요구사항·한국어 진단과 해설·초기값·정답·오답·대표 seed를 작성한다. Linux 두 아키텍처 이미지와 작은 resource budget 사용. 실제 CronJob 발동 검사는 최대120초의 명시적 관찰 창을 쓰며 schedule template 검사와 구분한다. 영속 볼륨은 Pod 재생성 후 보존과 reset 후 제거를 모두 검사한다.
+- [x] **통과 확인:** exact085401f의 다섯 실제 문제별 subtest·모든 seed/정답/오답/대체답안/reset은 PASS. 최종 CLI gate에서 top-level TestBuildBank는 FAIL이었으며 이를 전체 PASS로 표시하지 않는다. 후속0bf9a9c에서 실제 Doctor·이미지 검증·CLI 출제 가능 목록 및 전체 Go suite PASS로 경계 수정을 확인했다. 전체5문제 CLI 시작은 수정 후 재실행하지 않았다. 자세한 근거는 2026-10-19-task14-design-build.md의 Verified milestones 참조. 문항·검사 사이 숨은 조건 없음, 대체 답안과 reset 후 initial 점수 일치. 아직 전체 mock을 완료했다고 표시하지 않는다.
+- [x] **커밋:** `content: add validated design and build problems`.
 
 ### Task 15: Application Deployment 4문제 / 20점
+
+**실행 기록:** 2026-10-21 완료. 제품 소스 `7bef126`에서 실제 4문제 smoke 314.83초, 전체 `TestDeploymentBank` 3478.45초/EXIT0 및 마지막 `go test ./... -count=1` PASS/EXIT0. 두 covering seed의 초기·정답·오답·대안·reset 62단계와 Validator 기록 검증을 모두 통과했다. 결합 리뷰의 중요 지적 1개는 수정 재리뷰에서 해결됐고 새 지적은 없다. 배포 4문제/20점이 기존 Design & Build와 합쳐 9문제/40점이며, 전체20문항 mock은 아직 미완성이다. 정확한 seed·실패 후 수정 이력·제한은 2026-10-21-task15-deployment.md 참조. Task16은 별도 구현을 위해 남긴다.
 
 **Files:** Create Task 15 ID 네 package, `tests/integration/bank_deployment_test.go`; Modify coverage.
 
 **Interfaces:** Consumes Task 8 artifact checker와 Task 9 Validator. Produces Deployment 역량 package.
 
-- [ ] **실패 테스트 작성:** `TestDeploymentBank`: count4, total20, Helm raw-apply 오답, overlay/base 보호, canary 누락과 rollout 미완료를 실패로 assert한다.
+- [x] **실패 테스트 작성:** `TestDeploymentBank`: count4, total20, Helm raw-apply 오답, overlay/base 보호, canary 누락과 rollout 미완료를 실패로 assert한다.
   ```go
   testutil.Equal(t, len(problems), 4)
   testutil.Equal(t, sumPoints(problems), 20)
   testutil.Equal(t, helmBypass.Status, "FAIL")
   ```
-- [ ] **실패 확인:** `go test -tags=integration ./tests/integration -run TestDeploymentBank -count=1 -v` 실패 확인.
-- [ ] **문제 작성:** 외부 chart repository 장애를 채점에 섞지 않도록 검토된 자체 작은 chart를 제공한다. Helm 값·release와 최종 상태를 모두 요구사항에 명시한다. rollout/rollback은 필요한 목표 상태·revision evidence를 정의하고 과거 명령 이력을 추측하지 않는다.
-- [ ] **통과 확인:** `TestDeploymentBank` PASS; base를 훼손하지 않는 다른 유효 overlay와 다른 명령으로 같은 목표를 이룬 풀이를 인정한다.
-- [ ] **커밋:** `content: add validated deployment problems`.
+- [x] **실패 확인:** 실제 `TestDeploymentBankContent`에서 문제 부재 RED, native render 실패 및 첫 실제 smoke FAIL199.36초를 확인했다. exact 전체 `TestDeploymentBank`의 최초 실행은 수정 후 PASS였으며, 누락 상태에서 전체 native RED를 실행했다고 표시하지 않는다.
+- [x] **문제 작성:** 외부 chart repository 장애를 채점에 섞지 않도록 검토된 자체 작은 chart를 제공한다. Helm 값·release와 최종 상태를 모두 요구사항에 명시한다. rollout/rollback은 필요한 목표 상태·revision evidence를 정의하고 과거 명령 이력을 추측하지 않는다.
+- [x] **통과 확인:** `TestDeploymentBank` PASS; base를 훼손하지 않는 다른 유효 overlay와 다른 명령으로 같은 목표를 이룬 풀이를 인정한다.
+- [x] **커밋:** `content: add validated deployment problems`.
 
 ### Task 16: Observability & Maintenance 3문제 / 15점
 

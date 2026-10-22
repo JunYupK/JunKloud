@@ -1,0 +1,249 @@
+{
+  "schema_version": 1,
+  "id": "rollout-001",
+  "version": "1.0.0",
+  "title": "Recover a stalled application rollout",
+  "domain": "deployment",
+  "difficulty": "medium",
+  "type": "troubleshoot",
+  "tags": [
+    "deployment",
+    "rollout"
+  ],
+  "competencies": [
+    "Deploy applications with observable release and rollout goals"
+  ],
+  "capabilities": [],
+  "parameters": {
+    "namespace": [
+      "jk-rollout-001-a",
+      "jk-rollout-001-b"
+    ]
+  },
+  "namespace": "${namespace}",
+  "budget": {
+    "cpu": "500m",
+    "memory": "192Mi"
+  },
+  "criteria": [
+    {
+      "id": "deployment",
+      "kind": "resource",
+      "points": 1,
+      "feedback": "dispatch Deployment가 필요합니다.",
+      "target": {
+        "api_version": "apps/v1",
+        "kind": "Deployment",
+        "namespace": "${namespace}",
+        "name": "dispatch"
+      }
+    },
+    {
+      "id": "stable-version",
+      "kind": "field",
+      "points": 1,
+      "feedback": "web 컨테이너의 제공 image와 RELEASE=stable-v1을 확인하세요.",
+      "target": {
+        "api_version": "apps/v1",
+        "kind": "Deployment",
+        "namespace": "${namespace}",
+        "name": "dispatch"
+      },
+      "args": {
+        "fields": [
+          {
+            "path": "spec.template.spec.containers[name=web].image",
+            "equals": "docker.io/library/busybox:1.37.0"
+          },
+          {
+            "path": "spec.template.spec.containers[name=web].env[name=RELEASE].value",
+            "equals": "stable-v1"
+          }
+        ]
+      },
+      "depends_on": [
+        "deployment"
+      ]
+    },
+    {
+      "id": "strategy-goal",
+      "kind": "field",
+      "points": 1,
+      "feedback": "replicas=2와 RollingUpdate maxSurge=1, maxUnavailable=0을 설정하세요.",
+      "target": {
+        "api_version": "apps/v1",
+        "kind": "Deployment",
+        "namespace": "${namespace}",
+        "name": "dispatch"
+      },
+      "args": {
+        "fields": [
+          {
+            "path": "spec.replicas",
+            "equals": 2
+          },
+          {
+            "path": "spec.strategy.type",
+            "equals": "RollingUpdate"
+          },
+          {
+            "path": "spec.strategy.rollingUpdate.maxSurge",
+            "equals": 1
+          },
+          {
+            "path": "spec.strategy.rollingUpdate.maxUnavailable",
+            "equals": 0
+          }
+        ]
+      },
+      "depends_on": [
+        "deployment"
+      ]
+    },
+    {
+      "id": "current-ready",
+      "kind": "ready",
+      "points": 1,
+      "feedback": "현재 revision의 2개 Pod가 모두 안정적으로 Ready/Available이어야 합니다.",
+      "target": {
+        "api_version": "apps/v1",
+        "kind": "Deployment",
+        "namespace": "${namespace}",
+        "name": "dispatch"
+      },
+      "args": {
+        "replicas": 2
+      },
+      "depends_on": [
+        "deployment"
+      ],
+      "timeout": "60s"
+    },
+    {
+      "id": "version-output",
+      "kind": "logs",
+      "points": 1,
+      "feedback": "모든 대상 web Pod가 version=stable-v1 한 줄을 출력해야 합니다.",
+      "target": {
+        "api_version": "apps/v1",
+        "kind": "Deployment",
+        "namespace": "${namespace}",
+        "name": "dispatch"
+      },
+      "args": {
+        "container": "web",
+        "pods": "all",
+        "matches": [
+          "(?m)^version=stable-v1$"
+        ],
+        "wait": true
+      },
+      "depends_on": [
+        "current-ready"
+      ],
+      "timeout": "30s"
+    }
+  ],
+  "setup": [
+    {
+      "kind": "apply",
+      "args": {
+        "path": "setup/broken.yaml"
+      }
+    }
+  ],
+  "solution": [
+    {
+      "kind": "apply",
+      "args": {
+        "path": "solution/deployment.yaml"
+      }
+    }
+  ],
+  "initial_expected": {
+    "deployment": "PASS",
+    "stable-version": "FAIL",
+    "strategy-goal": "FAIL",
+    "current-ready": "FAIL",
+    "version-output": "FAIL"
+  },
+  "initial_score": 1,
+  "cases": [
+    {
+      "id": "wrong-version",
+      "actions": [
+        {
+          "kind": "apply",
+          "args": {
+            "path": "cases/wrong-version.yaml"
+          }
+        }
+      ],
+      "expected": {
+        "deployment": "PASS",
+        "stable-version": "FAIL",
+        "strategy-goal": "PASS",
+        "current-ready": "PASS",
+        "version-output": "FAIL"
+      },
+      "expected_score": 3
+    },
+    {
+      "id": "wrong-strategy",
+      "actions": [
+        {
+          "kind": "apply",
+          "args": {
+            "path": "cases/wrong-strategy.yaml"
+          }
+        }
+      ],
+      "expected": {
+        "deployment": "PASS",
+        "stable-version": "PASS",
+        "strategy-goal": "FAIL",
+        "current-ready": "PASS",
+        "version-output": "PASS"
+      },
+      "expected_score": 4
+    },
+    {
+      "id": "incomplete-rollout",
+      "actions": [
+        {
+          "kind": "apply",
+          "args": {
+            "path": "cases/incomplete-rollout.yaml"
+          }
+        }
+      ],
+      "expected": {
+        "deployment": "PASS",
+        "stable-version": "PASS",
+        "strategy-goal": "PASS",
+        "current-ready": "FAIL",
+        "version-output": "FAIL"
+      },
+      "expected_score": 3
+    },
+    {
+      "id": "alternative-output",
+      "actions": [
+        {
+          "kind": "apply",
+          "args": {
+            "path": "cases/alternative-output.yaml"
+          }
+        }
+      ],
+      "expected": {
+        "deployment": "PASS",
+        "stable-version": "PASS",
+        "strategy-goal": "PASS",
+        "current-ready": "PASS",
+        "version-output": "PASS"
+      },
+      "expected_score": 5
+    }
+  ]
+}

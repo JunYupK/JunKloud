@@ -27,7 +27,7 @@ var actionDirs = []string{"setup/", "solution/", "cases/"}
 
 // BuildActions turns a problem's declarative actions (setup, solution or one
 // case) into the rendered environment.Actions the Manager applies. It is the
-// only place that dispatches model.Action kinds (R15):
+// manifest decoder for the runtime's apply/delete-owned path (R15):
 //
 //   - apply: args {path} names a manifest in the problem package (under
 //     setup/, solution/ or cases/). The file may hold several YAML documents;
@@ -36,9 +36,9 @@ var actionDirs = []string{"setup/", "solution/", "cases/"}
 //   - delete-owned: args {targets: [{api_version, kind, namespace?, name}]},
 //     rendered, deleted by the Manager only if they are in the owner's
 //     inventory.
-//   - helm, image, file, patch: valid action kinds that problem validation
-//     cannot run yet. They fail with environment.ErrUnsupportedAction before
-//     anything is applied; there is no shell or eval action at all.
+//   - helm, kustomize, image, file, patch: unsupported by this decoder. The
+//     author ActionExecutor separately handles staged file/image/native tools.
+//     There is no shell or eval action.
 //
 // files is the unrendered package (model.Problem.Files); params are the
 // frozen parameters. Args are strict: an unknown key, a missing or escaping
@@ -94,7 +94,7 @@ func buildAction(files map[string][]byte, params map[string]any, a model.Action)
 		}
 		return environment.Action{Kind: model.ActionDeleteOwned, Targets: targets}, nil
 
-	case model.ActionHelm, model.ActionImage, model.ActionFile, model.ActionPatch:
+	case model.ActionHelm, model.ActionKustomize, model.ActionImage, model.ActionFile, model.ActionPatch:
 		return environment.Action{}, fmt.Errorf("%w: problem validation cannot run %q actions yet", environment.ErrUnsupportedAction, a.Kind)
 	default:
 		return environment.Action{}, invalid("unknown action kind %q", a.Kind)

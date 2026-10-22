@@ -1,0 +1,293 @@
+{
+  "schema_version": 1,
+  "id": "helm-001",
+  "version": "1.0.0",
+  "title": "Deploy a local Helm chart with release values",
+  "domain": "deployment",
+  "difficulty": "medium",
+  "type": "build",
+  "tags": [
+    "deployment",
+    "helm"
+  ],
+  "competencies": [
+    "Deploy applications with observable release and rollout goals"
+  ],
+  "capabilities": [],
+  "parameters": {
+    "namespace": [
+      "jk-helm-001-a",
+      "jk-helm-001-b"
+    ]
+  },
+  "namespace": "${namespace}",
+  "budget": {
+    "cpu": "500m",
+    "memory": "192Mi"
+  },
+  "criteria": [
+    {
+      "id": "native-release",
+      "kind": "helm",
+      "points": 1,
+      "feedback": "parcel native Helm release와 parcel-chart 0.1.0의 실제 소유 객체가 필요합니다.",
+      "args": {
+        "release": "parcel",
+        "chart": {
+          "name": "parcel-chart",
+          "version": "0.1.0"
+        },
+        "objects": true
+      },
+      "timeout": "60s"
+    },
+    {
+      "id": "release-values",
+      "kind": "helm",
+      "points": 1,
+      "feedback": "Helm effective values의 replicas=2와 message=parcel-ready를 확인하세요.",
+      "args": {
+        "release": "parcel",
+        "values": [
+          {
+            "path": "replicas",
+            "equals": 2
+          },
+          {
+            "path": "message",
+            "equals": "parcel-ready"
+          }
+        ],
+        "all_values": true,
+        "objects": false
+      },
+      "timeout": "60s"
+    },
+    {
+      "id": "live-goal",
+      "kind": "field",
+      "points": 1,
+      "feedback": "live Deployment web의 image, replicas 및 MESSAGE 값을 확인하세요.",
+      "target": {
+        "api_version": "apps/v1",
+        "kind": "Deployment",
+        "namespace": "${namespace}",
+        "name": "parcel-web"
+      },
+      "args": {
+        "fields": [
+          {
+            "path": "spec.replicas",
+            "equals": 2
+          },
+          {
+            "path": "spec.template.spec.containers[name=web].image",
+            "equals": "docker.io/library/busybox:1.37.0"
+          },
+          {
+            "path": "spec.template.spec.containers[name=web].env[name=MESSAGE].value",
+            "equals": "parcel-ready"
+          }
+        ]
+      }
+    },
+    {
+      "id": "ready",
+      "kind": "ready",
+      "points": 1,
+      "feedback": "parcel-web의 현재 2개 replica가 안정적으로 Ready이어야 합니다.",
+      "target": {
+        "api_version": "apps/v1",
+        "kind": "Deployment",
+        "namespace": "${namespace}",
+        "name": "parcel-web"
+      },
+      "args": {
+        "replicas": 2
+      },
+      "timeout": "60s"
+    },
+    {
+      "id": "output",
+      "kind": "logs",
+      "points": 1,
+      "feedback": "모든 web Pod에서 message=parcel-ready 실제 로그가 필요합니다.",
+      "target": {
+        "api_version": "apps/v1",
+        "kind": "Deployment",
+        "namespace": "${namespace}",
+        "name": "parcel-web"
+      },
+      "args": {
+        "container": "web",
+        "pods": "all",
+        "matches": [
+          "(?m)^message=parcel-ready$"
+        ],
+        "wait": true
+      },
+      "depends_on": [
+        "ready"
+      ],
+      "timeout": "30s"
+    }
+  ],
+  "setup": [
+    {
+      "kind": "apply",
+      "args": {
+        "path": "setup/notes.yaml"
+      }
+    }
+  ],
+  "solution": [
+    {
+      "kind": "file",
+      "args": {
+        "source": "solution/values.yaml",
+        "path": "values.yaml"
+      }
+    },
+    {
+      "kind": "helm",
+      "args": {
+        "operation": "install",
+        "release": "parcel",
+        "chart": "chart",
+        "values": [
+          "values.yaml"
+        ]
+      }
+    }
+  ],
+  "initial_expected": {
+    "native-release": "FAIL",
+    "release-values": "FAIL",
+    "live-goal": "FAIL",
+    "ready": "FAIL",
+    "output": "FAIL"
+  },
+  "initial_score": 0,
+  "cases": [
+    {
+      "id": "raw-apply",
+      "actions": [
+        {
+          "kind": "apply",
+          "args": {
+            "path": "cases/raw.yaml"
+          }
+        }
+      ],
+      "expected": {
+        "native-release": "FAIL",
+        "release-values": "FAIL",
+        "live-goal": "PASS",
+        "ready": "PASS",
+        "output": "PASS"
+      },
+      "expected_score": 3
+    },
+    {
+      "id": "wrong-values",
+      "actions": [
+        {
+          "kind": "file",
+          "args": {
+            "source": "cases/wrong-values.yaml",
+            "path": "values.yaml"
+          }
+        },
+        {
+          "kind": "helm",
+          "args": {
+            "operation": "install",
+            "release": "parcel",
+            "chart": "chart",
+            "values": [
+              "values.yaml"
+            ]
+          }
+        }
+      ],
+      "expected": {
+        "native-release": "PASS",
+        "release-values": "FAIL",
+        "live-goal": "FAIL",
+        "ready": "FAIL",
+        "output": "FAIL"
+      },
+      "expected_score": 1
+    },
+    {
+      "id": "live-drift",
+      "actions": [
+        {
+          "kind": "file",
+          "args": {
+            "source": "solution/values.yaml",
+            "path": "values.yaml"
+          }
+        },
+        {
+          "kind": "file",
+          "args": {
+            "source": "cases/drift-template.yaml",
+            "path": "chart/templates/deployment.yaml"
+          }
+        },
+        {
+          "kind": "helm",
+          "args": {
+            "operation": "install",
+            "release": "parcel",
+            "chart": "chart",
+            "values": [
+              "values.yaml"
+            ]
+          }
+        }
+      ],
+      "expected": {
+        "native-release": "PASS",
+        "release-values": "PASS",
+        "live-goal": "FAIL",
+        "ready": "PASS",
+        "output": "FAIL"
+      },
+      "expected_score": 3
+    },
+    {
+      "id": "alternative-values",
+      "actions": [
+        {
+          "kind": "file",
+          "args": {
+            "source": "cases/alternative-values.yaml",
+            "path": "extra.yaml"
+          }
+        },
+        {
+          "kind": "helm",
+          "args": {
+            "operation": "install",
+            "release": "parcel",
+            "chart": "chart",
+            "values": [
+              "values.yaml",
+              "extra.yaml"
+            ]
+          }
+        }
+      ],
+      "expected": {
+        "native-release": "PASS",
+        "release-values": "PASS",
+        "live-goal": "PASS",
+        "ready": "PASS",
+        "output": "PASS"
+      },
+      "expected_score": 5
+    }
+  ]
+}

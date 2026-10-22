@@ -1,0 +1,1 @@
+Known stable application version: stable-v1. Current broken-v2 fails readiness. Goal: dispatch replicas=2; RollingUpdate maxSurge=1/maxUnavailable=0. Use docker.io/library/busybox:1.37.0. No past rollback command or numeric revision is required.

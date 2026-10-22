@@ -19,10 +19,12 @@ const testNode = "0123456789abcdef"
 
 // recTools records tool calls; fail returns an exit code for a call prefix.
 type recTools struct {
-	mu     sync.Mutex
-	calls  []string
-	fail   map[string]int
-	stderr string
+	mu         sync.Mutex
+	calls      []string
+	fail       map[string]int
+	stderr     string
+	moveOnSave bool
+	moved      bool
 }
 
 func (r *recTools) Run(_ context.Context, call ToolCall) (ToolResult, error) {
@@ -32,6 +34,9 @@ func (r *recTools) Run(_ context.Context, call ToolCall) (ToolResult, error) {
 	r.calls = append(r.calls, line)
 	for prefix, code := range r.fail {
 		if strings.HasPrefix(line, prefix) {
+			if r.moveOnSave && strings.HasPrefix(line, "docker save ") {
+				r.moved = true
+			}
 			msg := "boom"
 			if r.stderr != "" {
 				msg = r.stderr
@@ -39,7 +44,42 @@ func (r *recTools) Run(_ context.Context, call ToolCall) (ToolResult, error) {
 			return ToolResult{ExitCode: code, Stderr: []byte(msg)}, nil
 		}
 	}
+	if strings.HasPrefix(line, "docker image inspect --format") {
+		id := "sha256:" + strings.Repeat("1", 64)
+		count := len(call.Args) - 4
+		if r.moved {
+			foreign := "sha256:" + strings.Repeat("2", 64)
+			if count == 1 {
+				return ToolResult{Stdout: []byte(foreign + " linux/amd64\n")}, nil
+			}
+			return ToolResult{Stdout: []byte(foreign + " linux/amd64\n" + id + " linux/amd64\n")}, nil
+		}
+		return ToolResult{Stdout: []byte(strings.Repeat(id+" linux/amd64\n", count))}, nil
+	}
 	return ToolResult{}, nil
+}
+
+func TestImageRunDocker24VerifiedExport(t *testing.T) {
+	tools := &recTools{fail: map[string]int{"docker save --platform": 1}, stderr: `"--platform" requires API version 1.48, but the Docker daemon API version is 1.43`}
+	pods := newFakePods()
+	pods.onCreate = exited(0, "Completed", "")
+	result, err := runnerFor(t, tools, pods, nil, "native run").Run(context.Background(), runRequest())
+	testutil.NoError(t, err)
+	testutil.Equal(t, result.Completed, true)
+	testutil.Equal(t, tools.has("docker save --output"), 1)
+}
+
+func TestImageRunRetainsMovedExportTag(t *testing.T) {
+	tools := &recTools{fail: map[string]int{"docker save --platform": 1}, stderr: `"--platform" requires API version 1.48, but the Docker daemon API version is 1.43`, moveOnSave: true}
+	pods := newFakePods()
+	pods.onCreate = exited(0, "Completed", "")
+	result, err := runnerFor(t, tools, pods, nil, "").Run(context.Background(), runRequest())
+	if err == nil || result.Completed {
+		t.Fatal("moved tag accepted")
+	}
+	if tools.has("docker image rm junkloud.local/grade-image:") != 0 {
+		t.Fatal("cleanup removed a tag that moved to an unrelated image")
+	}
 }
 
 func (r *recTools) has(prefix string) int {
@@ -108,7 +148,7 @@ func TestImageRunSequenceAndCleanup(t *testing.T) {
 	testutil.Equal(t, res.Output, "hello from shop\n")
 
 	// Order: tag, save (current architecture only), load, then clean-up.
-	tag, save, load := tools.index("docker tag shop:1 junkloud.local/grade-image:"), tools.index("docker save --platform linux/amd64"), tools.index("kind load image-archive")
+	tag, save, load := tools.index("docker tag sha256:"), tools.index("docker save --platform linux/amd64"), tools.index("kind load image-archive")
 	rmi, rm := tools.index("docker exec "+testNode+" crictl rmi junkloud.local/grade-image:"), tools.index("docker image rm junkloud.local/grade-image:")
 	if !(tag >= 0 && tag < save && save < load && load < rmi && load < rm) {
 		t.Fatalf("unexpected order: %v", tools.calls)
@@ -124,7 +164,7 @@ func TestImageRunSequenceAndCleanup(t *testing.T) {
 		if (strings.Contains(c, " rm ") || strings.Contains(c, " rmi ")) && !strings.Contains(c, "junkloud.local/grade-image:") {
 			t.Errorf("removes something that is not this run's tag: %s", c)
 		}
-		if strings.HasSuffix(c, " shop:1") && !strings.HasPrefix(c, "docker tag ") {
+		if strings.HasSuffix(c, " shop:1") && !strings.HasPrefix(c, "docker image inspect ") {
 			t.Errorf("touches the learner's tag: %s", c)
 		}
 	}

@@ -149,6 +149,9 @@ func (d destination) targetPort(ep endpointRef, servicePort int) (int, bool) {
 
 // Check implements Checker.
 func (c *NetworkChecker) Check(ctx context.Context, t Target, crit model.Criterion) (model.CheckResult, error) {
+	if crit.Kind == model.CriterionEndpointMembership {
+		return c.checkMembership(ctx, t, crit)
+	}
 	plan, err := c.plan(crit)
 	if err != nil {
 		return model.CheckResult{}, err

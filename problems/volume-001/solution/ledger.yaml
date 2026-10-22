@@ -1,0 +1,82 @@
+{
+  "apiVersion": "apps/v1",
+  "kind": "Deployment",
+  "metadata": {
+    "name": "ledger",
+    "namespace": "${namespace}"
+  },
+  "spec": {
+    "replicas": 1,
+    "selector": {
+      "matchLabels": {
+        "app": "ledger"
+      }
+    },
+    "template": {
+      "metadata": {
+        "labels": {
+          "app": "ledger"
+        }
+      },
+      "spec": {
+        "containers": [
+          {
+            "name": "app",
+            "image": "docker.io/library/busybox:1.37.0",
+            "imagePullPolicy": "Never",
+            "command": [
+              "sh",
+              "-c",
+              "sleep 3600"
+            ],
+            "resources": {
+              "requests": {
+                "cpu": "10m",
+                "memory": "8Mi"
+              },
+              "limits": {
+                "cpu": "75m",
+                "memory": "32Mi"
+              }
+            },
+            "volumeMounts": [
+              {
+                "name": "storage",
+                "mountPath": "/data"
+              },
+              {
+                "name": "bootstrap-ledger-data",
+                "mountPath": "/bootstrap/ledger-data"
+              },
+              {
+                "name": "bootstrap-spare-data",
+                "mountPath": "/bootstrap/spare-data"
+              }
+            ]
+          }
+        ],
+        "volumes": [
+          {
+            "name": "storage",
+            "emptyDir": null,
+            "persistentVolumeClaim": {
+              "claimName": "ledger-data"
+            }
+          },
+          {
+            "name": "bootstrap-ledger-data",
+            "persistentVolumeClaim": {
+              "claimName": "ledger-data"
+            }
+          },
+          {
+            "name": "bootstrap-spare-data",
+            "persistentVolumeClaim": {
+              "claimName": "spare-data"
+            }
+          }
+        ]
+      }
+    }
+  }
+}

@@ -1,0 +1,229 @@
+{
+  "schema_version": 1,
+  "id": "daemonset-001",
+  "version": "1.0.0",
+  "title": "Place a node agent with a DaemonSet",
+  "domain": "design-build",
+  "difficulty": "medium",
+  "type": "build",
+  "tags": [
+    "design-build",
+    "daemonset"
+  ],
+  "competencies": [
+    "Design and build workloads with observable application behavior"
+  ],
+  "capabilities": [],
+  "parameters": {
+    "namespace": [
+      "jk-daemonset-001-a",
+      "jk-daemonset-001-b"
+    ]
+  },
+  "namespace": "${namespace}",
+  "budget": {
+    "cpu": "300m",
+    "memory": "160Mi"
+  },
+  "criteria": [
+    {
+      "id": "daemonset",
+      "kind": "resource",
+      "points": 1,
+      "feedback": "Deployment 대신 node-notes DaemonSet을 만드세요.",
+      "target": {
+        "api_version": "apps/v1",
+        "kind": "DaemonSet",
+        "namespace": "${namespace}",
+        "name": "node-notes"
+      }
+    },
+    {
+      "id": "linux-selection",
+      "kind": "field",
+      "points": 1,
+      "feedback": "Linux 선택 조건과 NODE_NAME의 Downward API spec.nodeName 연결을 확인하세요.",
+      "target": {
+        "api_version": "apps/v1",
+        "kind": "DaemonSet",
+        "namespace": "${namespace}",
+        "name": "node-notes"
+      },
+      "args": {
+        "fields": [
+          {
+            "path": "spec.template.spec.nodeSelector['kubernetes.io/os']",
+            "equals": "linux"
+          },
+          {
+            "path": "spec.template.spec.containers[name=agent].env[name=NODE_NAME].valueFrom.fieldRef.fieldPath",
+            "equals": "spec.nodeName"
+          }
+        ]
+      },
+      "depends_on": [
+        "daemonset"
+      ]
+    },
+    {
+      "id": "placed-ready",
+      "kind": "ready",
+      "points": 1,
+      "feedback": "각 대상 노드에 실제 Ready DaemonSet Pod가 필요합니다.",
+      "target": {
+        "api_version": "apps/v1",
+        "kind": "DaemonSet",
+        "namespace": "${namespace}",
+        "name": "node-notes"
+      },
+      "args": {
+        "stable_for": "2s"
+      },
+      "depends_on": [
+        "daemonset",
+        "linux-selection"
+      ],
+      "timeout": "60s"
+    },
+    {
+      "id": "node-output",
+      "kind": "logs",
+      "points": 1,
+      "feedback": "실제 배치된 Pod의 agent가 노드 이름을 출력해야 합니다.",
+      "target": {
+        "api_version": "apps/v1",
+        "kind": "DaemonSet",
+        "namespace": "${namespace}",
+        "name": "node-notes"
+      },
+      "args": {
+        "container": "agent",
+        "contains": [
+          "node="
+        ],
+        "pods": "all",
+        "wait": true,
+        "node_name_prefix": "node="
+      },
+      "depends_on": [
+        "placed-ready"
+      ],
+      "timeout": "30s"
+    }
+  ],
+  "setup": [
+    {
+      "kind": "apply",
+      "args": {
+        "path": "setup/settings.yaml"
+      }
+    }
+  ],
+  "solution": [
+    {
+      "kind": "apply",
+      "args": {
+        "path": "solution/daemonset.yaml"
+      }
+    }
+  ],
+  "initial_expected": {
+    "daemonset": "FAIL",
+    "linux-selection": "FAIL",
+    "placed-ready": "FAIL",
+    "node-output": "FAIL"
+  },
+  "initial_score": 0,
+  "cases": [
+    {
+      "id": "deployment-replacement",
+      "actions": [
+        {
+          "kind": "apply",
+          "args": {
+            "path": "cases/deployment.yaml"
+          }
+        }
+      ],
+      "expected": {
+        "daemonset": "FAIL",
+        "linux-selection": "FAIL",
+        "placed-ready": "FAIL",
+        "node-output": "FAIL"
+      },
+      "expected_score": 0
+    },
+    {
+      "id": "wrong-node-selection",
+      "actions": [
+        {
+          "kind": "apply",
+          "args": {
+            "path": "cases/wrong-selector.yaml"
+          }
+        }
+      ],
+      "expected": {
+        "daemonset": "PASS",
+        "linux-selection": "FAIL",
+        "placed-ready": "FAIL",
+        "node-output": "FAIL"
+      },
+      "expected_score": 1
+    },
+    {
+      "id": "wrong-node-value",
+      "actions": [
+        {
+          "kind": "apply",
+          "args": {
+            "path": "cases/wrong-node-value.yaml"
+          }
+        }
+      ],
+      "expected": {
+        "daemonset": "PASS",
+        "linux-selection": "PASS",
+        "placed-ready": "PASS",
+        "node-output": "FAIL"
+      },
+      "expected_score": 3
+    },
+    {
+      "id": "missing-node-env",
+      "actions": [
+        {
+          "kind": "apply",
+          "args": {
+            "path": "cases/missing-node-env.yaml"
+          }
+        }
+      ],
+      "expected": {
+        "daemonset": "PASS",
+        "linux-selection": "FAIL",
+        "placed-ready": "FAIL",
+        "node-output": "FAIL"
+      },
+      "expected_score": 1
+    },
+    {
+      "id": "alternative-printf",
+      "actions": [
+        {
+          "kind": "apply",
+          "args": {
+            "path": "cases/alternative.yaml"
+          }
+        }
+      ],
+      "expected": {
+        "daemonset": "PASS",
+        "linux-selection": "PASS",
+        "placed-ready": "PASS",
+        "node-output": "PASS"
+      },
+      "expected_score": 4
+    }
+  ]
+}

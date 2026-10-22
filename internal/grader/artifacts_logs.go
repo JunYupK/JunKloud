@@ -26,22 +26,26 @@ import (
 //	              evaluated on every log line that is a JSON object; at least
 //	              min_matches (default 1) lines must satisfy all of them
 //	min_lines:    the log must have at least this many lines
+//	node_name_prefix: a whole log line must equal prefix + the Pod's assigned node
+//	shared_files: optional bounded read-only file proof on a Pod's shared emptyDir
 //
 // The log text is never stored in the evidence (an application may print
 // tokens): evidence names the unmet rules and counts lines. Secret values of
 // the namespace are additionally registered with the redactor.
 type logsArgs struct {
-	Container   string       `json:"container"`
-	Previous    bool         `json:"previous"`
-	TailLines   int64        `json:"tail_lines"`
-	Wait        bool         `json:"wait"`
-	Pods        string       `json:"pods"`
-	Contains    []string     `json:"contains"`
-	NotContains []string     `json:"not_contains"`
-	Matches     []string     `json:"matches"`
-	JSONFields  []fieldInput `json:"json_fields"`
-	MinMatches  int          `json:"min_matches"`
-	MinLines    int          `json:"min_lines"`
+	Container      string           `json:"container"`
+	Previous       bool             `json:"previous"`
+	TailLines      int64            `json:"tail_lines"`
+	Wait           bool             `json:"wait"`
+	Pods           string           `json:"pods"`
+	Contains       []string         `json:"contains"`
+	NotContains    []string         `json:"not_contains"`
+	Matches        []string         `json:"matches"`
+	JSONFields     []fieldInput     `json:"json_fields"`
+	MinMatches     int              `json:"min_matches"`
+	MinLines       int              `json:"min_lines"`
+	NodeNamePrefix string           `json:"node_name_prefix"`
+	SharedFiles    *sharedFilesArgs `json:"shared_files"`
 
 	patterns []*regexp.Regexp
 	reqs     []requirement
@@ -66,6 +70,14 @@ func parseLogsArgs(crit model.Criterion) (logsArgs, error) {
 	}
 	if err := decodeArgs(crit.Args, &a); err != nil {
 		return a, err
+	}
+	if strings.ContainsAny(a.NodeNamePrefix, "\x00\r\n") || len(a.NodeNamePrefix) > 128 {
+		return a, invalidf("args.node_name_prefix must be a bounded single-line prefix")
+	}
+	if a.SharedFiles != nil {
+		if err := validateSharedFiles(crit, a.SharedFiles); err != nil {
+			return a, err
+		}
 	}
 	switch a.Pods {
 	case "":
@@ -101,7 +113,7 @@ func parseLogsArgs(crit model.Criterion) (logsArgs, error) {
 			a.MinMatches = 1
 		}
 	}
-	if len(a.Contains)+len(a.NotContains)+len(a.Matches)+len(a.JSONFields) == 0 && a.MinLines == 0 {
+	if len(a.Contains)+len(a.NotContains)+len(a.Matches)+len(a.JSONFields) == 0 && a.MinLines == 0 && a.NodeNamePrefix == "" && a.SharedFiles == nil {
 		return a, invalidf("logs needs at least one rule (contains, not_contains, matches, json_fields or min_lines)")
 	}
 	return a, nil
@@ -253,6 +265,12 @@ func (c *ArtifactChecker) logsRound(ctx context.Context, ref model.ObjectRef, a 
 			r.missing = append(r.missing, nameOf(p))
 			continue
 		}
+		// Assignment is normal setup convergence. With wait enabled, obtain
+		// a fresh Pod snapshot rather than judging the stale pre-log snapshot.
+		if a.NodeNamePrefix != "" && stringAt(p, "spec", "nodeName") == "" {
+			r.unreadable = append(r.unreadable, p)
+			continue
+		}
 		text, err := c.cfg.Pods.Logs(ctx, ref.Namespace, nameOf(p), container, LogOptions{TailLines: a.TailLines, Previous: a.Previous})
 		if errors.Is(err, ErrContainerNotStarted) {
 			r.unreadable = append(r.unreadable, p)
@@ -262,6 +280,26 @@ func (c *ArtifactChecker) logsRound(ctx context.Context, ref model.ObjectRef, a 
 			return r, target, err
 		}
 		lines, unmet := a.evaluate(text)
+		if a.NodeNamePrefix != "" {
+			node := stringAt(p, "spec", "nodeName")
+			found := false
+			for _, line := range strings.Split(text, "\n") {
+				if strings.TrimSpace(line) == a.NodeNamePrefix+node {
+					found = true
+					break
+				}
+			}
+			if !found {
+				unmet = append(unmet, "log lacks a complete line with the actual assigned node value")
+			}
+		}
+		if a.SharedFiles != nil {
+			missing, err := c.checkSharedFiles(ctx, ref.Namespace, p, a.SharedFiles)
+			if err != nil {
+				return r, target, err
+			}
+			unmet = append(unmet, missing...)
+		}
 		r.reads = append(r.reads, podLog{Pod: nameOf(p), Container: container, Lines: lines, Unmet: unmet, ok: len(unmet) == 0})
 	}
 	switch a.Pods {

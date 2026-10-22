@@ -1,0 +1,68 @@
+{
+  "apiVersion": "apps/v1",
+  "kind": "Deployment",
+  "metadata": {
+    "name": "overlay-web",
+    "namespace": "${namespace}"
+  },
+  "spec": {
+    "replicas": 1,
+    "selector": {
+      "matchLabels": {
+        "app": "overlay"
+      }
+    },
+    "template": {
+      "metadata": {
+        "labels": {
+          "app": "overlay"
+        }
+      },
+      "spec": {
+        "containers": [
+          {
+            "name": "web",
+            "image": "docker.io/library/busybox:1.37.0",
+            "imagePullPolicy": "Never",
+            "command": [
+              "sh",
+              "-c",
+              "printf \"message=%s\\n\" \"$MESSAGE\"; exec sleep 3600"
+            ],
+            "env": [
+              {
+                "name": "MESSAGE",
+                "valueFrom": {
+                  "configMapKeyRef": {
+                    "name": "overlay-settings",
+                    "key": "message"
+                  }
+                }
+              }
+            ],
+            "resources": {
+              "requests": {
+                "cpu": "10m",
+                "memory": "8Mi"
+              },
+              "limits": {
+                "cpu": "100m",
+                "memory": "32Mi"
+              }
+            },
+            "readinessProbe": {
+              "exec": {
+                "command": [
+                  "sh",
+                  "-c",
+                  "true"
+                ]
+              },
+              "periodSeconds": 1
+            }
+          }
+        ]
+      }
+    }
+  }
+}

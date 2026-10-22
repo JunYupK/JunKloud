@@ -21,4 +21,6 @@ package grader
 // or performance changes that cannot alter a verdict. When in doubt, bump:
 // a needless bump costs one re-validation, a missed one lets a certificate
 // vouch for behaviour it never saw.
-const GraderVersion = "grader-2"
+// grader-8 includes the shared local Kustomize guard policy, deterministic
+// endpoint membership, and exact native probe UID observation/cleanup.
+const GraderVersion = "grader-8"

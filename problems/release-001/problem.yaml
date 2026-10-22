@@ -1,0 +1,329 @@
+{
+  "schema_version": 1,
+  "id": "release-001",
+  "version": "1.0.0",
+  "title": "Expose stable and canary release backends",
+  "domain": "deployment",
+  "difficulty": "medium",
+  "type": "build",
+  "tags": [
+    "deployment",
+    "release"
+  ],
+  "competencies": [
+    "Deploy applications with observable release and rollout goals"
+  ],
+  "capabilities": [],
+  "parameters": {
+    "namespace": [
+      "jk-release-001-a",
+      "jk-release-001-b"
+    ]
+  },
+  "namespace": "${namespace}",
+  "budget": {
+    "cpu": "500m",
+    "memory": "192Mi"
+  },
+  "criteria": [
+    {
+      "id": "stable-config",
+      "kind": "field",
+      "points": 1,
+      "feedback": "stable Deployment의 replica, image, app/track label과 RELEASE 값을 확인하세요.",
+      "target": {
+        "api_version": "apps/v1",
+        "kind": "Deployment",
+        "namespace": "${namespace}",
+        "name": "stable"
+      },
+      "args": {
+        "fields": [
+          {
+            "path": "spec.replicas",
+            "equals": 1
+          },
+          {
+            "path": "spec.template.spec.containers[name=web].image",
+            "equals": "docker.io/library/busybox:1.37.0"
+          },
+          {
+            "path": "spec.template.spec.containers[name=web].env[name=RELEASE].value",
+            "equals": "STABLE"
+          },
+          {
+            "path": "spec.template.metadata.labels.app",
+            "equals": "release"
+          },
+          {
+            "path": "spec.template.metadata.labels.track",
+            "equals": "stable"
+          }
+        ]
+      }
+    },
+    {
+      "id": "stable-ready",
+      "kind": "ready",
+      "points": 1,
+      "feedback": "stable Deployment의 현재 replica가 안정적으로 Ready이어야 합니다.",
+      "target": {
+        "api_version": "apps/v1",
+        "kind": "Deployment",
+        "namespace": "${namespace}",
+        "name": "stable"
+      },
+      "args": {
+        "replicas": 1
+      },
+      "depends_on": [
+        "stable-config"
+      ],
+      "timeout": "60s"
+    },
+    {
+      "id": "canary-config",
+      "kind": "field",
+      "points": 1,
+      "feedback": "canary Deployment의 replica, image, app/track label과 RELEASE 값을 확인하세요.",
+      "target": {
+        "api_version": "apps/v1",
+        "kind": "Deployment",
+        "namespace": "${namespace}",
+        "name": "canary"
+      },
+      "args": {
+        "fields": [
+          {
+            "path": "spec.replicas",
+            "equals": 1
+          },
+          {
+            "path": "spec.template.spec.containers[name=web].image",
+            "equals": "docker.io/library/busybox:1.37.0"
+          },
+          {
+            "path": "spec.template.spec.containers[name=web].env[name=RELEASE].value",
+            "equals": "CANARY"
+          },
+          {
+            "path": "spec.template.metadata.labels.app",
+            "equals": "release"
+          },
+          {
+            "path": "spec.template.metadata.labels.track",
+            "equals": "canary"
+          }
+        ]
+      }
+    },
+    {
+      "id": "canary-ready",
+      "kind": "ready",
+      "points": 1,
+      "feedback": "canary Deployment의 현재 replica가 안정적으로 Ready이어야 합니다.",
+      "target": {
+        "api_version": "apps/v1",
+        "kind": "Deployment",
+        "namespace": "${namespace}",
+        "name": "canary"
+      },
+      "args": {
+        "replicas": 1
+      },
+      "depends_on": [
+        "canary-config"
+      ],
+      "timeout": "60s"
+    },
+    {
+      "id": "both-backends",
+      "kind": "endpoint-membership",
+      "points": 1,
+      "feedback": "Service가 stable/canary 양쪽의 실제 Ready endpoint를 포함하고 각각 올바른 HTTP 본문을 반환해야 합니다.",
+      "target": {
+        "api_version": "v1",
+        "kind": "Service",
+        "namespace": "${namespace}",
+        "name": "release"
+      },
+      "args": {
+        "source": {
+          "labels": {
+            "role": "release-client"
+          }
+        },
+        "port": 80,
+        "path": "/",
+        "backends": [
+          {
+            "deployment": "stable",
+            "body_marker": "STABLE"
+          },
+          {
+            "deployment": "canary",
+            "body_marker": "CANARY"
+          }
+        ]
+      },
+      "depends_on": [
+        "stable-ready",
+        "canary-ready"
+      ],
+      "timeout": "90s"
+    }
+  ],
+  "setup": [
+    {
+      "kind": "apply",
+      "args": {
+        "path": "setup/stable.yaml"
+      }
+    }
+  ],
+  "solution": [
+    {
+      "kind": "apply",
+      "args": {
+        "path": "solution/release.yaml"
+      }
+    }
+  ],
+  "initial_expected": {
+    "stable-config": "PASS",
+    "stable-ready": "PASS",
+    "canary-config": "FAIL",
+    "canary-ready": "FAIL",
+    "both-backends": "FAIL"
+  },
+  "initial_score": 2,
+  "cases": [
+    {
+      "id": "missing-stable",
+      "actions": [
+        {
+          "kind": "delete-owned",
+          "args": {
+            "targets": [
+              {
+                "api_version": "apps/v1",
+                "kind": "Deployment",
+                "namespace": "${namespace}",
+                "name": "stable"
+              }
+            ]
+          }
+        },
+        {
+          "kind": "apply",
+          "args": {
+            "path": "cases/missing-stable.yaml"
+          }
+        }
+      ],
+      "expected": {
+        "stable-config": "FAIL",
+        "stable-ready": "FAIL",
+        "canary-config": "PASS",
+        "canary-ready": "PASS",
+        "both-backends": "FAIL"
+      },
+      "expected_score": 2
+    },
+    {
+      "id": "missing-canary",
+      "actions": [
+        {
+          "kind": "apply",
+          "args": {
+            "path": "cases/missing-canary.yaml"
+          }
+        }
+      ],
+      "expected": {
+        "stable-config": "PASS",
+        "stable-ready": "PASS",
+        "canary-config": "FAIL",
+        "canary-ready": "FAIL",
+        "both-backends": "FAIL"
+      },
+      "expected_score": 2
+    },
+    {
+      "id": "stable-only-selector",
+      "actions": [
+        {
+          "kind": "apply",
+          "args": {
+            "path": "cases/stable-only-selector.yaml"
+          }
+        }
+      ],
+      "expected": {
+        "stable-config": "PASS",
+        "stable-ready": "PASS",
+        "canary-config": "PASS",
+        "canary-ready": "PASS",
+        "both-backends": "FAIL"
+      },
+      "expected_score": 4
+    },
+    {
+      "id": "canary-only-selector",
+      "actions": [
+        {
+          "kind": "apply",
+          "args": {
+            "path": "cases/canary-only-selector.yaml"
+          }
+        }
+      ],
+      "expected": {
+        "stable-config": "PASS",
+        "stable-ready": "PASS",
+        "canary-config": "PASS",
+        "canary-ready": "PASS",
+        "both-backends": "FAIL"
+      },
+      "expected_score": 4
+    },
+    {
+      "id": "wrong-canary-body",
+      "actions": [
+        {
+          "kind": "apply",
+          "args": {
+            "path": "cases/wrong-canary-body.yaml"
+          }
+        }
+      ],
+      "expected": {
+        "stable-config": "PASS",
+        "stable-ready": "PASS",
+        "canary-config": "PASS",
+        "canary-ready": "PASS",
+        "both-backends": "FAIL"
+      },
+      "expected_score": 4
+    },
+    {
+      "id": "alternative-selector",
+      "actions": [
+        {
+          "kind": "apply",
+          "args": {
+            "path": "cases/alternative-selector.yaml"
+          }
+        }
+      ],
+      "expected": {
+        "stable-config": "PASS",
+        "stable-ready": "PASS",
+        "canary-config": "PASS",
+        "canary-ready": "PASS",
+        "both-backends": "PASS"
+      },
+      "expected_score": 5
+    }
+  ]
+}

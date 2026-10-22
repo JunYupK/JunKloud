@@ -1,0 +1,5 @@
+Deploy the supplied local `chart/` in `${namespace}` as native Helm release `parcel`, with chart identity `parcel-chart` version `0.1.0` and deployed status. All objects in its release manifest must exist with that release ownership. Use effective values `replicas: 2` and `message: parcel-ready`; values files and equivalent Helm install/upgrade commands are accepted.
+
+The resulting apps/v1 Deployment `parcel-web` must have exactly 2 replicas, container `web`, provided image `docker.io/library/busybox:1.37.0`, and environment variable `MESSAGE=parcel-ready`. It must complete the current rollout and remain Ready without restart for 10 seconds, within a 60-second observation limit. Every selected web Pod must print a complete `message=parcel-ready` log line.
+
+Native release/chart/ownership, effective values, live Deployment goal, stable readiness, and actual output each earn 1 point. Applying a rendered manifest alone cannot prove a Helm release or release values. Only notes and chart files exist initially, for 0/5. No external repository is needed.

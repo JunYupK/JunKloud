@@ -76,6 +76,7 @@ func TestPrepareHidesQuestions(t *testing.T) {
 		testutil.Equal(t, len(entries), 0)
 	}
 	for _, tgt := range h.eng.targets {
+		testutil.Equal(t, tgt.SessionID, prepared.ID)
 		if strings.HasPrefix(tgt.Workspace, h.workspace) {
 			t.Errorf("evaluated inside the learner workspace: %s", tgt.Workspace)
 		}
@@ -580,7 +581,7 @@ func TestPrepareRejectsBadOptions(t *testing.T) {
 		})
 	}
 	_, err := h.svc.Prepare(ctx, session.StartOptions{Mode: model.ModeRetry, RetrySessionID: "practice-1"})
-	testutil.ErrorIs(t, err, session.ErrRetryUnavailable)
+	testutil.ErrorIs(t, err, store.ErrNotFound)
 
 	// An exam naming a problem the bank lacks is refused, not shortened.
 	exam := filepath.Join(h.bank, "exams", "dev-mock.yaml")

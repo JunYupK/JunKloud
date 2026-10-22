@@ -55,6 +55,15 @@ var manifest = map[string]string{
 	"probe-image": "docker.io/library/busybox:1.37.0@sha256:bb",
 }
 
+// The Task15 shared Kustomize guard and native membership/probe semantics
+// cannot reuse certificates issued under grader-7.
+func TestTask15InvalidatesGrader7Certificates(t *testing.T) {
+	old := passedRecord("problem", "grader-7", "environment")
+	if author.CertificateMatches(old, "problem", grader.GraderVersion, "environment") {
+		t.Fatal("grader-7 certificate accepted after Task15 semantics change")
+	}
+}
+
 func TestEnvironmentHash(t *testing.T) {
 	base := author.EnvironmentHash(manifest)
 	if len(base) != len("sha256:")+64 || base[:7] != "sha256:" {
@@ -176,4 +185,32 @@ func TestCurrentCertificate(t *testing.T) {
 	_, ok, err = author.CurrentCertificate(ctx, memCertificates{s}, "sha256:aaa", grader.GraderVersion, envHash)
 	testutil.NoError(t, err)
 	testutil.Equal(t, ok, false)
+}
+
+func TestVolumeSemanticsInvalidateImageCertificates(t *testing.T) {
+	record := passedRecord("sha256:volume", "grader-3", "env")
+	if author.CertificateMatches(record, "sha256:volume", grader.GraderVersion, "env") {
+		t.Fatal("pre-volume grader certificate is still current")
+	}
+}
+
+func TestCronSuccessSemanticsInvalidateVolumeCertificates(t *testing.T) {
+	record := passedRecord("sha256:batch", "grader-4", "env")
+	if author.CertificateMatches(record, "sha256:batch", grader.GraderVersion, "env") {
+		t.Fatal("pre-scheduled-success grader certificate is still current")
+	}
+}
+
+func TestLogBehaviorSemanticsInvalidateScheduleCertificates(t *testing.T) {
+	record := passedRecord("sha256:logs", "grader-5", "env")
+	if author.CertificateMatches(record, "sha256:logs", grader.GraderVersion, "env") {
+		t.Fatal("pre-shared-file/node behavior certificate is still current")
+	}
+}
+
+func TestResolvedMountSemanticsInvalidatePriorLogCertificates(t *testing.T) {
+	record := passedRecord("sha256:resolved-mount", "grader-6", "env")
+	if author.CertificateMatches(record, "sha256:resolved-mount", grader.GraderVersion, "env") {
+		t.Fatal("pre-resolved-mount log certificate is still current")
+	}
 }

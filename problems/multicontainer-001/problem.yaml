@@ -1,0 +1,257 @@
+{
+  "schema_version": 1,
+  "id": "multicontainer-001",
+  "version": "1.0.0",
+  "title": "Connect an init container, sidecar and application with temporary storage",
+  "domain": "design-build",
+  "difficulty": "medium",
+  "type": "build",
+  "tags": [
+    "design-build",
+    "multicontainer"
+  ],
+  "competencies": [
+    "Design and build workloads with observable application behavior"
+  ],
+  "capabilities": [],
+  "parameters": {
+    "namespace": [
+      "jk-multicontainer-001-a",
+      "jk-multicontainer-001-b"
+    ]
+  },
+  "namespace": "${namespace}",
+  "budget": {
+    "cpu": "300m",
+    "memory": "160Mi"
+  },
+  "criteria": [
+    {
+      "id": "pod",
+      "kind": "resource",
+      "points": 1,
+      "feedback": "relay Pod를 만드세요.",
+      "target": {
+        "api_version": "v1",
+        "kind": "Pod",
+        "namespace": "${namespace}",
+        "name": "relay"
+      }
+    },
+    {
+      "id": "shared-layout",
+      "kind": "field",
+      "points": 1,
+      "feedback": "완료한 seed init과 실제 shared emptyDir mount 관계를 확인하세요.",
+      "target": {
+        "api_version": "v1",
+        "kind": "Pod",
+        "namespace": "${namespace}",
+        "name": "relay"
+      },
+      "args": {
+        "fields": [
+          {
+            "path": "spec.volumes[name=shared].emptyDir",
+            "exists": true
+          },
+          {
+            "path": "spec.initContainers[name=seed].volumeMounts[name=shared].mountPath",
+            "equals": "/work"
+          },
+          {
+            "path": "spec.containers[name=app].volumeMounts[name=shared].mountPath",
+            "equals": "/work"
+          },
+          {
+            "path": "spec.containers[name=sidecar].volumeMounts[name=shared].mountPath",
+            "equals": "/work"
+          },
+          {
+            "path": "status.initContainerStatuses[name=seed].state.terminated.exitCode",
+            "equals": 0
+          }
+        ],
+        "wait": true
+      },
+      "depends_on": [
+        "pod"
+      ],
+      "timeout": "60s"
+    },
+    {
+      "id": "ready",
+      "kind": "ready",
+      "points": 1,
+      "feedback": "app과 sidecar가 실제 실행되어 안정적인 Ready 상태여야 합니다.",
+      "target": {
+        "api_version": "v1",
+        "kind": "Pod",
+        "namespace": "${namespace}",
+        "name": "relay"
+      },
+      "args": {
+        "stable_for": "2s"
+      },
+      "depends_on": [
+        "pod"
+      ],
+      "timeout": "60s"
+    },
+    {
+      "id": "shared-behavior",
+      "kind": "logs",
+      "points": 1,
+      "feedback": "app이 init → sidecar → app 공유 파일의 delivered:seeded 결과를 읽어야 합니다.",
+      "target": {
+        "api_version": "v1",
+        "kind": "Pod",
+        "namespace": "${namespace}",
+        "name": "relay"
+      },
+      "args": {
+        "container": "app",
+        "contains": [
+          "delivered:seeded"
+        ],
+        "wait": true,
+        "shared_files": {
+          "volume": "shared",
+          "containers": [
+            "app",
+            "sidecar"
+          ],
+          "files": [
+            {
+              "path": "/work/message",
+              "equals": "seeded"
+            },
+            {
+              "path": "/work/ack",
+              "equals": "delivered:seeded"
+            }
+          ]
+        }
+      },
+      "depends_on": [
+        "ready"
+      ],
+      "timeout": "15s"
+    }
+  ],
+  "setup": [
+    {
+      "kind": "apply",
+      "args": {
+        "path": "setup/settings.yaml"
+      }
+    }
+  ],
+  "solution": [
+    {
+      "kind": "apply",
+      "args": {
+        "path": "solution/relay.yaml"
+      }
+    }
+  ],
+  "initial_expected": {
+    "pod": "FAIL",
+    "shared-layout": "FAIL",
+    "ready": "FAIL",
+    "shared-behavior": "FAIL"
+  },
+  "initial_score": 0,
+  "cases": [
+    {
+      "id": "isolated-sidecar",
+      "actions": [
+        {
+          "kind": "apply",
+          "args": {
+            "path": "cases/isolated.yaml"
+          }
+        }
+      ],
+      "expected": {
+        "pod": "PASS",
+        "shared-layout": "FAIL",
+        "ready": "PASS",
+        "shared-behavior": "FAIL"
+      },
+      "expected_score": 2
+    },
+    {
+      "id": "wrong-shared-data",
+      "actions": [
+        {
+          "kind": "apply",
+          "args": {
+            "path": "cases/wrong-data.yaml"
+          }
+        }
+      ],
+      "expected": {
+        "pod": "PASS",
+        "shared-layout": "PASS",
+        "ready": "PASS",
+        "shared-behavior": "FAIL"
+      },
+      "expected_score": 3
+    },
+    {
+      "id": "phony-log-no-files",
+      "actions": [
+        {
+          "kind": "apply",
+          "args": {
+            "path": "cases/phony-log.yaml"
+          }
+        }
+      ],
+      "expected": {
+        "pod": "PASS",
+        "shared-layout": "PASS",
+        "ready": "PASS",
+        "shared-behavior": "FAIL"
+      },
+      "expected_score": 3
+    },
+    {
+      "id": "nested-private-symlinks",
+      "actions": [
+        {
+          "kind": "apply",
+          "args": {
+            "path": "cases/nested-private-symlinks.yaml"
+          }
+        }
+      ],
+      "expected": {
+        "pod": "PASS",
+        "shared-layout": "PASS",
+        "ready": "PASS",
+        "shared-behavior": "FAIL"
+      },
+      "expected_score": 3
+    },
+    {
+      "id": "alternative-file-tools",
+      "actions": [
+        {
+          "kind": "apply",
+          "args": {
+            "path": "cases/alternative.yaml"
+          }
+        }
+      ],
+      "expected": {
+        "pod": "PASS",
+        "shared-layout": "PASS",
+        "ready": "PASS",
+        "shared-behavior": "PASS"
+      },
+      "expected_score": 4
+    }
+  ]
+}

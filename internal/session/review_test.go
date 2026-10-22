@@ -164,14 +164,15 @@ func TestPracticeProblemRetry(t *testing.T) {
 	testutil.Equal(t, next.SubmissionID == retried.SubmissionID, false)
 }
 
-// TestReviewNotYetSupported: reviewing an abandoned session belongs to the
-// reset task; until then it is a clear error, never a silent disclosure.
-func TestReviewNotYetSupported(t *testing.T) {
+// Abandonment explicitly switches a mock exam into archival review.
+func TestAbandonedSessionMayReviewButCannotGrade(t *testing.T) {
 	h := newHarness(t)
 	id := h.startedMock()
 	testutil.NoError(t, h.st.Transition(ctx, id, model.StateRunning, model.StateAbandoned))
-	_, err := h.svc.Review(ctx, id, h.frozenIDs(id)[0], true)
-	testutil.ErrorIs(t, err, session.ErrReviewUnsupported)
+	rv, err := h.svc.Review(ctx, id, h.frozenIDs(id)[0], true)
+	testutil.NoError(t, err)
+	testutil.Equal(t, rv.SolutionViewed, true)
+	testutil.Equal(t, rv.Confirmed, (*model.GradingRun)(nil))
 	_, err = h.svc.Grade(ctx, id, session.GradeOptions{At: at(10, 0)})
 	testutil.ErrorIs(t, err, session.ErrNotRunning)
 }

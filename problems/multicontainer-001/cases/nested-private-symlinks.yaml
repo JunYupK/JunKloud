@@ -1,0 +1,115 @@
+{
+  "apiVersion": "v1",
+  "kind": "Pod",
+  "metadata": {
+    "name": "relay",
+    "namespace": "${namespace}"
+  },
+  "spec": {
+    "restartPolicy": "Always",
+    "initContainers": [
+      {
+        "name": "seed",
+        "image": "docker.io/library/busybox:1.37.0",
+        "imagePullPolicy": "Never",
+        "command": [
+          "sh",
+          "-c",
+          "mkdir -p /work/private; ln -s private/message /work/message; ln -s private/ack /work/ack"
+        ],
+        "resources": {
+          "requests": {
+            "cpu": "10m",
+            "memory": "8Mi"
+          },
+          "limits": {
+            "cpu": "75m",
+            "memory": "32Mi"
+          }
+        },
+        "volumeMounts": [
+          {
+            "name": "shared",
+            "mountPath": "/work"
+          }
+        ]
+      }
+    ],
+    "containers": [
+      {
+        "name": "app",
+        "image": "docker.io/library/busybox:1.37.0",
+        "imagePullPolicy": "Never",
+        "command": [
+          "sh",
+          "-c",
+          "echo seeded > /work/private/message; echo delivered:seeded > /work/private/ack; echo delivered:seeded; sleep 3600"
+        ],
+        "resources": {
+          "requests": {
+            "cpu": "10m",
+            "memory": "8Mi"
+          },
+          "limits": {
+            "cpu": "75m",
+            "memory": "32Mi"
+          }
+        },
+        "volumeMounts": [
+          {
+            "name": "shared",
+            "mountPath": "/work"
+          },
+          {
+            "name": "private-app",
+            "mountPath": "/work/private"
+          }
+        ]
+      },
+      {
+        "name": "sidecar",
+        "image": "docker.io/library/busybox:1.37.0",
+        "imagePullPolicy": "Never",
+        "command": [
+          "sh",
+          "-c",
+          "echo seeded > /work/private/message; echo delivered:seeded > /work/private/ack; echo delivered:seeded; sleep 3600"
+        ],
+        "resources": {
+          "requests": {
+            "cpu": "10m",
+            "memory": "8Mi"
+          },
+          "limits": {
+            "cpu": "75m",
+            "memory": "32Mi"
+          }
+        },
+        "volumeMounts": [
+          {
+            "name": "shared",
+            "mountPath": "/work"
+          },
+          {
+            "name": "private-sidecar",
+            "mountPath": "/work/private"
+          }
+        ]
+      }
+    ],
+    "volumes": [
+      {
+        "name": "shared",
+        "emptyDir": {}
+      },
+      {
+        "name": "private-app",
+        "emptyDir": {}
+      },
+      {
+        "name": "private-sidecar",
+        "emptyDir": {}
+      }
+    ]
+  }
+}

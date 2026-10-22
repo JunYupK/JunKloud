@@ -108,7 +108,7 @@
           "enum": [
             "resource", "field", "ready", "http", "tcp", "network-policy", "file", "image",
             "helm", "kustomize", "logs", "job", "cronjob-template", "cronjob-schedule",
-            "authorization", "security-context"
+            "authorization", "security-context", "volume-persistence", "endpoint-membership"
           ]
         },
         "target": { "$ref": "#/$defs/object_ref" },
@@ -123,7 +123,7 @@
       "additionalProperties": false,
       "required": ["kind"],
       "properties": {
-        "kind": { "enum": ["apply", "delete-owned", "helm", "image", "file", "patch"] },
+        "kind": { "enum": ["apply", "delete-owned", "helm", "kustomize", "image", "file", "patch"] },
         "args": { "type": "object" }
       }
     },

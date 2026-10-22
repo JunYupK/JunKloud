@@ -5,7 +5,9 @@ package session
 import (
 	"context"
 	"fmt"
+	"path/filepath"
 	"slices"
+	"strconv"
 	"strings"
 	"time"
 
@@ -15,10 +17,11 @@ import (
 // history is everything recorded about the grading of a session, in the
 // order it was recorded.
 type history struct {
-	subs    []model.Submission
-	runs    map[string][]model.GradingRun // by submission ID
-	reviews []model.ReviewEvent
-	ops     []model.Operation // the session's grading operations, oldest first
+	subs     []model.Submission
+	runs     map[string][]model.GradingRun // by submission ID
+	reviews  []model.ReviewEvent
+	ops      []model.Operation // the session's grading operations, oldest first
+	attempts map[string]int    // minimum attempt published by a completed reset
 }
 
 func (s *Service) loadHistory(ctx context.Context, sessionID string) (history, error) {
@@ -44,7 +47,33 @@ func (s *Service) loadHistory(ctx context.Context, sessionID string) (history, e
 			h.ops = append(h.ops, op)
 		}
 	}
+	resets, err := s.cfg.Store.ListOperations(ctx, ResetOperationKind)
+	if err != nil {
+		return history{}, err
+	}
+	h.attempts = map[string]int{}
+	for _, op := range resets {
+		if op.SessionID != sessionID || op.Phase != PhaseDone || op.Planned.ProblemID == "" || len(op.Planned.ArtifactPaths) != 1 {
+			continue
+		}
+		name := filepath.Base(op.Planned.ArtifactPaths[0])
+		n, err := strconv.Atoi(strings.TrimPrefix(name, attemptPrefix))
+		if err == nil && n > h.attempts[op.Planned.ProblemID] {
+			h.attempts[op.Planned.ProblemID] = n
+		}
+	}
 	return h, nil
+}
+
+func (h history) currentAttempt(problemID string) int { return max(1, h.attempts[problemID]) }
+func (h history) currentSubmission(sub model.Submission, problemID string) bool {
+	attempt := 1
+	for _, op := range h.ops {
+		if strings.HasPrefix(op.ID, GradeOperationID(sub.ID+"-run-")) {
+			attempt = max(attempt, op.Planned.Attempts[problemID])
+		}
+	}
+	return attempt >= h.currentAttempt(problemID)
 }
 
 // inScope returns the submissions of one scope: a problem of a practice
@@ -273,6 +302,11 @@ func (s *Service) planGrade(rec model.SessionRecord, hist history, opts GradeOpt
 			return gradePlan{}, fmt.Errorf("%w: a problem is graded alone while the practice session is running, this one is %s", ErrNotRunning, rec.State)
 		}
 		switch {
+		case latest != nil && !hist.currentSubmission(*latest, scope):
+			if opts.Retry {
+				return gradePlan{}, fmt.Errorf("%w: %s was reset into a new attempt; submit it with %s", ErrAnswerChanged, scope, gradeCommand(scope))
+			}
+			return resubmit(model.StateRunning, model.StateRunning), nil
 		case opts.Retry:
 			if !unresolved {
 				return gradePlan{}, fmt.Errorf("%w: %s has no incomplete grade", ErrNothingToRetry, scope)

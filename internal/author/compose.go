@@ -234,6 +234,17 @@ func (c GraderConfig) providedNames() []string {
 	return names
 }
 
+// validationImageReferences includes pinned build bases as well as native Pod
+// aliases. The ready probe still receives only providedNames: importing the
+// native archive does not preserve its multi-architecture digest as a Pod alias.
+func (c GraderConfig) validationImageReferences() []string {
+	var refs []string
+	for _, img := range c.ProvidedImages() {
+		refs = append(refs, img.Name, img.Ref())
+	}
+	return refs
+}
+
 // The real implementations of the Validator's seams.
 var (
 	_ Applier   = (*environment.Manager)(nil)
@@ -345,15 +356,18 @@ func NewRuntime(ctx context.Context, m *environment.Manager, st *store.Store, id
 	if err != nil {
 		return nil, err
 	}
-	j, err := NewClusterJanitor(m.KubeconfigPath(), id.Context, janitor...)
+	j := environment.ManagedJanitor{Manager: m, Identity: id, Options: janitor}
+	reader, err := grader.NewClusterReader(m.KubeconfigPath(), id.Context)
 	if err != nil {
 		g.Close()
 		return nil, err
 	}
+	toolConfig := ToolActionConfig{Tools: cfg.tools(), Reader: reader, KubeconfigPath: m.KubeconfigPath(), Context: id.Context}
 	v, err := NewValidator(Config{
 		Identity: id, Env: m, Janitor: j, Engine: g.Engine, Store: st,
+		Actions:  NewActionExecutorWithTools(m, m, toolConfig, cfg.ProvidedImages()...),
 		LockPath: LockPath(cfg.StateDir), GraderVersion: grader.GraderVersion, EnvironmentHash: envHash,
-		ProvidedImages: cfg.providedNames(),
+		ProvidedImages: cfg.validationImageReferences(),
 		Prepare:        func(ctx context.Context) error { return PrepareEnvironment(ctx, m, id, cfg.Images) },
 		ScratchDir:     filepath.Join(cfg.StateDir, "validate"),
 	})

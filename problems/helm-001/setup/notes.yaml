@@ -1,0 +1,11 @@
+{
+  "apiVersion": "v1",
+  "kind": "ConfigMap",
+  "metadata": {
+    "name": "exercise-notes",
+    "namespace": "${namespace}"
+  },
+  "data": {
+    "task": "Install the supplied local chart."
+  }
+}

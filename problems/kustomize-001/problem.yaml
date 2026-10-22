@@ -1,0 +1,344 @@
+{
+  "schema_version": 1,
+  "id": "kustomize-001",
+  "version": "1.0.0",
+  "title": "Customize and deploy an overlay without editing its base",
+  "domain": "deployment",
+  "difficulty": "medium",
+  "type": "build",
+  "tags": [
+    "deployment",
+    "kustomize"
+  ],
+  "competencies": [
+    "Deploy applications with observable release and rollout goals"
+  ],
+  "capabilities": [],
+  "parameters": {
+    "namespace": [
+      "jk-kustomize-001-a",
+      "jk-kustomize-001-b"
+    ]
+  },
+  "namespace": "${namespace}",
+  "budget": {
+    "cpu": "500m",
+    "memory": "192Mi"
+  },
+  "criteria": [
+    {
+      "id": "base-intact",
+      "kind": "kustomize",
+      "points": 1,
+      "feedback": "제공된 base 파일을 그대로 유지하고 overlay가 base를 참조해야 합니다.",
+      "args": {
+        "path": "overlay",
+        "base": {
+          "path": "base",
+          "protect": true,
+          "uses": true
+        },
+        "live": false
+      }
+    },
+    {
+      "id": "deployment-render",
+      "kind": "kustomize",
+      "points": 1,
+      "feedback": "overlay render의 Deployment replicas=2와 제공 image를 확인하세요.",
+      "args": {
+        "path": "overlay",
+        "expect": [
+          {
+            "api_version": "apps/v1",
+            "kind": "Deployment",
+            "name": "overlay-web",
+            "namespace": "${namespace}",
+            "fields": [
+              {
+                "path": "spec.replicas",
+                "equals": 2
+              },
+              {
+                "path": "spec.template.spec.containers[name=web].image",
+                "equals": "docker.io/library/busybox:1.37.0"
+              }
+            ]
+          }
+        ],
+        "live": false
+      }
+    },
+    {
+      "id": "config-render",
+      "kind": "kustomize",
+      "points": 1,
+      "feedback": "overlay render의 ConfigMap message=overlay-ready를 확인하세요.",
+      "args": {
+        "path": "overlay",
+        "expect": [
+          {
+            "api_version": "v1",
+            "kind": "ConfigMap",
+            "name": "overlay-settings",
+            "namespace": "${namespace}",
+            "fields": [
+              {
+                "path": "data.message",
+                "equals": "overlay-ready"
+              }
+            ]
+          }
+        ],
+        "live": false
+      }
+    },
+    {
+      "id": "render-live",
+      "kind": "kustomize",
+      "points": 1,
+      "feedback": "요구 overlay render와 실제 Deployment/ConfigMap 내용이 일치해야 합니다.",
+      "args": {
+        "path": "overlay",
+        "expect": [
+          {
+            "api_version": "apps/v1",
+            "kind": "Deployment",
+            "name": "overlay-web",
+            "namespace": "${namespace}",
+            "fields": [
+              {
+                "path": "spec.replicas",
+                "equals": 2
+              },
+              {
+                "path": "spec.template.spec.containers[name=web].image",
+                "equals": "docker.io/library/busybox:1.37.0"
+              }
+            ]
+          },
+          {
+            "api_version": "v1",
+            "kind": "ConfigMap",
+            "name": "overlay-settings",
+            "namespace": "${namespace}",
+            "fields": [
+              {
+                "path": "data.message",
+                "equals": "overlay-ready"
+              }
+            ]
+          }
+        ],
+        "live": true
+      }
+    },
+    {
+      "id": "ready",
+      "kind": "ready",
+      "points": 1,
+      "feedback": "overlay-web의 현재 2개 replica가 안정적으로 Ready이어야 합니다.",
+      "target": {
+        "api_version": "apps/v1",
+        "kind": "Deployment",
+        "namespace": "${namespace}",
+        "name": "overlay-web"
+      },
+      "args": {
+        "replicas": 2
+      },
+      "timeout": "60s"
+    }
+  ],
+  "setup": [
+    {
+      "kind": "apply",
+      "args": {
+        "path": "setup/notes.yaml"
+      }
+    }
+  ],
+  "solution": [
+    {
+      "kind": "file",
+      "args": {
+        "source": "solution/settings.yaml",
+        "path": "overlay/settings.yaml"
+      }
+    },
+    {
+      "kind": "file",
+      "args": {
+        "source": "solution/kustomization.yaml",
+        "path": "overlay/kustomization.yaml"
+      }
+    },
+    {
+      "kind": "kustomize",
+      "args": {
+        "path": "overlay"
+      }
+    }
+  ],
+  "initial_expected": {
+    "base-intact": "PASS",
+    "deployment-render": "FAIL",
+    "config-render": "FAIL",
+    "render-live": "FAIL",
+    "ready": "FAIL"
+  },
+  "initial_score": 1,
+  "cases": [
+    {
+      "id": "changed-base",
+      "actions": [
+        {
+          "kind": "file",
+          "args": {
+            "source": "cases/changed-base.yaml",
+            "path": "base/settings.yaml"
+          }
+        },
+        {
+          "kind": "file",
+          "args": {
+            "source": "solution/settings.yaml",
+            "path": "overlay/settings.yaml"
+          }
+        },
+        {
+          "kind": "file",
+          "args": {
+            "source": "solution/kustomization.yaml",
+            "path": "overlay/kustomization.yaml"
+          }
+        },
+        {
+          "kind": "kustomize",
+          "args": {
+            "path": "overlay"
+          }
+        }
+      ],
+      "expected": {
+        "base-intact": "FAIL",
+        "deployment-render": "PASS",
+        "config-render": "PASS",
+        "render-live": "PASS",
+        "ready": "PASS"
+      },
+      "expected_score": 4
+    },
+    {
+      "id": "base-bypass",
+      "actions": [
+        {
+          "kind": "file",
+          "args": {
+            "source": "solution/settings.yaml",
+            "path": "overlay/settings.yaml"
+          }
+        },
+        {
+          "kind": "file",
+          "args": {
+            "source": "cases/bypass-kustomization.yaml",
+            "path": "overlay/kustomization.yaml"
+          }
+        },
+        {
+          "kind": "kustomize",
+          "args": {
+            "path": "overlay"
+          }
+        }
+      ],
+      "expected": {
+        "base-intact": "FAIL",
+        "deployment-render": "PASS",
+        "config-render": "PASS",
+        "render-live": "PASS",
+        "ready": "PASS"
+      },
+      "expected_score": 4
+    },
+    {
+      "id": "raw-apply",
+      "actions": [
+        {
+          "kind": "apply",
+          "args": {
+            "path": "cases/raw.yaml"
+          }
+        }
+      ],
+      "expected": {
+        "base-intact": "PASS",
+        "deployment-render": "FAIL",
+        "config-render": "FAIL",
+        "render-live": "FAIL",
+        "ready": "PASS"
+      },
+      "expected_score": 2
+    },
+    {
+      "id": "wrong-replicas",
+      "actions": [
+        {
+          "kind": "file",
+          "args": {
+            "source": "solution/settings.yaml",
+            "path": "overlay/settings.yaml"
+          }
+        },
+        {
+          "kind": "file",
+          "args": {
+            "source": "cases/wrong-replicas.yaml",
+            "path": "overlay/kustomization.yaml"
+          }
+        },
+        {
+          "kind": "kustomize",
+          "args": {
+            "path": "overlay"
+          }
+        }
+      ],
+      "expected": {
+        "base-intact": "PASS",
+        "deployment-render": "FAIL",
+        "config-render": "PASS",
+        "render-live": "FAIL",
+        "ready": "FAIL"
+      },
+      "expected_score": 2
+    },
+    {
+      "id": "alternative-overlay",
+      "actions": [
+        {
+          "kind": "file",
+          "args": {
+            "source": "cases/alternative-kustomization.yaml",
+            "path": "overlay/kustomization.yaml"
+          }
+        },
+        {
+          "kind": "kustomize",
+          "args": {
+            "path": "overlay"
+          }
+        }
+      ],
+      "expected": {
+        "base-intact": "PASS",
+        "deployment-render": "PASS",
+        "config-render": "PASS",
+        "render-live": "PASS",
+        "ready": "PASS"
+      },
+      "expected_score": 5
+    }
+  ]
+}

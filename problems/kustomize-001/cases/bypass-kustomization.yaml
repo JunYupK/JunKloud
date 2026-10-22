@@ -1,0 +1,7 @@
+resources: [../copy]
+replicas:
+- name: overlay-web
+  count: 2
+patches:
+- path: settings.yaml
+  target: {kind: ConfigMap, name: overlay-settings}

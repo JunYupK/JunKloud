@@ -1,0 +1,29 @@
+{
+  "groups": [
+    {
+      "id": "design-build",
+      "domain": "design-build",
+      "count": 5,
+      "points": 20,
+      "problems": [
+        "image-001",
+        "batch-001",
+        "daemonset-001",
+        "multicontainer-001",
+        "volume-001"
+      ]
+    },
+    {
+      "id": "deployment",
+      "domain": "deployment",
+      "count": 4,
+      "points": 20,
+      "problems": [
+        "rollout-001",
+        "release-001",
+        "helm-001",
+        "kustomize-001"
+      ]
+    }
+  ]
+}

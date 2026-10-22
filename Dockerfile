@@ -182,15 +182,12 @@ COPY runtime/entrypoint.sh /usr/local/bin/entrypoint.sh
 RUN chmod +x /usr/local/bin/entrypoint.sh
 
 WORKDIR /src
+ENV KUBECONFIG=/home/learner/.local/share/junkloud/environment/kubeconfig
 ENTRYPOINT ["/usr/local/bin/entrypoint.sh"]
 CMD ["sleep", "infinity"]
 
 # ---------------------------------------------------------------------------
-FROM base AS workspace
-USER learner
-
-# ---------------------------------------------------------------------------
-FROM base AS dev
+FROM base AS toolchain
 
 ARG GO_VERSION=1.27.2
 ARG GO_SHA256_AMD64=ecbadb99091a3f46e31f5f934b068b1864eafa7995211b39eaddf76996045fe5
@@ -216,4 +213,24 @@ RUN set -eu; \
 ENV PATH="/usr/local/go/bin:${PATH}" \
     GOPATH=/home/learner/go
 
+USER learner
+
+# Build with the same pinned compiler as dev. The workspace carries the real
+# executable without needing the Go toolchain or a writable source checkout.
+FROM toolchain AS cli-build
+USER root
+COPY go.mod go.sum ./
+RUN go mod download
+COPY cmd ./cmd
+COPY internal ./internal
+COPY schemas ./schemas
+COPY runtime/platform ./runtime/platform
+RUN CGO_ENABLED=0 go build -trimpath -o /out/ckad ./cmd/ckad
+
+FROM base AS workspace
+COPY --from=cli-build /out/ckad /usr/local/bin/ckad
+USER learner
+
+FROM toolchain AS dev
+COPY --from=cli-build /out/ckad /usr/local/bin/ckad
 USER learner

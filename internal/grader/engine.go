@@ -72,6 +72,7 @@ const (
 // Definition.Criteria are already rendered) and the session workspace that
 // holds submitted files.
 type Target struct {
+	SessionID string
 	Identity  model.Identity
 	Problem   model.FrozenProblem
 	Workspace string
@@ -390,6 +391,9 @@ func (e *Engine) run(ctx context.Context, t Target, c model.Criterion, gate *syn
 	start := e.set.clock.Now()
 	if c.Timeout <= 0 {
 		c.Timeout = e.set.defaultTimeout
+		if c.Kind == model.CriterionVolumePersistence {
+			c.Timeout = VolumePersistenceTimeout
+		}
 	}
 	ck, ok := e.checkers[c.Kind]
 	if !ok {

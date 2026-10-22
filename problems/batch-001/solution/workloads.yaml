@@ -1,0 +1,90 @@
+{
+  "apiVersion": "batch/v1",
+  "kind": "Job",
+  "metadata": {
+    "name": "parcel-once",
+    "namespace": "${namespace}"
+  },
+  "spec": {
+    "suspend": false,
+    "backoffLimit": 0,
+    "ttlSecondsAfterFinished": 300,
+    "template": {
+      "spec": {
+        "restartPolicy": "Never",
+        "containers": [
+          {
+            "name": "worker",
+            "image": "docker.io/library/busybox:1.37.0",
+            "imagePullPolicy": "Never",
+            "command": [
+              "sh",
+              "-c",
+              "echo parcel-packed"
+            ],
+            "resources": {
+              "requests": {
+                "cpu": "10m",
+                "memory": "8Mi"
+              },
+              "limits": {
+                "cpu": "75m",
+                "memory": "32Mi"
+              }
+            }
+          }
+        ]
+      }
+    }
+  }
+}
+---
+{
+  "apiVersion": "batch/v1",
+  "kind": "CronJob",
+  "metadata": {
+    "name": "parcel-clock",
+    "namespace": "${namespace}"
+  },
+  "spec": {
+    "schedule": "* * * * *",
+    "suspend": false,
+    "concurrencyPolicy": "Forbid",
+    "successfulJobsHistoryLimit": 1,
+    "failedJobsHistoryLimit": 1,
+    "jobTemplate": {
+      "spec": {
+        "suspend": false,
+        "backoffLimit": 0,
+        "ttlSecondsAfterFinished": 300,
+        "template": {
+          "spec": {
+            "restartPolicy": "Never",
+            "containers": [
+              {
+                "name": "worker",
+                "image": "docker.io/library/busybox:1.37.0",
+                "imagePullPolicy": "Never",
+                "command": [
+                  "sh",
+                  "-c",
+                  "echo parcel-tick"
+                ],
+                "resources": {
+                  "requests": {
+                    "cpu": "10m",
+                    "memory": "8Mi"
+                  },
+                  "limits": {
+                    "cpu": "75m",
+                    "memory": "32Mi"
+                  }
+                }
+              }
+            ]
+          }
+        }
+      }
+    }
+  }
+}

@@ -25,4 +25,4 @@ test-integration:
 
 # End-to-end tests of the ckad CLI.
 test-e2e:
-	go test -tags=e2e ./tests/e2e/... -count=1
+	go test -tags=e2e ./tests/e2e/... -count=1 -timeout=25m

@@ -190,6 +190,7 @@ type Records interface {
 	ListRuns(ctx context.Context, submissionID string) ([]model.GradingRun, error)
 	RecordReview(ctx context.Context, sessionID, problemID string, at time.Time) error
 	ListReviews(ctx context.Context, sessionID string) ([]model.ReviewEvent, error)
+	SetMark(ctx context.Context, sessionID, problemID string, marked bool) error
 }
 
 var (
@@ -208,6 +209,7 @@ type Inputs = grader.InputCapturer
 // Config wires a Service. New builds one from the composed runtime;
 // NewService takes it directly (unit tests use fakes for the cluster).
 type Config struct {
+	Images []environment.PinnedImage
 	Store  Records
 	Env    Environment
 	Engine Evaluator
@@ -263,7 +265,8 @@ func WithClock(now func() time.Time) Option { return func(c *Config) { c.Now = n
 func New(s *store.Store, env *environment.Manager, rt *author.Runtime, bankDir, stateDir string, opts ...Option) *Service {
 	graderCfg := rt.Config
 	cfg := Config{
-		Store: s, Env: env, Engine: rt.Grader.Engine, Inputs: rt.Grader.Artifacts, Identity: rt.Identity,
+		Images: graderCfg.ProvidedImages(),
+		Store:  s, Env: env, Engine: rt.Grader.Engine, Inputs: rt.Grader.Artifacts, Identity: rt.Identity,
 		GraderVersion:       grader.GraderVersion,
 		EnvironmentManifest: graderCfg.EnvironmentManifest,
 		PrepareEnvironment: func(ctx context.Context, id model.Identity) error {

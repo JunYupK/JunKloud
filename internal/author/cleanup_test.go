@@ -151,7 +151,7 @@ func TestJanitorLeavesLookAlikesAlone(t *testing.T) {
 		// A declared cluster resource without the owner's marks.
 		owned("ClusterRole", "rbac.authorization.k8s.io/v1", "viewer", "u2", nil),
 	)
-	testutil.NoError(t, e.janitor.Cleanup(ctx, janitorOwner()))
+	testutil.ErrorIs(t, e.janitor.Cleanup(ctx, janitorOwner()), environment.ErrNotOwned)
 	testutil.Equal(t, e.exists(nsGVR, "ns-a"), true)
 	testutil.Equal(t, e.exists(crGVR, "viewer"), true)
 	for _, verb := range e.verbs() {
@@ -168,7 +168,7 @@ func TestJanitorChecksTheRecordedUID(t *testing.T) {
 	owner.Inventory.Resources = []model.OwnedResource{{
 		Ref: model.ObjectRef{APIVersion: "rbac.authorization.k8s.io/v1", Kind: "ClusterRole", Name: "viewer"}, UID: "original-uid",
 	}}
-	testutil.NoError(t, e.janitor.Cleanup(ctx, owner))
+	testutil.ErrorIs(t, e.janitor.Cleanup(ctx, owner), environment.ErrNotOwned)
 	// The recorded object is gone; what carries its name now is not the one
 	// this owner created.
 	testutil.Equal(t, e.exists(crGVR, "viewer"), true)

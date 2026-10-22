@@ -26,6 +26,7 @@ import (
 	"k8s.io/apimachinery/pkg/util/intstr"
 	"k8s.io/apimachinery/pkg/util/wait"
 
+	"github.com/JunYupK/JunKloud/internal/imageexport"
 	"github.com/JunYupK/JunKloud/internal/model"
 	"github.com/JunYupK/JunKloud/runtime/platform"
 )
@@ -769,11 +770,14 @@ func (p *prober) checkImageBuild(ctx context.Context) error {
 	}
 	tag := ImageBuildProbeRepository + ":" + p.id.ID + "-" + p.run
 	defer p.removeBuiltImage(tag)
-	if err := p.m.command(ctx, buildTimeout, "docker", "build", "--quiet", "--platform", "linux/"+arch, "--tag", tag, dir); err != nil {
+	built, err := p.m.output(ctx, buildTimeout, "docker", "build", "--quiet", "--platform", "linux/"+arch, "--tag", tag, dir)
+	if err != nil {
 		return fmt.Errorf("docker build: %w", err)
 	}
 	archive := filepath.Join(dir, "image.tar")
-	if err := p.m.command(ctx, loadTimeout, "docker", "save", "--platform", "linux/"+arch, "--output", archive, tag); err != nil {
+	if err := imageexport.Save(ctx, func(c context.Context, args []string) ([]byte, error) {
+		return p.m.output(c, loadTimeout, "docker", args...)
+	}, tag, strings.TrimSpace(string(built)), arch, archive); err != nil {
 		return fmt.Errorf("docker save: %w", err)
 	}
 	if err := p.m.command(ctx, loadTimeout, "kind", "load", "image-archive", archive, "--name", p.id.ClusterName); err != nil {
