@@ -5,7 +5,7 @@ Pod가 시작하자마자 종료하는 CrashLoopBackOff는 "컨테이너가 왜 
 1. `kubectl get pods -n <namespace>`로 `orders` Pod의 STATUS가 `CrashLoopBackOff`이고 RESTARTS가 늘어나는지 봅니다.
 2. `kubectl logs deploy/orders -n <namespace>`(필요하면 `--previous`)로 종료 직전 메시지를 읽습니다. 앱이 기대하는 파일 이름과 실제로 마운트된 파일 이름(`mounted: orders.conf`)이 다르다는 것을 알 수 있습니다.
 3. `kubectl describe pod`와 `kubectl get configmap orders-config -o yaml`로 마운트 경로와 ConfigMap 키를 확인합니다.
-4. 원인을 고친 뒤 `kubectl rollout restart deploy/orders`로 Pod를 새로 만들고 `kubectl rollout status`, `kubectl get endpoints orders`로 확인합니다.
+4. 원인을 고친 뒤 `kubectl rollout restart deploy/orders`로 Pod를 새로 만들고 `kubectl rollout status`, `kubectl get endpointslices -l kubernetes.io/service-name=orders`로 확인합니다.
 5. `kubectl top pod -n <namespace>`로 CPU 사용량이 가장 큰 Pod를 찾습니다. metrics-server는 수집 주기가 있어 Pod 생성 직후에는 값이 비어 있을 수 있으니 잠시 후 다시 실행합니다.
 
 ## 해결

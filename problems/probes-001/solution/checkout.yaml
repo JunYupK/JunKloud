@@ -39,7 +39,7 @@ spec:
             path: /healthz
             port: 8080
           periodSeconds: 2
-          failureThreshold: 1
+          failureThreshold: 3
         startupProbe:
           httpGet:
             path: /healthz

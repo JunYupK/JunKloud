@@ -14,9 +14,9 @@ import (
 func TestObservabilityBankSmoke(t *testing.T) {
 	b := openBankRuntime(t)
 	testutil.NoError(t, author.PrepareEnvironment(context.Background(), b.m, b.id, b.cfg.Images))
-	smokeBank(t, b, loadGroup(t, presentObservabilityIDs()))
+	smokeBank(t, b, loadGroup(t, observabilityIDs))
 }
 
 func TestObservabilityBank(t *testing.T) {
-	validateGroupAfterSmoke(t, loadGroup(t, presentObservabilityIDs()), false)
+	validateGroupAfterSmoke(t, loadGroup(t, observabilityIDs), false)
 }

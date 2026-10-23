@@ -5,6 +5,7 @@ package integration
 import (
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -13,18 +14,19 @@ import (
 	"github.com/JunYupK/JunKloud/internal/model"
 	"github.com/JunYupK/JunKloud/internal/problem"
 	"github.com/JunYupK/JunKloud/internal/testutil"
+	"sigs.k8s.io/yaml"
 )
 
 var observabilityIDs = []string{"api-migration-001", "probes-001", "diagnostics-001"}
 
-// observabilityCases maps problem ID -> case ID -> expected score. A problem
-// joins the bank only once its row exists here, so each task extends the table
-// together with its package. Task 4 removes the "present" guard.
+// observabilityCases maps problem ID -> case ID -> expected score. Every bank
+// problem has a row; the table pins the exact case set of each package.
 var observabilityCases = map[string]map[string]int{
 	"api-migration-001": {
 		"apiversion-only":               0,
 		"fixed-not-applied":             2,
 		"wrong-hpa-target":              3,
+		"stale-scale-target":            3,
 		"selector-drops-tier":           4,
 		"alternative-match-expressions": 5,
 	},
@@ -35,23 +37,27 @@ var observabilityCases = map[string]map[string]int{
 		"alternative-named-port":    5,
 	},
 	"diagnostics-001": {
-		"sleep-instead":             1,
-		"answer-only":               2,
-		"hardcoded-endpoint":        4,
-		"wrong-pod-answer":          4,
-		"alternative-items-mapping": 5,
+		"sleep-instead":                      1,
+		"answer-only":                        2,
+		"hardcoded-endpoint":                 4,
+		"wrong-pod-answer":                   4,
+		"alternative-items-mapping":          5,
+		"alternative-configmap-edit-restart": 5,
 	},
 }
 
-// presentObservabilityIDs are the bank IDs whose package has been authored.
-func presentObservabilityIDs() []string {
-	var ids []string
-	for _, id := range observabilityIDs {
-		if _, ok := observabilityCases[id]; ok {
-			ids = append(ids, id)
-		}
-	}
-	return ids
+// observabilityCapabilities and observabilityInitialScores pin each package's declared capabilities and the score
+// of the untouched environment.
+var observabilityCapabilities = map[string][]string{
+	"api-migration-001": nil,
+	"probes-001":        nil,
+	"diagnostics-001":   {"metrics"},
+}
+
+var observabilityInitialScores = map[string]int{
+	"api-migration-001": 0,
+	"probes-001":        1,
+	"diagnostics-001":   1,
 }
 
 func caseScore(p model.Problem, id string) int {
@@ -68,7 +74,7 @@ func initialBelowMax(p model.Problem) bool {
 }
 
 func TestObservabilityProblems(t *testing.T) {
-	for _, p := range loadGroup(t, presentObservabilityIDs()) {
+	for _, p := range loadGroup(t, observabilityIDs) {
 		t.Run(p.ID, func(t *testing.T) {
 			testutil.Equal(t, p.Domain, model.DomainObservability)
 			testutil.Equal(t, sumPoints([]model.Problem{p}), 5)
@@ -90,6 +96,10 @@ func TestObservabilityProblems(t *testing.T) {
 			}
 			testutil.Equal(t, len(p.Cases), len(observabilityCases[p.ID]))
 			testutil.Equal(t, initialBelowMax(p), true)
+			testutil.Equal(t, p.InitialScore, observabilityInitialScores[p.ID])
+			if want := observabilityCapabilities[p.ID]; !slices.Equal(p.Capabilities, want) {
+				t.Errorf("capabilities = %v, want %v", p.Capabilities, want)
+			}
 			for id, want := range observabilityCases[p.ID] {
 				if !strings.HasPrefix(id, "alternative-") && want >= 5 {
 					t.Fatalf("wrong case %s earns full credit", id)
@@ -107,7 +117,11 @@ func TestObservabilityProblems(t *testing.T) {
 			// Private file sources are copied raw, so they must not rely on
 			// parameter rendering. Every apply manifest, wherever it is used
 			// (setup, solution or case), must also avoid the unserved legacy
-			// GroupVersions.
+			// GroupVersions as an object's own apiVersion. (A scaleTargetRef
+			// string is data, not a served GroupVersion, and is checked by
+			// TestObservabilityAPIMigrationContracts.)
+			frozen, err := problem.Freeze(p, seeds[0])
+			testutil.NoError(t, err)
 			groups := [][]model.Action{p.Setup, p.Solution}
 			for _, c := range p.Cases {
 				groups = append(groups, c.Actions)
@@ -126,13 +140,15 @@ func TestObservabilityProblems(t *testing.T) {
 						}
 					case model.ActionApply:
 						path, _ := a.Args["path"].(string)
-						b, ok := p.Files[path]
-						if !ok {
+						if _, ok := p.Files[path]; !ok {
 							t.Fatalf("apply manifest %q is not part of the package", path)
 						}
-						for _, legacy := range []string{"extensions/v1beta1", "v1beta1", "v2beta1", "v2beta2"} {
-							if strings.Contains(string(b), legacy) {
-								t.Errorf("apply manifest %s uses unserved API version %q", path, legacy)
+						for _, o := range applyObjects(t, p, frozen, a) {
+							av, _ := o["apiVersion"].(string)
+							for _, legacy := range []string{"extensions/v1beta1", "v1beta1", "v2beta1", "v2beta2"} {
+								if strings.HasSuffix(av, legacy) {
+									t.Errorf("apply manifest %s has an object with unserved API version %q", path, av)
+								}
 							}
 						}
 					}
@@ -142,8 +158,69 @@ func TestObservabilityProblems(t *testing.T) {
 	}
 }
 
+// applyObjects renders one apply action into its objects with the frozen
+// parameters, exactly like the validator does.
+func applyObjects(t *testing.T, p model.Problem, f model.FrozenProblem, a model.Action) []map[string]any {
+	t.Helper()
+	built, err := author.BuildActions(p.Files, f.Parameters, []model.Action{a})
+	testutil.NoError(t, err)
+	var out []map[string]any
+	for _, step := range built {
+		out = append(out, step.Objects...)
+	}
+	return out
+}
+
+// Group totals: three 5-point problems, every ID present. Removing a package
+// or a criterion must fail before spending time on a cluster.
+func TestObservabilityBankContent(t *testing.T) {
+	ps := loadGroup(t, observabilityIDs)
+	testutil.Equal(t, len(ps), 3)
+	testutil.Equal(t, sumPoints(ps), 15)
+	got := map[string]bool{}
+	for _, p := range ps {
+		got[p.ID] = true
+		testutil.Equal(t, p.Domain, model.DomainObservability)
+	}
+	for _, id := range observabilityIDs {
+		if !got[id] {
+			t.Errorf("missing %s", id)
+		}
+	}
+}
+
+func TestObservabilityCoverage(t *testing.T) {
+	var cov struct {
+		Groups []struct {
+			ID       string   `json:"id"`
+			Domain   string   `json:"domain"`
+			Count    int      `json:"count"`
+			Points   int      `json:"points"`
+			Problems []string `json:"problems"`
+		} `json:"groups"`
+	}
+	b, err := os.ReadFile(filepath.Join(bankRoot, "curriculum", "coverage.yaml"))
+	testutil.NoError(t, err)
+	testutil.NoError(t, yaml.UnmarshalStrict(b, &cov))
+	found := 0
+	for _, g := range cov.Groups {
+		if g.Domain != model.DomainObservability {
+			continue
+		}
+		found++
+		testutil.Equal(t, g.ID, "observability")
+		testutil.Equal(t, g.Count, 3)
+		testutil.Equal(t, g.Points, 15)
+		got, want := slices.Clone(g.Problems), slices.Clone(observabilityIDs)
+		slices.Sort(got)
+		slices.Sort(want)
+		testutil.Equal(t, got, want)
+	}
+	testutil.Equal(t, found, 1)
+}
+
 func TestObservabilityBankPreflight(t *testing.T) {
-	preflightBank(t, loadGroup(t, presentObservabilityIDs()))
+	preflightBank(t, loadGroup(t, observabilityIDs))
 }
 
 // The legacy manifests are only ever workspace files: the server rejects both
@@ -164,16 +241,162 @@ func TestObservabilityAPIMigrationContracts(t *testing.T) {
 			t.Error("legacy manifest must never be applied")
 		}
 	}
-	for _, c := range p.Cases {
-		for _, a := range c.Actions {
+	f, err := problem.Freeze(p, 1)
+	testutil.NoError(t, err)
+	// The HPA is graded on the scale target's API (file and live) and, live,
+	// on the metric target type; each graded value is stated in the question.
+	wantFields := map[string]map[string]any{
+		"manifest-hpa": {"spec.scaleTargetRef.apiVersion": "apps/v1", "spec.scaleTargetRef.kind": "Deployment"},
+		"hpa-live": {"spec.scaleTargetRef.apiVersion": "apps/v1", "spec.scaleTargetRef.kind": "Deployment",
+			"spec.metrics[type=Resource].resource.target.type": "Utilization"},
+	}
+	for _, c := range p.Criteria {
+		for path, value := range wantFields[c.ID] {
+			found := false
+			for _, field := range c.Args["fields"].([]any) {
+				if m := field.(map[string]any); m["path"] == path && m["equals"] == value {
+					found = true
+				}
+			}
+			if !found {
+				t.Errorf("criterion %s does not require %s == %v", c.ID, path, value)
+			}
+		}
+	}
+	if q := string(p.Files[problem.QuestionFile]); !strings.Contains(q, "`apps/v1` Deployment `inventory`") {
+		t.Error("question must say that the HPA targets the apps/v1 Deployment inventory")
+	}
+	// scaleTargetRef.apiVersion of every applied HPA, per case/solution. Only
+	// the stale-scale-target case may keep the legacy value; no object may use
+	// an unserved GroupVersion of its own.
+	targets := func(actions []model.Action) []string {
+		var out []string
+		for _, a := range actions {
 			if a.Kind != model.ActionApply {
 				continue
 			}
-			b, err := os.ReadFile(filepath.Join(bankRoot, "problems", p.ID, filepath.FromSlash(a.Args["path"].(string))))
-			testutil.NoError(t, err)
-			if strings.Contains(string(b), "v1beta1") {
-				t.Errorf("case %s applies a manifest with an unserved API", c.ID)
+			for _, o := range applyObjects(t, p, f, a) {
+				if av, _ := o["apiVersion"].(string); strings.Contains(av, "beta") {
+					t.Errorf("applied %v object uses unserved API %q", o["kind"], av)
+				}
+				if o["kind"] != "HorizontalPodAutoscaler" {
+					continue
+				}
+				ref, _ := o["spec"].(map[string]any)["scaleTargetRef"].(map[string]any)
+				ver, _ := ref["apiVersion"].(string)
+				out = append(out, ver)
 			}
 		}
+		return out
+	}
+	testutil.Equal(t, targets(p.Solution), []string{"apps/v1"})
+	for _, c := range p.Cases {
+		want := []string{"apps/v1"}
+		if c.ID == "stale-scale-target" {
+			want = []string{"extensions/v1beta1"}
+		}
+		got := targets(c.Actions)
+		if len(got) == 0 && c.ID != "stale-scale-target" {
+			continue // file-only case: nothing reaches the cluster
+		}
+		testutil.Equal(t, got, want)
+	}
+}
+
+// The diagnostics application command is graded literally by command-unchanged
+// and must be identical in the handed-out setup and in every correct answer;
+// the symptom-hiding cases must differ from it.
+func TestObservabilityDiagnosticsContracts(t *testing.T) {
+	p := loadGroup(t, []string{"diagnostics-001"})[0]
+	f, err := problem.Freeze(p, 1)
+	testutil.NoError(t, err)
+	var want []any
+	for _, c := range p.Criteria {
+		if c.ID != "command-unchanged" {
+			continue
+		}
+		for _, field := range c.Args["fields"].([]any) {
+			m := field.(map[string]any)
+			if m["path"] == "spec.template.spec.containers[name=app].command" {
+				want = m["equals"].([]any)
+			}
+		}
+	}
+	if len(want) != 3 {
+		t.Fatalf("command-unchanged criterion lacks the expected command list: %v", want)
+	}
+	command := func(actions []model.Action) [][]any {
+		var out [][]any
+		for _, a := range actions {
+			if a.Kind != model.ActionApply {
+				continue
+			}
+			for _, o := range applyObjects(t, p, f, a) {
+				if o["kind"] != "Deployment" || o["metadata"].(map[string]any)["name"] != "orders" {
+					continue
+				}
+				for _, c := range o["spec"].(map[string]any)["template"].(map[string]any)["spec"].(map[string]any)["containers"].([]any) {
+					if c.(map[string]any)["name"] == "app" {
+						out = append(out, c.(map[string]any)["command"].([]any))
+					}
+				}
+			}
+		}
+		return out
+	}
+	same := func(label string, actions []model.Action) {
+		got := command(actions)
+		if len(got) != 1 || !slices.Equal(got[0], want) {
+			t.Errorf("%s: orders command %v differs from the command-unchanged criterion", label, got)
+		}
+	}
+	same("setup", p.Setup)
+	same("solution", p.Solution)
+	for _, c := range p.Cases {
+		switch c.ID {
+		case "alternative-items-mapping", "alternative-configmap-edit-restart":
+			same("case "+c.ID, c.Actions)
+		case "sleep-instead", "hardcoded-endpoint":
+			got := command(c.Actions)
+			if len(got) != 1 || slices.Equal(got[0], want) {
+				t.Errorf("case %s must change the command, got %v", c.ID, got)
+			}
+		}
+	}
+}
+
+// A correct liveness probe must survive one slow probe on a loaded host, and
+// the question must tell a learner that a crashed Pod needs a restart.
+func TestObservabilityRobustnessContracts(t *testing.T) {
+	probes := loadGroup(t, []string{"probes-001"})[0]
+	f, err := problem.Freeze(probes, 1)
+	testutil.NoError(t, err)
+	correct := append([]model.Action{}, probes.Solution...)
+	for _, c := range probes.Cases {
+		if c.ID == "alternative-named-port" {
+			correct = append(correct, c.Actions...)
+		}
+	}
+	checked := 0
+	for _, a := range correct {
+		if a.Kind != model.ActionApply {
+			continue
+		}
+		for _, o := range applyObjects(t, probes, f, a) {
+			if o["kind"] != "Deployment" {
+				continue
+			}
+			for _, c := range o["spec"].(map[string]any)["template"].(map[string]any)["spec"].(map[string]any)["containers"].([]any) {
+				live := c.(map[string]any)["livenessProbe"].(map[string]any)
+				testutil.Equal(t, live["failureThreshold"], any(float64(3)))
+				checked++
+			}
+		}
+	}
+	testutil.Equal(t, checked, 2)
+
+	diag := loadGroup(t, []string{"diagnostics-001"})[0]
+	if q := string(diag.Files[problem.QuestionFile]); !strings.Contains(q, "kubectl rollout restart deployment/orders") {
+		t.Error("diagnostics question must name the restart command for an already crashed Pod")
 	}
 }

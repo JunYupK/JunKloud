@@ -5,11 +5,11 @@ Kubernetes에는 세 가지 probe가 있습니다. readinessProbe는 Pod가 트�
 1. `kubectl get pods -n <namespace>`로 RESTARTS가 늘고 READY가 0/1인지 확인합니다.
 2. `kubectl describe pod`의 Events에서 `Liveness probe failed`, `Readiness probe failed` 메시지와 실패한 경로/포트를 읽습니다.
 3. 앱이 실제로 듣는 포트와 제공하는 경로(`/ready`, `/healthz`)를 확인하고, 시작에 걸리는 시간(약 10초)을 계산합니다.
-4. `kubectl edit deploy checkout` 또는 manifest 수정 후 apply로 probe를 고치고, `kubectl rollout status`와 `kubectl get endpoints checkout`으로 확인합니다.
+4. `kubectl edit deploy checkout` 또는 manifest 수정 후 apply로 probe를 고치고, `kubectl rollout status`와 `kubectl get endpointslices -l kubernetes.io/service-name=checkout`으로 확인합니다.
 
 ## 해결
 - readinessProbe: `httpGet` path `/ready`, port를 앱 포트(8080 또는 컨테이너 포트 이름)로 맞춥니다. 8081처럼 아무도 듣지 않는 포트는 영원히 Ready가 되지 않습니다.
-- livenessProbe: path `/healthz`로 고칩니다. 존재하지 않는 경로(`/health`)는 404로 실패해 컨테이너를 계속 재시작합니다.
+- livenessProbe: path `/healthz`로 고칩니다. 존재하지 않는 경로(`/health`)는 앱이 뜬 뒤에는 404로 실패합니다. 다만 이 앱은 시작에 약 10초가 걸리고 startupProbe가 없어서, 처음 liveness 검사는 아직 아무도 듣지 않는 포트에서 `connection refused`로 실패하고 `failureThreshold: 1`이라 컨테이너가 앱이 뜨기도 전에 재시작됩니다. 그래서 `describe pod`의 Events에서는 404보다 `connection refused`가 먼저 보입니다. 경로를 고쳐도 startupProbe 없이 시작 지연을 넘기지 못하면 재시작이 계속됩니다. 정답 manifest는 `failureThreshold: 3`을 써서 느린 호스트에서 한 번 늦은 응답으로 컨테이너가 죽지 않도록 합니다.
 - startupProbe: path `/healthz`, 예를 들어 `periodSeconds: 2`, `failureThreshold: 15`처럼 `periodSeconds x failureThreshold`가 시작 시간(약 10초)보다 길게 설정합니다. 성공하기 전에는 liveness가 시작되지 않으므로 재시작 루프가 사라집니다. liveness에 `initialDelaySeconds`만 늘리는 방법은 시작 시간이 달라지면 다시 깨지므로 startupProbe가 권장됩니다.
 
 ## 채점

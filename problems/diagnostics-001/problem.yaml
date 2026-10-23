@@ -286,6 +286,32 @@
         "service-serves": "PASS"
       },
       "expected_score": 5
+    },
+    {
+      "id": "alternative-configmap-edit-restart",
+      "actions": [
+        {
+          "kind": "apply",
+          "args": {
+            "path": "cases/alternative-configmap-edit-restart.yaml"
+          }
+        },
+        {
+          "kind": "file",
+          "args": {
+            "source": "solution/top-cpu.txt",
+            "path": "answers/top-cpu.txt"
+          }
+        }
+      ],
+      "expected": {
+        "top-cpu-answer": "PASS",
+        "command-unchanged": "PASS",
+        "orders-ready": "PASS",
+        "orders-started": "PASS",
+        "service-serves": "PASS"
+      },
+      "expected_score": 5
     }
   ]
 }
