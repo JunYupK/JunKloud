@@ -28,6 +28,12 @@ var observabilityCases = map[string]map[string]int{
 		"selector-drops-tier":           4,
 		"alternative-match-expressions": 5,
 	},
+	"probes-001": {
+		"probes-deleted":            2,
+		"readiness-port-kept":       3,
+		"liveness-delay-no-startup": 4,
+		"alternative-named-port":    5,
+	},
 }
 
 // presentObservabilityIDs are the bank IDs whose package has been authored.
@@ -59,6 +65,9 @@ func TestObservabilityProblems(t *testing.T) {
 		t.Run(p.ID, func(t *testing.T) {
 			testutil.Equal(t, p.Domain, model.DomainObservability)
 			testutil.Equal(t, sumPoints([]model.Problem{p}), 5)
+			if p.Difficulty == "" || p.Type == "" {
+				t.Fatal("explicit difficulty/type required")
+			}
 			seeds, err := author.CoveringSeeds(p)
 			testutil.NoError(t, err)
 			testutil.Equal(t, len(seeds) >= 2, true)
@@ -89,19 +98,36 @@ func TestObservabilityProblems(t *testing.T) {
 				}
 			}
 			// Private file sources are copied raw, so they must not rely on
-			// parameter rendering.
+			// parameter rendering. Every apply manifest, wherever it is used
+			// (setup, solution or case), must also avoid the unserved legacy
+			// GroupVersions.
 			groups := [][]model.Action{p.Setup, p.Solution}
 			for _, c := range p.Cases {
 				groups = append(groups, c.Actions)
 			}
 			for _, g := range groups {
 				for _, a := range g {
-					if a.Kind != model.ActionFile {
-						continue
-					}
-					src, _ := a.Args["source"].(string)
-					if strings.Contains(string(p.Files[src]), "${") {
-						t.Errorf("file source %s contains an unrendered ${param}", src)
+					switch a.Kind {
+					case model.ActionFile:
+						src, _ := a.Args["source"].(string)
+						b, ok := p.Files[src]
+						if !ok {
+							t.Fatalf("file source %q is not part of the package", src)
+						}
+						if strings.Contains(string(b), "${") {
+							t.Errorf("file source %s contains an unrendered ${param}", src)
+						}
+					case model.ActionApply:
+						path, _ := a.Args["path"].(string)
+						b, ok := p.Files[path]
+						if !ok {
+							t.Fatalf("apply manifest %q is not part of the package", path)
+						}
+						for _, legacy := range []string{"extensions/v1beta1", "v1beta1", "v2beta1", "v2beta2"} {
+							if strings.Contains(string(b), legacy) {
+								t.Errorf("apply manifest %s uses unserved API version %q", path, legacy)
+							}
+						}
 					}
 				}
 			}

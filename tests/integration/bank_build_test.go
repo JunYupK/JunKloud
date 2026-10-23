@@ -132,7 +132,12 @@ func smokeBank(t *testing.T, b bankRuntime, problems []model.Problem) {
 			for _, c := range f.Definition.Criteria {
 				if c.Kind == model.CriterionReady || c.Kind == model.CriterionJob || c.Kind == model.CriterionLogs {
 					c.DependsOn = nil
-					c.Timeout = 30 * time.Second
+					// Smoke bounds the wait to 30s, but never below what the
+					// criterion itself declares (a 15s stability window after a
+					// ~10s application start cannot fit in 30s).
+					if c.Timeout < 30*time.Second {
+						c.Timeout = 30 * time.Second
+					}
 					chosen = append(chosen, c)
 				}
 			}
