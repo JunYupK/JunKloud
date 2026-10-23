@@ -1,0 +1,62 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: inventory
+spec:
+  replicas: 2
+  selector:
+    matchExpressions:
+    - key: app
+      operator: In
+      values: [inventory]
+    - key: tier
+      operator: In
+      values: [api]
+  template:
+    metadata:
+      labels:
+        app: inventory
+        tier: api
+    spec:
+      containers:
+      - name: web
+        image: docker.io/library/busybox:1.37.0
+        imagePullPolicy: Never
+        command:
+        - sh
+        - -c
+        - mkdir -p /www; printf inventory-ok > /www/index.html; exec httpd -f -p 8080 -h /www
+        resources:
+          requests:
+            cpu: 10m
+            memory: 8Mi
+          limits:
+            cpu: 100m
+            memory: 32Mi
+        readinessProbe:
+          httpGet:
+            path: /
+            port: 8080
+          periodSeconds: 1
+---
+apiVersion: autoscaling/v2
+kind: HorizontalPodAutoscaler
+metadata:
+  name: inventory
+spec:
+  scaleTargetRef:
+    apiVersion: apps/v1
+    kind: Deployment
+    name: inventory
+  minReplicas: 2
+  maxReplicas: 4
+  metrics:
+  - type: Resource
+    resource:
+      name: cpu
+      target:
+        type: Utilization
+        averageUtilization: 70
+  behavior:
+    scaleDown:
+      stabilizationWindowSeconds: 120
