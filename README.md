@@ -146,16 +146,10 @@ ckad mark Q3 --review  # 다시 볼 문제 표시 (채점에는 영향 없음), 
 ```
 
 - 작업 컨테이너에서 `kubectl`, Helm, `yq`, `curl`, `nano`, `less`, `git`, Docker CLI를 쓸 수 있습니다.
-- 개인 별칭과 편집기 설정은 `~/.bashrc`, `~/.bash_aliases`에 추가하면 계속 유지됩니다.
-- 실제 시험 환경의 `k` 별칭과 Bash 자동완성은 아직 미리 설정돼 있지 않습니다. 필요하면 직접 추가하세요.
-  ```sh
-  cat >> ~/.bash_aliases <<'EOF'
-  alias k=kubectl
-  source <(kubectl completion bash)
-  complete -o default -F __start_kubectl k
-  EOF
-  source ~/.bash_aliases
-  ```
+- 실제 시험처럼 `k` 별칭(`alias k=kubectl`)과 `kubectl`·`k`의 Bash 자동완성(Tab)이 모든 대화형 셸에 미리 설정돼 있습니다([`runtime/kubectl-shell.bash`](runtime/kubectl-shell.bash)).
+  - `/etc/bash.bashrc`에서 불러오므로, 이미 쓰던 `learner-home` 볼륨도 이미지를 다시 빌드하면 바로 적용됩니다(`bash runtime/up.sh`는 `--build`로 다시 빌드합니다).
+  - 리소스 이름 자동완성(`k get pods <Tab>`)은 클러스터에 물어보므로 `ckad doctor`나 `ckad start`로 클러스터가 준비된 뒤에 동작합니다.
+- 개인 별칭과 편집기 설정은 `~/.bashrc`, `~/.bash_aliases`에 추가하면 계속 유지됩니다. 기본 `k` 별칭도 여기서 덮어쓸 수 있습니다.
 - 제한 시간을 넘겨도 제출할 수 있습니다. 초과 시간은 따로 표시됩니다.
 
 ### 채점과 복습
@@ -368,7 +362,7 @@ go test -tags=integration ./tests/integration -run '^TestObservabilityBank$' -co
 
 - **문제은행:** 12문제 / 55점입니다. 남은 영역은 Environment·Configuration·Security(25점)와 Services & Networking(20점)이고, 기본 20문항 모의시험(`mock-01`)은 이 문제들이 추가된 뒤 제공됩니다.
 - **검증한 환경:** Linux(amd64) 샌드박스입니다. M2(ARM64) 8GB에 4GiB Docker VM, Windows 16GB 같은 실제 목표 기기 검증은 아직 하지 않았습니다.
-- **작업 컨테이너 도구:** 설계상 제공할 `k` 별칭, Bash 자동완성, `wget`, man pages가 아직 이미지에 없습니다. 위 [문제 풀기](#문제-풀기)의 예처럼 직접 추가할 수 있습니다.
+- **작업 컨테이너 도구:** 설계상 제공할 도구 중 `wget`과 man pages는 아직 이미지에 없습니다(`curl`은 있습니다).
 - **범위 밖:** 실제 시험의 SSH 진입·복귀, 다중 클러스터 전환, 시험 감독, 브라우저 제한은 재현하지 않습니다.
 - **비공식:** 점수와 부분 점수 방식은 JunKloud 자체 규칙입니다. 공식 채점 방식과 같다고 주장하지 않으며, 문제는 독창적으로 작성했습니다.
 

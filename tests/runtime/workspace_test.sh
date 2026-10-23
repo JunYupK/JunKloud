@@ -125,6 +125,12 @@ test "${persisted}" = "keep" || fail "expected persisted file content 'keep', go
 compose exec -T workspace bash -ic 'alias user_check' | grep -q keep \
   || fail "alias 'user_check' did not survive container recreation"
 
+echo "==> verifying the exam-style k alias and kubectl/k completion in an interactive shell"
+compose exec -T workspace bash -ic 'alias k' | grep -q "kubectl" \
+  || fail "alias 'k' for kubectl is missing in an interactive shell"
+compose exec -T workspace bash -ic 'complete -p kubectl && complete -p k' | grep -q "__start_kubectl k" \
+  || fail "bash completion for kubectl/k is not registered in an interactive shell"
+
 echo "==> verifying kind/kubectl/Helm versions match runtime/versions.lock.yaml"
 kind_want="$(lock_version kind | tr -d '\r')"
 kind_have="$(compose exec -T workspace kind version | awk '{print $2}' | tr -d '\r')"
