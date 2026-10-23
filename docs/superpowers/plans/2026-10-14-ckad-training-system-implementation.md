@@ -408,20 +408,22 @@ Task 2에서 `internal/model`에 아래 타입을 정의한다. 패키지 간에
 
 ### Task 16: Observability & Maintenance 3문제 / 15점
 
+**실행 기록:** 2026-10-23 완료. 동결한 트리 `3d4b4fa1bb9b6d548795ba20494d9f38f495ece3`(`content: harden observability problems and record coverage`; 이후 커밋은 문서만 변경)에서 실제 3문제 smoke 274.05초 PASS, 전체 `go test -tags=integration ./tests/integration -run '^TestObservabilityBank$' -count=1 -timeout=120m -v` PASS 3763.53초(package 3763.565초, EXIT0; api-migration-001 634.74초, probes-001 1476.36초, diagnostics-001 1579.15초)와 마지막 `go test ./... -count=1`(14 package ok, 4 no-test)·`go vet ./...`·`go vet -tags=integration ./...`·`gofmt -l .` 모두 깨끗했다. 두 covering seed의 초기·정답·오답·대안·reset 50단계(18+14+18)를 모두 통과했고 어떤 단계에도 ERROR는 없었으며 seed는 api-migration-001 [1 3], probes-001 [1 2], diagnostics-001 [1 5], 재seed·timeout 변경은 없다. 관찰성 3문제/15점이 기존 9문제/40점에 합쳐 12문제/55점의 부분 bank가 되었고(`TestDeploymentCoverage` 12/55, 중복 ID 없음), 기본 20문항 mock은 아직 미완성이다. Task 1–3의 문제별 실행(586초·1585초·1540초)은 리뷰 수정(HPA scaleTargetRef/Utilization 채점, liveness failureThreshold 3, 재시작 안내·대안 case 등)으로 content hash가 바뀌어 historical 증거일 뿐이며 이 실행이 유효 기록이다. 이번 live 실행은 cgroup v1 샌드박스(`JUNKLOUD_TEST_HOST_COMPAT=cgroupv1,no-ipv6 JUNKLOUD_TEST_UNSUPPORTED_CAPABILITIES=network-policy`)에서 수행했으며 NetworkPolicy 강제가 필요한 검증은 이 문제들에 없다. native M2/4GiB/Windows는 NOT RUN. diagnostics-001의 metrics는 Task 3에서 `kubectl top`으로 확인했다(report-worker 약 200m, 나머지 5m 이하; cgroup v1이라 메모리는 0Mi). 정확한 hash·단계별 상태·근거는 2026-10-23-task16-observability.md의 Verified evidence 참조.
+
 **Files:** Create Task 16 ID 세 package, `tests/integration/bank_observability_test.go`; Modify coverage.
 
 **Interfaces:** Consumes resource/ready/logs checker와 platform metrics. Produces 5개 공식 관찰·유지보수 역량에 매핑된 3 package.
 
-- [ ] **실패 테스트 작성:** `TestObservabilityBank`: count3,total15, probe 제거·잘못된 API 변환·증상만 숨긴 풀이 실패를 assert한다.
+- [x] **실패 테스트 작성:** `TestObservabilityBank`: count3,total15, probe 제거·잘못된 API 변환·증상만 숨긴 풀이 실패를 assert한다.
   ```go
   testutil.Equal(t, sumPoints(problems), 15)
   testutil.Equal(t, deletedProbe.Status, "FAIL")
   testutil.Equal(t, fixedManifestAndBehavior.Status, "PASS")
   ```
-- [ ] **실패 확인:** `go test -tags=integration ./tests/integration -run TestObservabilityBank -count=1 -v` 실패 확인.
-- [ ] **문제 작성:** 오류 로그와 상태·metrics가 진단에 유용한 원인을 fixture에 심는다. CLI 명령 사용 이력을 강제 채점하지 않는다. API migration은 현재 v1.37에서 실제 받아들여지는 객체를 검사한다. probe 테스트는 플랫폼을 흔드는 무차별 kill을 쓰지 않는다.
-- [ ] **통과 확인:** `TestObservabilityBank` PASS; 예상 고장 초기 상태는 정상적으로 출제되고 원인이 해결됐을 때만 만점이다.
-- [ ] **커밋:** `content: add validated troubleshooting problems`.
+- [x] **실패 확인:** 문제별 정적 RED(패키지 부재, Task 1–3)와 그룹 합계·coverage RED(`TestObservabilityCoverage`, `TestDeploymentCoverage` 9→12 문제/40→55점 기대치)를 확인했다. 전체 live `TestObservabilityBank`를 패키지 없이 실패시키는 실행은 하지 않았다.
+- [x] **문제 작성:** 오류 로그와 상태·metrics가 진단에 유용한 원인을 fixture에 심는다. CLI 명령 사용 이력을 강제 채점하지 않는다. API migration은 현재 v1.37에서 실제 받아들여지는 객체를 검사한다. probe 테스트는 플랫폼을 흔드는 무차별 kill을 쓰지 않는다.
+- [x] **통과 확인:** `TestObservabilityBank` PASS; 예상 고장 초기 상태는 정상적으로 출제되고 원인이 해결됐을 때만 만점이다.
+- [x] **커밋:** 계획의 단일 커밋 대신 문제별 `content: add validated api migration problem`(2e1b2d4), `content: add validated probes problem`(6b502e0), `content: add validated diagnostics problem`(cbef9e3), `content: harden observability problems and record coverage`(3d4b4fa), `docs: record validated observability milestone`.
 
 ### Task 17: Environment / Configuration / Security 5문제 / 25점
 
