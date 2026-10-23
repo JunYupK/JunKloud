@@ -34,6 +34,13 @@ var observabilityCases = map[string]map[string]int{
 		"liveness-delay-no-startup": 4,
 		"alternative-named-port":    5,
 	},
+	"diagnostics-001": {
+		"sleep-instead":             1,
+		"answer-only":               2,
+		"hardcoded-endpoint":        4,
+		"wrong-pod-answer":          4,
+		"alternative-items-mapping": 5,
+	},
 }
 
 // presentObservabilityIDs are the bank IDs whose package has been authored.

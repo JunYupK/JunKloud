@@ -1,0 +1,291 @@
+{
+  "schema_version": 1,
+  "id": "diagnostics-001",
+  "version": "1.0.0",
+  "title": "Diagnose a crash-looping application and find the busiest Pod",
+  "domain": "observability",
+  "difficulty": "medium",
+  "type": "troubleshoot",
+  "tags": [
+    "observability",
+    "diagnostics"
+  ],
+  "competencies": [
+    "CLI monitoring",
+    "logs",
+    "application debugging"
+  ],
+  "capabilities": [
+    "metrics"
+  ],
+  "parameters": {
+    "namespace": [
+      "jk-diagnostics-001-a",
+      "jk-diagnostics-001-b"
+    ]
+  },
+  "namespace": "${namespace}",
+  "budget": {
+    "cpu": "500m",
+    "memory": "192Mi"
+  },
+  "criteria": [
+    {
+      "id": "top-cpu-answer",
+      "kind": "file",
+      "points": 1,
+      "feedback": "answers/top-cpu.txt에 네임스페이스에서 CPU를 가장 많이 쓰는 Pod의 이름만 적어야 합니다. kubectl top pod로 확인하세요.",
+      "args": {
+        "path": "answers/top-cpu.txt",
+        "format": "text",
+        "matches": [
+          "^\\s*report-worker\\s*$"
+        ]
+      }
+    },
+    {
+      "id": "command-unchanged",
+      "kind": "field",
+      "points": 1,
+      "feedback": "orders 컨테이너 app의 image와 command는 바꾸면 안 됩니다. 원인은 command가 아니라 설정(ConfigMap)에 있습니다.",
+      "target": {
+        "api_version": "apps/v1",
+        "kind": "Deployment",
+        "namespace": "${namespace}",
+        "name": "orders"
+      },
+      "args": {
+        "fields": [
+          {
+            "path": "spec.template.spec.containers[name=app].image",
+            "equals": "docker.io/library/busybox:1.37.0"
+          },
+          {
+            "path": "spec.template.spec.containers[name=app].command",
+            "equals": [
+              "sh",
+              "-c",
+              "if [ ! -f /etc/orders/app.conf ]; then echo \"FATAL: /etc/orders/app.conf not found (mounted: $(ls /etc/orders))\"; exit 1; fi; ep=$(cat /etc/orders/app.conf); echo \"orders started $ep\"; mkdir -p /www; echo \"orders-ok $ep\" > /www/index.html; exec httpd -f -p 8080 -h /www"
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "id": "orders-ready",
+      "kind": "ready",
+      "points": 1,
+      "feedback": "orders Deployment의 replica 1개가 Ready여야 합니다. Pod 로그에서 컨테이너가 종료되는 이유를 읽고, 이미 크래시한 Pod는 재시작해야 수정이 반영될 수 있습니다.",
+      "target": {
+        "api_version": "apps/v1",
+        "kind": "Deployment",
+        "namespace": "${namespace}",
+        "name": "orders"
+      },
+      "args": {
+        "replicas": 1
+      },
+      "timeout": "90s"
+    },
+    {
+      "id": "orders-started",
+      "kind": "logs",
+      "points": 1,
+      "feedback": "orders 컨테이너가 설정 파일을 읽고 'orders started endpoint=orders-db...' 줄을 출력해야 합니다.",
+      "target": {
+        "api_version": "apps/v1",
+        "kind": "Deployment",
+        "namespace": "${namespace}",
+        "name": "orders"
+      },
+      "args": {
+        "container": "app",
+        "matches": [
+          "orders started endpoint=orders-db\\."
+        ],
+        "wait": true
+      },
+      "depends_on": [
+        "orders-ready"
+      ],
+      "timeout": "30s"
+    },
+    {
+      "id": "service-serves",
+      "kind": "http",
+      "points": 1,
+      "feedback": "Service orders가 Ready Pod로 연결되어 orders-ok 응답을 반환해야 합니다.",
+      "target": {
+        "api_version": "v1",
+        "kind": "Service",
+        "namespace": "${namespace}",
+        "name": "orders"
+      },
+      "args": {
+        "port": 80,
+        "path": "/",
+        "body_marker": "orders-ok"
+      },
+      "depends_on": [
+        "orders-ready"
+      ],
+      "timeout": "60s"
+    }
+  ],
+  "setup": [
+    {
+      "kind": "apply",
+      "args": {
+        "path": "setup/orders.yaml"
+      }
+    },
+    {
+      "kind": "apply",
+      "args": {
+        "path": "setup/workers.yaml"
+      }
+    }
+  ],
+  "solution": [
+    {
+      "kind": "apply",
+      "args": {
+        "path": "solution/orders.yaml"
+      }
+    },
+    {
+      "kind": "file",
+      "args": {
+        "source": "solution/top-cpu.txt",
+        "path": "answers/top-cpu.txt"
+      }
+    }
+  ],
+  "initial_expected": {
+    "top-cpu-answer": "FAIL",
+    "command-unchanged": "PASS",
+    "orders-ready": "FAIL",
+    "orders-started": "FAIL",
+    "service-serves": "FAIL"
+  },
+  "initial_score": 1,
+  "cases": [
+    {
+      "id": "sleep-instead",
+      "actions": [
+        {
+          "kind": "apply",
+          "args": {
+            "path": "cases/sleep-instead.yaml"
+          }
+        }
+      ],
+      "expected": {
+        "top-cpu-answer": "FAIL",
+        "command-unchanged": "FAIL",
+        "orders-ready": "PASS",
+        "orders-started": "FAIL",
+        "service-serves": "FAIL"
+      },
+      "expected_score": 1
+    },
+    {
+      "id": "answer-only",
+      "actions": [
+        {
+          "kind": "file",
+          "args": {
+            "source": "solution/top-cpu.txt",
+            "path": "answers/top-cpu.txt"
+          }
+        }
+      ],
+      "expected": {
+        "top-cpu-answer": "PASS",
+        "command-unchanged": "PASS",
+        "orders-ready": "FAIL",
+        "orders-started": "FAIL",
+        "service-serves": "FAIL"
+      },
+      "expected_score": 2
+    },
+    {
+      "id": "hardcoded-endpoint",
+      "actions": [
+        {
+          "kind": "apply",
+          "args": {
+            "path": "cases/hardcoded-endpoint.yaml"
+          }
+        },
+        {
+          "kind": "file",
+          "args": {
+            "source": "solution/top-cpu.txt",
+            "path": "answers/top-cpu.txt"
+          }
+        }
+      ],
+      "expected": {
+        "top-cpu-answer": "PASS",
+        "command-unchanged": "FAIL",
+        "orders-ready": "PASS",
+        "orders-started": "PASS",
+        "service-serves": "PASS"
+      },
+      "expected_score": 4
+    },
+    {
+      "id": "wrong-pod-answer",
+      "actions": [
+        {
+          "kind": "apply",
+          "args": {
+            "path": "solution/orders.yaml"
+          }
+        },
+        {
+          "kind": "file",
+          "args": {
+            "source": "cases/wrong-answer.txt",
+            "path": "answers/top-cpu.txt"
+          }
+        }
+      ],
+      "expected": {
+        "top-cpu-answer": "FAIL",
+        "command-unchanged": "PASS",
+        "orders-ready": "PASS",
+        "orders-started": "PASS",
+        "service-serves": "PASS"
+      },
+      "expected_score": 4
+    },
+    {
+      "id": "alternative-items-mapping",
+      "actions": [
+        {
+          "kind": "apply",
+          "args": {
+            "path": "cases/alternative-items-mapping.yaml"
+          }
+        },
+        {
+          "kind": "file",
+          "args": {
+            "source": "solution/top-cpu.txt",
+            "path": "answers/top-cpu.txt"
+          }
+        }
+      ],
+      "expected": {
+        "top-cpu-answer": "PASS",
+        "command-unchanged": "PASS",
+        "orders-ready": "PASS",
+        "orders-started": "PASS",
+        "service-serves": "PASS"
+      },
+      "expected_score": 5
+    }
+  ]
+}
