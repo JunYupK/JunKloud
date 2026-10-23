@@ -24,6 +24,17 @@
         "helm-001",
         "kustomize-001"
       ]
+    },
+    {
+      "id": "observability",
+      "domain": "observability",
+      "count": 3,
+      "points": 15,
+      "problems": [
+        "api-migration-001",
+        "probes-001",
+        "diagnostics-001"
+      ]
     }
   ]
 }

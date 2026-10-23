@@ -1,0 +1,293 @@
+{
+  "schema_version": 1,
+  "id": "probes-001",
+  "version": "1.0.0",
+  "title": "Fix probes that keep an application from becoming Ready",
+  "domain": "observability",
+  "difficulty": "medium",
+  "type": "troubleshoot",
+  "tags": [
+    "observability",
+    "probes"
+  ],
+  "competencies": [
+    "probes and health checks"
+  ],
+  "capabilities": [],
+  "parameters": {
+    "namespace": [
+      "jk-probes-001-a",
+      "jk-probes-001-b"
+    ]
+  },
+  "namespace": "${namespace}",
+  "budget": {
+    "cpu": "500m",
+    "memory": "192Mi"
+  },
+  "criteria": [
+    {
+      "id": "readiness-probe",
+      "kind": "field",
+      "points": 1,
+      "feedback": "web 컨테이너의 readinessProbe는 HTTP GET /ready를 사용해야 합니다. 앱이 실제로 listen하는 포트를 확인하세요.",
+      "target": {
+        "api_version": "apps/v1",
+        "kind": "Deployment",
+        "namespace": "${namespace}",
+        "name": "checkout"
+      },
+      "args": {
+        "fields": [
+          {
+            "path": "spec.template.spec.containers[name=web].readinessProbe.httpGet.path",
+            "equals": "/ready"
+          }
+        ]
+      }
+    },
+    {
+      "id": "liveness-probe",
+      "kind": "field",
+      "points": 1,
+      "feedback": "web 컨테이너의 livenessProbe는 HTTP GET /healthz를 사용해야 합니다. 앱이 제공하는 경로는 /healthz입니다.",
+      "target": {
+        "api_version": "apps/v1",
+        "kind": "Deployment",
+        "namespace": "${namespace}",
+        "name": "checkout"
+      },
+      "args": {
+        "fields": [
+          {
+            "path": "spec.template.spec.containers[name=web].livenessProbe.httpGet.path",
+            "equals": "/healthz"
+          }
+        ]
+      }
+    },
+    {
+      "id": "startup-probe",
+      "kind": "field",
+      "points": 1,
+      "feedback": "web 컨테이너에 /healthz를 확인하는 startupProbe가 필요하며, 이미지와 command는 제공된 그대로여야 합니다(시작 지연을 command에서 지우면 이 점수를 얻지 못합니다). 앱은 시작에 약 10초가 걸리므로 periodSeconds x failureThreshold가 그보다 커야 합니다.",
+      "target": {
+        "api_version": "apps/v1",
+        "kind": "Deployment",
+        "namespace": "${namespace}",
+        "name": "checkout"
+      },
+      "args": {
+        "fields": [
+          {
+            "path": "spec.template.spec.containers[name=web].startupProbe.httpGet.path",
+            "equals": "/healthz"
+          },
+          {
+            "path": "spec.template.spec.containers[name=web].image",
+            "equals": "docker.io/library/busybox:1.37.0"
+          },
+          {
+            "path": "spec.template.spec.containers[name=web].command",
+            "equals": [
+              "sh",
+              "-c",
+              "sleep 10; mkdir -p /www; printf checkout-ok > /www/index.html; printf ok > /www/healthz; printf ok > /www/ready; exec httpd -f -p 8080 -h /www"
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "id": "rollout-stable",
+      "kind": "ready",
+      "points": 1,
+      "feedback": "checkout Deployment의 2개 replica가 40초 동안 재시작 없이 Ready 상태를 유지해야 합니다. readinessProbe와 livenessProbe의 포트와 경로, 시작 지연(약 10초)을 확인하세요.",
+      "target": {
+        "api_version": "apps/v1",
+        "kind": "Deployment",
+        "namespace": "${namespace}",
+        "name": "checkout"
+      },
+      "args": {
+        "replicas": 2,
+        "stable_for": "40s"
+      },
+      "timeout": "120s"
+    },
+    {
+      "id": "service-serves",
+      "kind": "http",
+      "points": 1,
+      "feedback": "Service checkout이 Ready Pod로 연결되어 checkout-ok 응답을 반환해야 합니다. Probe를 지우거나 앱 command를 바꾸지 말고 probe 설정을 바로잡으세요.",
+      "target": {
+        "api_version": "v1",
+        "kind": "Service",
+        "namespace": "${namespace}",
+        "name": "checkout"
+      },
+      "args": {
+        "port": 80,
+        "path": "/",
+        "body_marker": "checkout-ok"
+      },
+      "depends_on": [
+        "rollout-stable"
+      ],
+      "timeout": "60s"
+    }
+  ],
+  "setup": [
+    {
+      "kind": "apply",
+      "args": {
+        "path": "setup/checkout.yaml"
+      }
+    }
+  ],
+  "solution": [
+    {
+      "kind": "apply",
+      "args": {
+        "path": "solution/checkout.yaml"
+      }
+    }
+  ],
+  "initial_expected": {
+    "readiness-probe": "PASS",
+    "liveness-probe": "FAIL",
+    "startup-probe": "FAIL",
+    "rollout-stable": "FAIL",
+    "service-serves": "FAIL"
+  },
+  "initial_score": 1,
+  "cases": [
+    {
+      "id": "probes-deleted",
+      "actions": [
+        {
+          "kind": "delete-owned",
+          "args": {
+            "targets": [
+              {
+                "api_version": "apps/v1",
+                "kind": "Deployment",
+                "namespace": "${namespace}",
+                "name": "checkout"
+              }
+            ]
+          }
+        },
+        {
+          "kind": "apply",
+          "args": {
+            "path": "cases/probes-deleted.yaml"
+          }
+        }
+      ],
+      "expected": {
+        "readiness-probe": "FAIL",
+        "liveness-probe": "FAIL",
+        "startup-probe": "FAIL",
+        "rollout-stable": "PASS",
+        "service-serves": "PASS"
+      },
+      "expected_score": 2
+    },
+    {
+      "id": "readiness-port-kept",
+      "actions": [
+        {
+          "kind": "apply",
+          "args": {
+            "path": "cases/readiness-port-kept.yaml"
+          }
+        }
+      ],
+      "expected": {
+        "readiness-probe": "PASS",
+        "liveness-probe": "PASS",
+        "startup-probe": "PASS",
+        "rollout-stable": "FAIL",
+        "service-serves": "FAIL"
+      },
+      "expected_score": 3
+    },
+    {
+      "id": "liveness-delay-no-startup",
+      "actions": [
+        {
+          "kind": "apply",
+          "args": {
+            "path": "cases/liveness-delay-no-startup.yaml"
+          }
+        }
+      ],
+      "expected": {
+        "readiness-probe": "PASS",
+        "liveness-probe": "PASS",
+        "startup-probe": "FAIL",
+        "rollout-stable": "PASS",
+        "service-serves": "PASS"
+      },
+      "expected_score": 4
+    },
+    {
+      "id": "command-shortened",
+      "actions": [
+        {
+          "kind": "apply",
+          "args": {
+            "path": "cases/command-shortened.yaml"
+          }
+        }
+      ],
+      "expected": {
+        "readiness-probe": "PASS",
+        "liveness-probe": "PASS",
+        "startup-probe": "FAIL",
+        "rollout-stable": "PASS",
+        "service-serves": "PASS"
+      },
+      "expected_score": 4
+    },
+    {
+      "id": "liveness-wrong-port",
+      "actions": [
+        {
+          "kind": "apply",
+          "args": {
+            "path": "cases/liveness-wrong-port.yaml"
+          }
+        }
+      ],
+      "expected": {
+        "readiness-probe": "PASS",
+        "liveness-probe": "PASS",
+        "startup-probe": "PASS",
+        "rollout-stable": "FAIL",
+        "service-serves": "FAIL"
+      },
+      "expected_score": 3
+    },
+    {
+      "id": "alternative-named-port",
+      "actions": [
+        {
+          "kind": "apply",
+          "args": {
+            "path": "cases/alternative-named-port.yaml"
+          }
+        }
+      ],
+      "expected": {
+        "readiness-probe": "PASS",
+        "liveness-probe": "PASS",
+        "startup-probe": "PASS",
+        "rollout-stable": "PASS",
+        "service-serves": "PASS"
+      },
+      "expected_score": 5
+    }
+  ]
+}

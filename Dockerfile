@@ -23,6 +23,7 @@ ENV DEBIAN_FRONTEND=noninteractive \
 
 RUN apt-get update \
     && apt-get install -y --no-install-recommends \
+        bash-completion \
         ca-certificates \
         curl \
         git \
@@ -177,6 +178,13 @@ RUN echo '# user aliases persist here across problem resets' > /etc/skel/.bash_a
     && cp /etc/skel/.bashrc /home/learner/.bashrc \
     && cp /etc/skel/.bash_aliases /home/learner/.bash_aliases \
     && chown -R learner:learner /home/learner
+
+# Exam-style `k` alias and kubectl completion (for both `kubectl` and `k`) in
+# every interactive shell. System-wide rather than in the seeded ~/.bashrc so
+# an existing learner-home volume picks it up on the next image rebuild.
+COPY runtime/kubectl-shell.bash /etc/kubectl-shell.bash
+RUN kubectl completion bash > /usr/share/bash-completion/completions/kubectl \
+    && echo '. /etc/kubectl-shell.bash' >> /etc/bash.bashrc
 
 COPY runtime/entrypoint.sh /usr/local/bin/entrypoint.sh
 RUN chmod +x /usr/local/bin/entrypoint.sh

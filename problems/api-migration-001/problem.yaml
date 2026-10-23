@@ -1,0 +1,392 @@
+{
+  "schema_version": 1,
+  "id": "api-migration-001",
+  "version": "1.0.0",
+  "title": "Migrate legacy manifests to served APIs",
+  "domain": "observability",
+  "difficulty": "medium",
+  "type": "modify",
+  "tags": [
+    "observability",
+    "api-migration"
+  ],
+  "competencies": [
+    "API deprecation"
+  ],
+  "capabilities": [],
+  "parameters": {
+    "namespace": [
+      "jk-api-migration-001-a",
+      "jk-api-migration-001-b"
+    ]
+  },
+  "namespace": "${namespace}",
+  "budget": {
+    "cpu": "500m",
+    "memory": "192Mi"
+  },
+  "criteria": [
+    {
+      "id": "manifest-deployment",
+      "kind": "file",
+      "points": 1,
+      "feedback": "legacy/app.yaml의 Deployment가 apps/v1이고 spec.selector가 있으며 replicas가 2이고, 제공된 container(web: 이미지 docker.io/library/busybox:1.37.0와 command)가 그대로여야 합니다.",
+      "args": {
+        "path": "legacy/app.yaml",
+        "format": "yaml",
+        "select": {
+          "api_version": "apps/v1",
+          "kind": "Deployment",
+          "name": "inventory"
+        },
+        "fields": [
+          {
+            "path": "spec.selector",
+            "exists": true
+          },
+          {
+            "path": "spec.replicas",
+            "equals": 2
+          },
+          {
+            "path": "spec.template.spec.containers[name=web].image",
+            "equals": "docker.io/library/busybox:1.37.0"
+          },
+          {
+            "path": "spec.template.spec.containers[name=web].command",
+            "equals": [
+              "sh",
+              "-c",
+              "mkdir -p /www; printf inventory-ok > /www/index.html; exec httpd -f -p 8080 -h /www"
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "id": "manifest-hpa",
+      "kind": "file",
+      "points": 1,
+      "feedback": "legacy/app.yaml의 HPA가 autoscaling/v2이고 scaleTargetRef가 apps/v1 Deployment이며 첫 번째 Resource metric이 cpu이고 target type=Utilization, averageUtilization=70이어야 합니다.",
+      "args": {
+        "path": "legacy/app.yaml",
+        "format": "yaml",
+        "select": {
+          "api_version": "autoscaling/v2",
+          "kind": "HorizontalPodAutoscaler",
+          "name": "inventory"
+        },
+        "fields": [
+          {
+            "path": "spec.scaleTargetRef.apiVersion",
+            "equals": "apps/v1"
+          },
+          {
+            "path": "spec.scaleTargetRef.kind",
+            "equals": "Deployment"
+          },
+          {
+            "path": "spec.metrics[type=Resource].resource.name",
+            "equals": "cpu"
+          },
+          {
+            "path": "spec.metrics[type=Resource].resource.target.type",
+            "equals": "Utilization"
+          },
+          {
+            "path": "spec.metrics[type=Resource].resource.target.averageUtilization",
+            "equals": 70
+          }
+        ]
+      }
+    },
+    {
+      "id": "deployment-ready",
+      "kind": "ready",
+      "points": 1,
+      "feedback": "inventory Deployment(apps/v1)가 적용되어 2개 replica가 안정적으로 Ready이어야 합니다.",
+      "target": {
+        "api_version": "apps/v1",
+        "kind": "Deployment",
+        "namespace": "${namespace}",
+        "name": "inventory"
+      },
+      "args": {
+        "replicas": 2
+      },
+      "timeout": "60s"
+    },
+    {
+      "id": "hpa-live",
+      "kind": "field",
+      "points": 1,
+      "feedback": "클러스터에 적용된 autoscaling/v2 HPA의 대상(apps/v1 Deployment inventory), 2~4 범위, 첫 번째 Resource metric인 cpu의 Utilization 70% 목표를 확인하세요.",
+      "target": {
+        "api_version": "autoscaling/v2",
+        "kind": "HorizontalPodAutoscaler",
+        "namespace": "${namespace}",
+        "name": "inventory"
+      },
+      "args": {
+        "fields": [
+          {
+            "path": "spec.scaleTargetRef.apiVersion",
+            "equals": "apps/v1"
+          },
+          {
+            "path": "spec.scaleTargetRef.kind",
+            "equals": "Deployment"
+          },
+          {
+            "path": "spec.scaleTargetRef.name",
+            "equals": "inventory"
+          },
+          {
+            "path": "spec.minReplicas",
+            "equals": 2
+          },
+          {
+            "path": "spec.maxReplicas",
+            "equals": 4
+          },
+          {
+            "path": "spec.metrics[type=Resource].resource.name",
+            "equals": "cpu"
+          },
+          {
+            "path": "spec.metrics[type=Resource].resource.target.type",
+            "equals": "Utilization"
+          },
+          {
+            "path": "spec.metrics[type=Resource].resource.target.averageUtilization",
+            "equals": 70
+          }
+        ]
+      }
+    },
+    {
+      "id": "service-serves",
+      "kind": "http",
+      "points": 1,
+      "feedback": "Service inventory가 Ready Pod로 연결되어 inventory-ok 응답을 반환해야 합니다. Pod label과 Service selector를 확인하세요.",
+      "target": {
+        "api_version": "v1",
+        "kind": "Service",
+        "namespace": "${namespace}",
+        "name": "inventory"
+      },
+      "args": {
+        "port": 80,
+        "path": "/",
+        "body_marker": "inventory-ok"
+      },
+      "depends_on": [
+        "deployment-ready"
+      ],
+      "timeout": "60s"
+    }
+  ],
+  "setup": [
+    {
+      "kind": "apply",
+      "args": {
+        "path": "setup/service.yaml"
+      }
+    }
+  ],
+  "solution": [
+    {
+      "kind": "file",
+      "args": {
+        "source": "solution/app.yaml",
+        "path": "legacy/app.yaml"
+      }
+    },
+    {
+      "kind": "apply",
+      "args": {
+        "path": "solution/app.yaml"
+      }
+    }
+  ],
+  "initial_expected": {
+    "manifest-deployment": "FAIL",
+    "manifest-hpa": "FAIL",
+    "deployment-ready": "FAIL",
+    "hpa-live": "FAIL",
+    "service-serves": "FAIL"
+  },
+  "initial_score": 0,
+  "cases": [
+    {
+      "id": "apiversion-only",
+      "actions": [
+        {
+          "kind": "file",
+          "args": {
+            "source": "cases/apiversion-only.yaml",
+            "path": "legacy/app.yaml"
+          }
+        }
+      ],
+      "expected": {
+        "manifest-deployment": "FAIL",
+        "manifest-hpa": "FAIL",
+        "deployment-ready": "FAIL",
+        "hpa-live": "FAIL",
+        "service-serves": "FAIL"
+      },
+      "expected_score": 0
+    },
+    {
+      "id": "fixed-not-applied",
+      "actions": [
+        {
+          "kind": "file",
+          "args": {
+            "source": "solution/app.yaml",
+            "path": "legacy/app.yaml"
+          }
+        }
+      ],
+      "expected": {
+        "manifest-deployment": "PASS",
+        "manifest-hpa": "PASS",
+        "deployment-ready": "FAIL",
+        "hpa-live": "FAIL",
+        "service-serves": "FAIL"
+      },
+      "expected_score": 2
+    },
+    {
+      "id": "wrong-hpa-target",
+      "actions": [
+        {
+          "kind": "file",
+          "args": {
+            "source": "cases/wrong-hpa-target.yaml",
+            "path": "legacy/app.yaml"
+          }
+        },
+        {
+          "kind": "apply",
+          "args": {
+            "path": "cases/wrong-hpa-target.yaml"
+          }
+        }
+      ],
+      "expected": {
+        "manifest-deployment": "PASS",
+        "manifest-hpa": "FAIL",
+        "deployment-ready": "PASS",
+        "hpa-live": "FAIL",
+        "service-serves": "PASS"
+      },
+      "expected_score": 3
+    },
+    {
+      "id": "stale-scale-target",
+      "actions": [
+        {
+          "kind": "file",
+          "args": {
+            "source": "cases/stale-scale-target.yaml",
+            "path": "legacy/app.yaml"
+          }
+        },
+        {
+          "kind": "apply",
+          "args": {
+            "path": "cases/stale-scale-target.yaml"
+          }
+        }
+      ],
+      "expected": {
+        "manifest-deployment": "PASS",
+        "manifest-hpa": "FAIL",
+        "deployment-ready": "PASS",
+        "hpa-live": "FAIL",
+        "service-serves": "PASS"
+      },
+      "expected_score": 3
+    },
+    {
+      "id": "selector-drops-tier",
+      "actions": [
+        {
+          "kind": "file",
+          "args": {
+            "source": "cases/selector-drops-tier.yaml",
+            "path": "legacy/app.yaml"
+          }
+        },
+        {
+          "kind": "apply",
+          "args": {
+            "path": "cases/selector-drops-tier.yaml"
+          }
+        }
+      ],
+      "expected": {
+        "manifest-deployment": "PASS",
+        "manifest-hpa": "PASS",
+        "deployment-ready": "PASS",
+        "hpa-live": "PASS",
+        "service-serves": "FAIL"
+      },
+      "expected_score": 4
+    },
+    {
+      "id": "container-replaced",
+      "actions": [
+        {
+          "kind": "file",
+          "args": {
+            "source": "cases/container-replaced.yaml",
+            "path": "legacy/app.yaml"
+          }
+        },
+        {
+          "kind": "apply",
+          "args": {
+            "path": "cases/container-replaced.yaml"
+          }
+        }
+      ],
+      "expected": {
+        "manifest-deployment": "FAIL",
+        "manifest-hpa": "PASS",
+        "deployment-ready": "PASS",
+        "hpa-live": "PASS",
+        "service-serves": "PASS"
+      },
+      "expected_score": 4
+    },
+    {
+      "id": "alternative-match-expressions",
+      "actions": [
+        {
+          "kind": "file",
+          "args": {
+            "source": "cases/alternative-match-expressions.yaml",
+            "path": "legacy/app.yaml"
+          }
+        },
+        {
+          "kind": "apply",
+          "args": {
+            "path": "cases/alternative-match-expressions.yaml"
+          }
+        }
+      ],
+      "expected": {
+        "manifest-deployment": "PASS",
+        "manifest-hpa": "PASS",
+        "deployment-ready": "PASS",
+        "hpa-live": "PASS",
+        "service-serves": "PASS"
+      },
+      "expected_score": 5
+    }
+  ]
+}

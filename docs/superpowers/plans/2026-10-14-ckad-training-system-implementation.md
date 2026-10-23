@@ -408,20 +408,22 @@ Task 2에서 `internal/model`에 아래 타입을 정의한다. 패키지 간에
 
 ### Task 16: Observability & Maintenance 3문제 / 15점
 
+**실행 기록:** 2026-10-23 완료(최종 리뷰 수정 반영). 동결한 트리 `4f7fdf6c5bea466bd84028bc76df5150a5768d52`(`content: close final review gaps in observability problems`; 이후 커밋은 문서만 변경)에서 실제 3문제 smoke 295.07초 PASS, 전체 `go test -tags=integration ./tests/integration -run '^TestObservabilityBank$' -count=1 -timeout=150m -v` PASS 4731.22초(package 4731.248초, EXIT0; api-migration-001 634.26초, probes-001 2429.36초, diagnostics-001 1587.47초)와 마지막 `go test ./... -count=1`(14 package ok)·`go vet ./...`·`go vet -tags=integration ./...`·`gofmt -l .` 모두 깨끗했다. 두 covering seed의 초기·정답·오답·대안·reset 54단계(18+18+18)를 모두 통과했고 ERROR 결과는 없으며 seed는 api-migration-001 [1 3], probes-001 [1 2], diagnostics-001 [1 5], 재seed·timeout 변경은 없다(content hash는 sub-plan Verified evidence 참조). 최종 리뷰 수정: probes-001은 startup-probe 점수가 제공된 image/command 유지를 함께 요구하고(case `command-shortened` 4점), rollout-stable을 40초 안정 구간/120초 한도로 늘려 기본 timing의 잘못된 liveness 포트(case `liveness-wrong-port` 3점)가 두 seed 모두 학습자 오류 FAIL이 되며, api-migration-001은 첫 Resource metric이 cpu임을 요구하고 문구를 바로잡았고, diagnostics-001은 answers/ 디렉터리를 제공한다. 관찰성 3문제/15점이 기존 9문제/40점에 합쳐 12문제/55점의 부분 bank가 되었고(`TestDeploymentCoverage` 12/55, 중복 ID 없음), 기본 20문항 mock은 아직 미완성이다. 이전 실행(Task 1–3 문제별 실행, 3d4b4fa의 전체 실행 3763.53초)은 content hash가 바뀌어 historical 증거일 뿐이며 이 실행이 유효 기록이다. live 실행은 cgroup v1 샌드박스(`JUNKLOUD_TEST_HOST_COMPAT=cgroupv1,no-ipv6 JUNKLOUD_TEST_UNSUPPORTED_CAPABILITIES=network-policy`)에서 수행했으며 NetworkPolicy 강제가 필요한 검증은 이 문제들에 없다. native M2/4GiB/Windows는 NOT RUN. diagnostics-001의 metrics는 Task 3에서 `kubectl top`으로 확인했다(report-worker 약 200m, 나머지 5m 이하; cgroup v1이라 메모리는 0Mi). 정확한 hash·단계별 상태·근거는 2026-10-23-task16-observability.md의 Verified evidence 참조(로컬 비커밋 로그 경로 포함). **Codex 리뷰 수정(api-migration-001 재검증):** 리뷰 P2 지적대로 api-migration-001의 file 점수가 제공된 container를 채점하지 않아 command를 바꿔도 5/5였으므로, `manifest-deployment`가 제공된 `web` container의 image·command를 함께 요구하도록 고치고 case `container-replaced`(4점)를 추가했다(정적 RED는 codexfix-red.log, GREEN은 codexfix-green-static.log). 커밋 `69c78e5497258a373963e3741cafd086555dcc53`(`content: grade the provided container in api migration`)에서 `go test -tags=integration ./tests/integration -run '^TestObservabilityBank$/^api-migration-001$' -count=1 -timeout=40m -v` PASS 767.93초(package 944.357초), content hash `sha256:c16876b8dddc564ef01baa1926a865667afc78e3dc9ebd491b50ed13fd40020a`, seed [1 3], 20단계 모두 `complete=true error=<nil>`, ERROR·재seed 없음; 단계 점수(두 seed 동일) initial 0, solved 5, apiversion-only 0, fixed-not-applied 2, wrong-hpa-target 3, stale-scale-target 3, selector-drops-tier 4, container-replaced 4, alternative-match-expressions 5, reset 0. 이 실행이 api-migration-001의 유효 기록이며 4f7fdf6 전체 실행의 api-migration-001 항목(634.26초, `sha256:587a5c56...`)은 historical이다. probes-001과 diagnostics-001의 패키지는 이번 수정에서 바뀌지 않았으므로 4f7fdf6 전체 실행 기록(probes-001 2429.36초·diagnostics-001 1587.47초, 각 hash)이 그대로 유효하다. 로그는 로컬 비커밋 `.superpowers/sdd/2026-10-23-task16-observability/task-4-logs/codexfix-api-1.log`.
+
 **Files:** Create Task 16 ID 세 package, `tests/integration/bank_observability_test.go`; Modify coverage.
 
 **Interfaces:** Consumes resource/ready/logs checker와 platform metrics. Produces 5개 공식 관찰·유지보수 역량에 매핑된 3 package.
 
-- [ ] **실패 테스트 작성:** `TestObservabilityBank`: count3,total15, probe 제거·잘못된 API 변환·증상만 숨긴 풀이 실패를 assert한다.
+- [x] **실패 테스트 작성:** `TestObservabilityBank`: count3,total15, probe 제거·잘못된 API 변환·증상만 숨긴 풀이 실패를 assert한다.
   ```go
   testutil.Equal(t, sumPoints(problems), 15)
   testutil.Equal(t, deletedProbe.Status, "FAIL")
   testutil.Equal(t, fixedManifestAndBehavior.Status, "PASS")
   ```
-- [ ] **실패 확인:** `go test -tags=integration ./tests/integration -run TestObservabilityBank -count=1 -v` 실패 확인.
-- [ ] **문제 작성:** 오류 로그와 상태·metrics가 진단에 유용한 원인을 fixture에 심는다. CLI 명령 사용 이력을 강제 채점하지 않는다. API migration은 현재 v1.37에서 실제 받아들여지는 객체를 검사한다. probe 테스트는 플랫폼을 흔드는 무차별 kill을 쓰지 않는다.
-- [ ] **통과 확인:** `TestObservabilityBank` PASS; 예상 고장 초기 상태는 정상적으로 출제되고 원인이 해결됐을 때만 만점이다.
-- [ ] **커밋:** `content: add validated troubleshooting problems`.
+- [x] **실패 확인:** 문제별 정적 RED(패키지 부재, Task 1–3)와 그룹 합계·coverage RED(`TestObservabilityCoverage`, `TestDeploymentCoverage` 9→12 문제/40→55점 기대치)를 확인했다. 전체 live `TestObservabilityBank`를 패키지 없이 실패시키는 실행은 하지 않았다.
+- [x] **문제 작성:** 오류 로그와 상태·metrics가 진단에 유용한 원인을 fixture에 심는다. CLI 명령 사용 이력을 강제 채점하지 않는다. API migration은 현재 v1.37에서 실제 받아들여지는 객체를 검사한다. probe 테스트는 플랫폼을 흔드는 무차별 kill을 쓰지 않는다.
+- [x] **통과 확인:** `TestObservabilityBank` PASS; 예상 고장 초기 상태는 정상적으로 출제되고 원인이 해결됐을 때만 만점이다.
+- [x] **커밋:** 계획의 단일 커밋 대신 문제별 `content: add validated api migration problem`(2e1b2d4), `content: add validated probes problem`(6b502e0), `content: add validated diagnostics problem`(cbef9e3), `content: harden observability problems and record coverage`(3d4b4fa), `docs: record validated observability milestone`.
 
 ### Task 17: Environment / Configuration / Security 5문제 / 25점
 

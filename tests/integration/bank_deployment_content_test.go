@@ -185,8 +185,11 @@ func TestDeploymentCoverage(t *testing.T) {
 		points += g.Points
 	}
 	testutil.Equal(t, deployment, 1)
-	testutil.Equal(t, count, 9)
-	testutil.Equal(t, points, 40)
+	// design-build 5/20 + deployment 4/20 + observability 3/15, no problem in
+	// two groups (checked above through seen).
+	testutil.Equal(t, count, 12)
+	testutil.Equal(t, points, 55)
+	testutil.Equal(t, len(seen), 12)
 	testutil.Equal(t, problem.PracticeMinCount, 5)
 	_, err = problem.Select(loadGroup(t, deploymentIDs), problem.SelectOptions{Mode: model.ModePractice, Count: 4, Seed: 1})
 	if !errors.Is(err, problem.ErrInvalidCount) {
