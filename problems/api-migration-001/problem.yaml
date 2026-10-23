@@ -55,7 +55,7 @@
       "id": "manifest-hpa",
       "kind": "file",
       "points": 1,
-      "feedback": "legacy/app.yaml의 HPA가 autoscaling/v2이고 scaleTargetRef가 apps/v1 Deployment이며 CPU target type=Utilization, averageUtilization=70이어야 합니다.",
+      "feedback": "legacy/app.yaml의 HPA가 autoscaling/v2이고 scaleTargetRef가 apps/v1 Deployment이며 첫 번째 Resource metric이 cpu이고 target type=Utilization, averageUtilization=70이어야 합니다.",
       "args": {
         "path": "legacy/app.yaml",
         "format": "yaml",
@@ -72,6 +72,10 @@
           {
             "path": "spec.scaleTargetRef.kind",
             "equals": "Deployment"
+          },
+          {
+            "path": "spec.metrics[type=Resource].resource.name",
+            "equals": "cpu"
           },
           {
             "path": "spec.metrics[type=Resource].resource.target.type",
@@ -104,7 +108,7 @@
       "id": "hpa-live",
       "kind": "field",
       "points": 1,
-      "feedback": "클러스터에 적용된 autoscaling/v2 HPA의 대상(apps/v1 Deployment inventory), 2~4 범위, CPU Utilization 70% 목표를 확인하세요.",
+      "feedback": "클러스터에 적용된 autoscaling/v2 HPA의 대상(apps/v1 Deployment inventory), 2~4 범위, 첫 번째 Resource metric인 cpu의 Utilization 70% 목표를 확인하세요.",
       "target": {
         "api_version": "autoscaling/v2",
         "kind": "HorizontalPodAutoscaler",
@@ -132,6 +136,10 @@
           {
             "path": "spec.maxReplicas",
             "equals": 4
+          },
+          {
+            "path": "spec.metrics[type=Resource].resource.name",
+            "equals": "cpu"
           },
           {
             "path": "spec.metrics[type=Resource].resource.target.type",

@@ -34,6 +34,8 @@ var observabilityCases = map[string]map[string]int{
 		"probes-deleted":            2,
 		"readiness-port-kept":       3,
 		"liveness-delay-no-startup": 4,
+		"command-shortened":         4,
+		"liveness-wrong-port":       3,
 		"alternative-named-port":    5,
 	},
 	"diagnostics-001": {
@@ -246,8 +248,10 @@ func TestObservabilityAPIMigrationContracts(t *testing.T) {
 	// The HPA is graded on the scale target's API (file and live) and, live,
 	// on the metric target type; each graded value is stated in the question.
 	wantFields := map[string]map[string]any{
-		"manifest-hpa": {"spec.scaleTargetRef.apiVersion": "apps/v1", "spec.scaleTargetRef.kind": "Deployment"},
+		"manifest-hpa": {"spec.scaleTargetRef.apiVersion": "apps/v1", "spec.scaleTargetRef.kind": "Deployment",
+			"spec.metrics[type=Resource].resource.name": "cpu"},
 		"hpa-live": {"spec.scaleTargetRef.apiVersion": "apps/v1", "spec.scaleTargetRef.kind": "Deployment",
+			"spec.metrics[type=Resource].resource.name":        "cpu",
 			"spec.metrics[type=Resource].resource.target.type": "Utilization"},
 	}
 	for _, c := range p.Criteria {
@@ -265,6 +269,11 @@ func TestObservabilityAPIMigrationContracts(t *testing.T) {
 	}
 	if q := string(p.Files[problem.QuestionFile]); !strings.Contains(q, "`apps/v1` Deployment `inventory`") {
 		t.Error("question must say that the HPA targets the apps/v1 Deployment inventory")
+	}
+	// The graders select the first Resource metric, so the question must say
+	// that the CPU metric has to be the (first) Resource metric.
+	if q := string(p.Files[problem.QuestionFile]); !strings.Contains(q, "first `Resource` metric") || strings.Contains(q, "Equivalent selectors and extra HPA settings that keep these values are accepted") {
+		t.Error("question must say the CPU metric is the first Resource metric and name the accepted extras")
 	}
 	// scaleTargetRef.apiVersion of every applied HPA, per case/solution. Only
 	// the stale-scale-target case may keep the legacy value; no object may use
@@ -398,5 +407,130 @@ func TestObservabilityRobustnessContracts(t *testing.T) {
 	diag := loadGroup(t, []string{"diagnostics-001"})[0]
 	if q := string(diag.Files[problem.QuestionFile]); !strings.Contains(q, "kubectl rollout restart deployment/orders") {
 		t.Error("diagnostics question must name the restart command for an already crashed Pod")
+	}
+}
+
+func probeContainers(t *testing.T, p model.Problem, f model.FrozenProblem, actions []model.Action) []map[string]any {
+	t.Helper()
+	var out []map[string]any
+	for _, a := range actions {
+		if a.Kind != model.ActionApply {
+			continue
+		}
+		for _, o := range applyObjects(t, p, f, a) {
+			if o["kind"] != "Deployment" {
+				continue
+			}
+			for _, c := range o["spec"].(map[string]any)["template"].(map[string]any)["spec"].(map[string]any)["containers"].([]any) {
+				out = append(out, c.(map[string]any))
+			}
+		}
+	}
+	return out
+}
+
+// probes-001: the image and command are graded through the startup-probe
+// criterion (a shortened command hides the startup delay), a wrong liveness
+// port must outlast the stability window with Kubernetes default timings, and
+// the wrong-probe cases keep their point.
+func TestObservabilityProbesContracts(t *testing.T) {
+	p := loadGroup(t, []string{"probes-001"})[0]
+	f, err := problem.Freeze(p, 1)
+	testutil.NoError(t, err)
+	var wantCommand []any
+	var wantImage any
+	for _, c := range p.Criteria {
+		switch c.ID {
+		case "startup-probe":
+			for _, field := range c.Args["fields"].([]any) {
+				m := field.(map[string]any)
+				switch m["path"] {
+				case "spec.template.spec.containers[name=web].command":
+					wantCommand, _ = m["equals"].([]any)
+				case "spec.template.spec.containers[name=web].image":
+					wantImage = m["equals"]
+				}
+			}
+		case "rollout-stable":
+			testutil.Equal(t, c.Args["stable_for"], any("40s"))
+			testutil.Equal(t, c.Timeout, 120*time.Second)
+		}
+	}
+	if len(wantCommand) != 3 || wantImage != "docker.io/library/busybox:1.37.0" {
+		t.Fatalf("startup-probe criterion must pin the provided image and command, got %v %v", wantImage, wantCommand)
+	}
+	for _, name := range []string{problem.QuestionFile, problem.ExplanationFile} {
+		if !strings.Contains(string(p.Files[name]), "40") {
+			t.Errorf("%s must state the 40-second stability window", name)
+		}
+	}
+	if q := string(p.Files[problem.QuestionFile]); !strings.Contains(q, "image and command") {
+		t.Error("question must say the image and command are part of the startup point")
+	}
+	check := func(label string, actions []model.Action, sameCommand bool) []map[string]any {
+		cs := probeContainers(t, p, f, actions)
+		if len(cs) != 1 {
+			if len(actions) > 0 && label != "case probes-deleted" {
+				t.Fatalf("%s: want one web container, got %d", label, len(cs))
+			}
+		}
+		for _, c := range cs {
+			got, _ := c["command"].([]any)
+			if sameCommand != slices.Equal(got, wantCommand) {
+				t.Errorf("%s: command %v, same as the criterion want %v", label, got, sameCommand)
+			}
+			if sameCommand && c["image"] != wantImage {
+				t.Errorf("%s: image %v", label, c["image"])
+			}
+		}
+		return cs
+	}
+	check("setup", p.Setup, true)
+	check("solution", p.Solution, true)
+	for _, c := range p.Cases {
+		switch c.ID {
+		case "command-shortened":
+			cs := check("case "+c.ID, c.Actions, false)
+			startup := cs[0]["startupProbe"].(map[string]any)
+			testutil.Equal(t, startup["httpGet"].(map[string]any)["path"], any("/healthz"))
+			testutil.Equal(t, startup["failureThreshold"], any(float64(1)))
+		case "liveness-wrong-port":
+			cs := check("case "+c.ID, c.Actions, true)
+			live := cs[0]["livenessProbe"].(map[string]any)
+			testutil.Equal(t, live["httpGet"].(map[string]any)["path"], any("/healthz"))
+			testutil.Equal(t, live["httpGet"].(map[string]any)["port"], any(float64(8081)))
+			for _, key := range []string{"periodSeconds", "failureThreshold", "initialDelaySeconds", "timeoutSeconds"} {
+				if _, ok := live[key]; ok {
+					t.Errorf("liveness-wrong-port must keep the default %s", key)
+				}
+			}
+			for _, probe := range []string{"readinessProbe", "startupProbe"} {
+				testutil.Equal(t, cs[0][probe].(map[string]any)["httpGet"].(map[string]any)["port"], any(float64(8080)))
+			}
+		case "liveness-delay-no-startup":
+			cs := check("case "+c.ID, c.Actions, true)
+			if _, ok := cs[0]["startupProbe"]; ok {
+				t.Error("liveness-delay-no-startup must not have a startup probe")
+			}
+			testutil.Equal(t, cs[0]["livenessProbe"].(map[string]any)["failureThreshold"], any(float64(3)))
+		default:
+			check("case "+c.ID, c.Actions, true)
+		}
+	}
+}
+
+// diagnostics-001: the answers directory is handed out, so a learner does not
+// need to create it, and the stability window is disclosed.
+func TestObservabilityDiagnosticsHandout(t *testing.T) {
+	p := loadGroup(t, []string{"diagnostics-001"})[0]
+	if _, ok := p.Files["setup/provided/answers/README.txt"]; !ok {
+		t.Error("answers/ directory must be shipped in setup/provided")
+	}
+	q := string(p.Files[problem.QuestionFile])
+	if !strings.Contains(q, "10-second stability window") {
+		t.Error("question must state the orders-ready stability window")
+	}
+	if strings.Contains(q, "args") {
+		t.Error("question must not mention the ungraded args")
 	}
 }

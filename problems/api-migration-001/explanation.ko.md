@@ -8,7 +8,7 @@ Kubernetes는 오래된 API 버전을 deprecation 기간 뒤에 제거합니다.
 
 ## 해결
 - Deployment는 `apps/v1`로 바꾸고 `spec.selector.matchLabels`를 추가합니다. selector는 Pod template label과 일치해야 하며, Service selector(`app: inventory`, `tier: api`)가 선택하는 label을 그대로 유지해야 endpoint가 생깁니다. `matchExpressions` selector도 동등합니다.
-- HPA는 `autoscaling/v2`로 바꾸고 `targetAverageUtilization: 70`을 `target: {type: Utilization, averageUtilization: 70}`으로 바꿉니다. `scaleTargetRef.apiVersion`도 `apps/v1`, `kind`는 `Deployment`로 맞춰야 합니다. 옛 `extensions/v1beta1`을 그대로 두면 API 서버가 객체 자체는 받아들이지만 HPA가 대상 Deployment를 찾지 못해(`FailedGetScale`) 동작하지 않으므로 file과 live 모두 감점됩니다. `behavior` 같은 추가 설정이 있어도 요구 값이 같으면 허용됩니다.
+- HPA는 `autoscaling/v2`로 바꾸고 `targetAverageUtilization: 70`을 `target: {type: Utilization, averageUtilization: 70}`으로 바꿉니다. `scaleTargetRef.apiVersion`도 `apps/v1`, `kind`는 `Deployment`로 맞춰야 합니다. 옛 `extensions/v1beta1`을 그대로 두면 API 서버가 객체 자체는 받아들이지만 HPA가 대상 Deployment를 찾지 못해(`FailedGetScale`) 동작하지 않으므로 file과 live 모두 감점됩니다. `behavior` 같은 추가 설정이 있어도 요구 값이 같으면 허용됩니다. 채점은 첫 번째 `type: Resource` metric을 보므로 CPU metric(`name: cpu`)을 첫 Resource metric으로 두어야 하고, 다른 metric은 그 뒤에 추가할 수 있습니다.
 - 수정한 파일을 `kubectl apply -n <namespace> -f legacy/app.yaml`로 적용합니다.
 
 ## 채점

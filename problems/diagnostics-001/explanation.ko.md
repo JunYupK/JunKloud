@@ -16,7 +16,7 @@ Pod가 시작하자마자 종료하는 CrashLoopBackOff는 "컨테이너가 왜 
 ## 채점
 - `top-cpu-answer`: 파일 내용이 `report-worker` 한 줄이어야 합니다.
 - `command-unchanged`: `app` 컨테이너의 image와 command가 처음 제공된 값 그대로여야 합니다. command를 `sleep 3600`으로 바꾸면 Pod는 Ready처럼 보이지만 앱 로그와 Service 응답이 없고, command에 endpoint를 직접 적어 넣으면 겉으로는 동작해도 원인을 고친 것이 아니므로 이 점수를 얻지 못합니다.
-- `orders-ready`, `orders-started`, `service-serves`: 새 Pod가 Ready가 되고, 시작 로그 `orders started endpoint=orders-db.`가 보이며, Service가 `orders-ok`를 반환해야 합니다. 설정 파일이 없어서 앱이 종료하는 것은 학습자의 오류이므로 환경 오류(ERROR)가 아니라 FAIL입니다.
+- `orders-ready`, `orders-started`, `service-serves`: 새 Pod가 Ready가 되고(`orders-ready`는 10초 안정 구간 동안 유지되어야 하며 관찰 한도는 90초), 시작 로그 `orders started endpoint=orders-db.`가 보이며, Service가 `orders-ok`를 반환해야 합니다. 설정 파일이 없어서 앱이 종료하는 것은 학습자의 오류이므로 환경 오류(ERROR)가 아니라 FAIL입니다.
 - 실행한 명령어 이력은 채점하지 않으며, `kubectl top` 사용 여부도 보지 않고 답 파일의 내용만 확인합니다.
 
 ## 공식 문서
