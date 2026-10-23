@@ -12,7 +12,7 @@ Kubernetes는 오래된 API 버전을 deprecation 기간 뒤에 제거합니다.
 - 수정한 파일을 `kubectl apply -n <namespace> -f legacy/app.yaml`로 적용합니다.
 
 ## 채점
-파일 내용(2점)과 실제 클러스터 상태(3점)를 따로 채점합니다. HPA는 `autoscaling/v2`, 대상 `apps/v1` Deployment `inventory`, 2~4 범위, CPU `Utilization` 70%를 확인합니다. 파일만 고치고 적용하지 않으면 live 점수가 없고, 파일과 다른 값을 적용하면 file 점수와 live 점수가 어긋납니다. selector에서 `tier` label을 빠뜨리면 Deployment는 Ready여도 Service endpoint가 비어 마지막 1점을 얻지 못합니다. 사용한 명령어 이력은 채점하지 않으며 v1.37이 실제로 받아들이는 객체만 확인합니다.
+파일 내용(2점)과 실제 클러스터 상태(3점)를 따로 채점합니다. 파일의 Deployment 점수는 apps/v1, selector, replicas 2뿐 아니라 제공된 container(이미지와 command)가 그대로인지도 확인하므로, 같은 `inventory-ok`를 서빙하더라도 container의 command를 바꾸면 이 점수를 잃습니다. HPA는 `autoscaling/v2`, 대상 `apps/v1` Deployment `inventory`, 2~4 범위, CPU `Utilization` 70%를 확인합니다. 파일만 고치고 적용하지 않으면 live 점수가 없고, 파일과 다른 값을 적용하면 file 점수와 live 점수가 어긋납니다. selector에서 `tier` label을 빠뜨리면 Deployment는 Ready여도 Service endpoint가 비어 마지막 1점을 얻지 못합니다. 사용한 명령어 이력은 채점하지 않으며 v1.37이 실제로 받아들이는 객체만 확인합니다.
 
 ## 공식 문서
 - [Deprecated API Migration Guide](https://kubernetes.io/docs/reference/using-api/deprecation-guide/)

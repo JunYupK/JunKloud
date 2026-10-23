@@ -28,6 +28,7 @@ var observabilityCases = map[string]map[string]int{
 		"wrong-hpa-target":              3,
 		"stale-scale-target":            3,
 		"selector-drops-tier":           4,
+		"container-replaced":            4,
 		"alternative-match-expressions": 5,
 	},
 	"probes-001": {
@@ -299,6 +300,7 @@ func TestObservabilityAPIMigrationContracts(t *testing.T) {
 		return out
 	}
 	testutil.Equal(t, targets(p.Solution), []string{"apps/v1"})
+	checkAPIMigrationContainer(t, p, f)
 	for _, c := range p.Cases {
 		want := []string{"apps/v1"}
 		if c.ID == "stale-scale-target" {
@@ -309,6 +311,92 @@ func TestObservabilityAPIMigrationContracts(t *testing.T) {
 			continue // file-only case: nothing reaches the cluster
 		}
 		testutil.Equal(t, got, want)
+	}
+}
+
+// The inventory container is graded literally through manifest-deployment: its
+// image and command must equal the handed-out legacy container, the solution
+// and every correct case must keep it, and container-replaced must change it.
+func checkAPIMigrationContainer(t *testing.T, p model.Problem, f model.FrozenProblem) {
+	t.Helper()
+	var wantImage any
+	var wantCommand []any
+	for _, c := range p.Criteria {
+		if c.ID != "manifest-deployment" {
+			continue
+		}
+		for _, field := range c.Args["fields"].([]any) {
+			m := field.(map[string]any)
+			switch m["path"] {
+			case "spec.template.spec.containers[name=web].image":
+				wantImage = m["equals"]
+			case "spec.template.spec.containers[name=web].command":
+				wantCommand, _ = m["equals"].([]any)
+			}
+		}
+	}
+	if len(wantCommand) != 3 || wantImage != "docker.io/library/busybox:1.37.0" {
+		t.Fatalf("manifest-deployment must pin the provided image and command, got %v %v", wantImage, wantCommand)
+	}
+	// The handed-out file is the source of truth for the criterion values.
+	var provided map[string]any
+	docs := strings.Split(string(p.Files["setup/provided/legacy/app.yaml"]), "\n---\n")
+	testutil.NoError(t, yaml.Unmarshal([]byte(docs[0]), &provided))
+	var web map[string]any
+	for _, c := range provided["spec"].(map[string]any)["template"].(map[string]any)["spec"].(map[string]any)["containers"].([]any) {
+		if c.(map[string]any)["name"] == "web" {
+			web = c.(map[string]any)
+		}
+	}
+	if web == nil || web["image"] != wantImage || !slices.Equal(web["command"].([]any), wantCommand) {
+		t.Fatalf("provided container %v differs from the manifest-deployment criterion", web)
+	}
+	if _, ok := web["args"]; ok {
+		t.Fatal("provided container has args that the criterion does not pin")
+	}
+	check := func(label string, actions []model.Action, same bool) {
+		cs := probeContainers(t, p, f, actions)
+		if len(cs) != 1 {
+			t.Fatalf("%s: want one container, got %d", label, len(cs))
+		}
+		got, _ := cs[0]["command"].([]any)
+		if same != (cs[0]["image"] == wantImage && slices.Equal(got, wantCommand)) {
+			t.Errorf("%s: container %v %v, same as the provided one want %v", label, cs[0]["image"], got, same)
+		}
+	}
+	check("solution", p.Solution, true)
+	for _, c := range p.Cases {
+		switch c.ID {
+		case "apiversion-only", "fixed-not-applied":
+			// file-only or file-and-apply cases still carry the provided container
+			if cs := probeContainers(t, p, f, c.Actions); len(cs) > 0 {
+				check("case "+c.ID, c.Actions, true)
+			}
+		case "container-replaced":
+			check("case "+c.ID, c.Actions, false)
+		default:
+			check("case "+c.ID, c.Actions, true)
+		}
+	}
+	// Every file written to legacy/app.yaml must also keep the container.
+	for _, c := range append([]model.Case{{ID: "solution", Actions: p.Solution}}, p.Cases...) {
+		for _, a := range c.Actions {
+			if a.Kind != model.ActionFile {
+				continue
+			}
+			src, _ := a.Args["source"].(string)
+			var d map[string]any
+			doc := strings.Split(string(p.Files[src]), "\n---\n")[0]
+			testutil.NoError(t, yaml.Unmarshal([]byte(doc), &d))
+			var got map[string]any
+			for _, ct := range d["spec"].(map[string]any)["template"].(map[string]any)["spec"].(map[string]any)["containers"].([]any) {
+				got = ct.(map[string]any)
+			}
+			same := got["image"] == wantImage && slices.Equal(got["command"].([]any), wantCommand)
+			if want := c.ID != "container-replaced"; same != want {
+				t.Errorf("%s: file %s keeps the provided container = %v, want %v", c.ID, src, same, want)
+			}
+		}
 	}
 }
 

@@ -30,7 +30,7 @@
       "id": "manifest-deployment",
       "kind": "file",
       "points": 1,
-      "feedback": "legacy/app.yaml의 Deployment가 apps/v1이고 spec.selector가 있으며 replicas가 2여야 합니다.",
+      "feedback": "legacy/app.yaml의 Deployment가 apps/v1이고 spec.selector가 있으며 replicas가 2이고, 제공된 container(web: 이미지 docker.io/library/busybox:1.37.0와 command)가 그대로여야 합니다.",
       "args": {
         "path": "legacy/app.yaml",
         "format": "yaml",
@@ -47,6 +47,18 @@
           {
             "path": "spec.replicas",
             "equals": 2
+          },
+          {
+            "path": "spec.template.spec.containers[name=web].image",
+            "equals": "docker.io/library/busybox:1.37.0"
+          },
+          {
+            "path": "spec.template.spec.containers[name=web].command",
+            "equals": [
+              "sh",
+              "-c",
+              "mkdir -p /www; printf inventory-ok > /www/index.html; exec httpd -f -p 8080 -h /www"
+            ]
           }
         ]
       }
@@ -321,6 +333,32 @@
         "deployment-ready": "PASS",
         "hpa-live": "PASS",
         "service-serves": "FAIL"
+      },
+      "expected_score": 4
+    },
+    {
+      "id": "container-replaced",
+      "actions": [
+        {
+          "kind": "file",
+          "args": {
+            "source": "cases/container-replaced.yaml",
+            "path": "legacy/app.yaml"
+          }
+        },
+        {
+          "kind": "apply",
+          "args": {
+            "path": "cases/container-replaced.yaml"
+          }
+        }
+      ],
+      "expected": {
+        "manifest-deployment": "FAIL",
+        "manifest-hpa": "PASS",
+        "deployment-ready": "PASS",
+        "hpa-live": "PASS",
+        "service-serves": "PASS"
       },
       "expected_score": 4
     },
