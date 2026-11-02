@@ -80,15 +80,15 @@ Task 7 checks that each string is used by at least one of the five packages.
   - `TestSecurityBankPreflight`;
   - `TestSecurityBankSmoke` and `TestSecurityBank` (`validateGroupAfterSmoke(t, loadGroup(t, presentSecurityIDs(t)), false)` until Task 7 removes the present-only guard).
 
-- [ ] **Step 1: RED for CRD readiness.** Add an integration test `TestApplyWaitsForCRDEstablished` in the existing environment integration file: apply a CRD (declared in `Scope.ClusterResources`) in one `Apply` call, then immediately apply a custom resource of that kind in a second `Apply`. Both must succeed and the CR must be readable, over 5 repetitions with fresh names. Add a unit test for the wait helper: Established true → returns; NamesAccepted false or a timeout → error naming the CRD. Run it and record the failure (NoMatch / unknown resource type, or the missing helper).
-- [ ] **Step 2: Implement.** In `apply.go`, after a successful apply of an `apiextensions.k8s.io/v1 CustomResourceDefinition`, poll that object until condition `Established=True`. Bound the wait to 30s and use the existing context. On timeout return an error that names the CRD. No other behaviour changes. GREEN: unit tests and `go test -tags=integration ./tests/integration -run '^TestApplyWaitsForCRDEstablished$' -count=1 -timeout=20m -v` (sandbox env).
-- [ ] **Step 3: Scaffolding.**
+- [x] **Step 1: RED for CRD readiness.** Add an integration test `TestApplyWaitsForCRDEstablished` in the existing environment integration file: apply a CRD (declared in `Scope.ClusterResources`) in one `Apply` call, then immediately apply a custom resource of that kind in a second `Apply`. Both must succeed and the CR must be readable, over 5 repetitions with fresh names. Add a unit test for the wait helper: Established true → returns; NamesAccepted false or a timeout → error naming the CRD. Run it and record the failure (NoMatch / unknown resource type, or the missing helper).
+- [x] **Step 2: Implement.** In `apply.go`, after a successful apply of an `apiextensions.k8s.io/v1 CustomResourceDefinition`, poll that object until condition `Established=True`. Bound the wait to 30s and use the existing context. On timeout return an error that names the CRD. No other behaviour changes. GREEN: unit tests and `go test -tags=integration ./tests/integration -run '^TestApplyWaitsForCRDEstablished$' -count=1 -timeout=20m -v` (sandbox env).
+- [x] **Step 3: Scaffolding.**
   - `preflightBank` also registers `grader.AddSecurityCheckers(checks, grader.NewSecurityChecker(grader.SecurityConfig{}))`.
   - `smokeBank` uses all criteria for domain `environment-security`, the same as the deployment branch does.
   - Create the two test files with the Produces symbols and an empty `securityCases`.
   - `TestSecurityProblems` passes vacuously; `TestSecurityBankPreflight` with no IDs is a no-op.
-- [ ] **Step 4: Verify** `go test ./... -count=1`, `go vet ./...`, `go vet -tags=integration ./...`, `gofmt -l .`.
-- [ ] **Step 5: Commit** `feat: wait for applied CRDs to be established` and `test: scaffold environment-security bank`.
+- [x] **Step 4: Verify** `go test ./... -count=1`, `go vet ./...`, `go vet -tags=integration ./...`, `gofmt -l .`.
+- [x] **Step 5: Commit** `feat: wait for applied CRDs to be established` and `test: scaffold environment-security bank`.
 
 ### Task 2: `custom-resource-001` (build, easy)
 
@@ -119,10 +119,10 @@ Package design (pinned):
   - `alternative-extra-fields`: CR with a different key order and an extra optional `spec.description` allowed by the schema; answer with surrounding whitespace → 5.
 - Reset: the CRD is owned via scope and removed by cleanup; the CR goes with the namespace.
 
-- [ ] **Step 1: RED** add the cases; `go test ./tests/integration -run 'TestSecurityProblems/custom-resource-001' -count=1 -v` → FAIL (package missing).
-- [ ] **Step 2: Author** the package. Static GREEN incl. preflight.
-- [ ] **Step 3: Live** `-run '^TestSecurityBank$/^custom-resource-001$' -timeout=40m` on both seeds. Also record that reset removes the CRD (`kubectl get crd` evidence) and that grading without the CRD gives FAIL "not found", not ERROR.
-- [ ] **Step 4: Commit** `content: add validated custom resource problem`.
+- [x] **Step 1: RED** add the cases; `go test ./tests/integration -run 'TestSecurityProblems/custom-resource-001' -count=1 -v` → FAIL (package missing).
+- [x] **Step 2: Author** the package. Static GREEN incl. preflight.
+- [x] **Step 3: Live** `-run '^TestSecurityBank$/^custom-resource-001$' -timeout=40m` on both seeds. Also record that reset removes the CRD (`kubectl get crd` evidence) and that grading without the CRD gives FAIL "not found", not ERROR.
+- [x] **Step 4: Commit** `content: add validated custom resource problem`.
 
 ### Task 3: `access-001` (modify, medium)
 
@@ -151,10 +151,10 @@ Package design (pinned):
   - `alternative-split-roles` (two Roles and two RoleBindings) → 5.
 - Note in the explanation: cluster-wide rights created by a learner are not owned and survive reset; this is why the question asks for namespaced RBAC only.
 
-- [ ] **Step 1: RED** add cases; `-run 'TestSecurityProblems/access-001'` FAIL (missing).
-- [ ] **Step 2: Author**; static GREEN incl. preflight.
-- [ ] **Step 3: Live** `-run '^TestSecurityBank$/^access-001$' -timeout=40m` on both seeds. `edit-rolebinding` must show `least-privilege` FAIL with "must not be allowed" while `can-read` and `runs-as-sa` PASS.
-- [ ] **Step 4: Commit** `content: add validated access control problem`.
+- [x] **Step 1: RED** add cases; `-run 'TestSecurityProblems/access-001'` FAIL (missing).
+- [x] **Step 2: Author**; static GREEN incl. preflight.
+- [x] **Step 3: Live** `-run '^TestSecurityBank$/^access-001$' -timeout=40m` on both seeds. `edit-rolebinding` must show `least-privilege` FAIL with "must not be allowed" while `can-read` and `runs-as-sa` PASS.
+- [x] **Step 4: Commit** `content: add validated access control problem`.
 
 ### Task 4: `resources-001` (troubleshoot, medium)
 
@@ -183,10 +183,10 @@ Package design (pinned):
   - `limitrange-missing` → 4.
   - `alternative-decimal-quantities` (`cpu: 0.1`, `memory: 64Mi` written as `67108864`, limits `0.2` and `134217728`) → 5.
 
-- [ ] **Step 1: RED** add cases; `-run 'TestSecurityProblems/resources-001'` FAIL (missing).
-- [ ] **Step 2: Author**; static GREEN incl. preflight.
-- [ ] **Step 3: Live** `-run '^TestSecurityBank$/^resources-001$' -timeout=40m`. On both seeds the initial and `oversized-requests` stages show `worker-ready` FAIL (prerequisite) with no ERROR.
-- [ ] **Step 4: Commit** `content: add validated resource quota problem`.
+- [x] **Step 1: RED** add cases; `-run 'TestSecurityProblems/resources-001'` FAIL (missing).
+- [x] **Step 2: Author**; static GREEN incl. preflight.
+- [x] **Step 3: Live** `-run '^TestSecurityBank$/^resources-001$' -timeout=40m`. On both seeds the initial and `oversized-requests` stages show `worker-ready` FAIL (prerequisite) with no ERROR.
+- [x] **Step 4: Commit** `content: add validated resource quota problem`.
 
 ### Task 5: `configuration-001` (troubleshoot, easy) and secret-leak guard
 
@@ -220,13 +220,13 @@ Package design (pinned):
   - `alternative-optional-false` (refs with `optional: false` and an extra unrelated env var) → 5.
 - Leak guard: `TestSecurityBank` sets `forbidden = []string{"jk-canary-7f3c9a2e"}` for this problem. The `hardcoded-values` case must also not leak, even though the literal sits in the Deployment spec.
 
-- [ ] **Step 1: RED.**
+- [x] **Step 1: RED.**
   - Add the cases.
   - Add a unit-level test of the leak guard in the content test: a fake evaluation containing the canary must fail the guard, a clean one must pass.
   - `-run 'TestSecurityProblems/configuration-001|TestSecurityLeakGuard'` → FAIL.
-- [ ] **Step 2: Implement** the guard and author the package; static GREEN.
-- [ ] **Step 3: Live** `-run '^TestSecurityBank$/^configuration-001$' -timeout=40m`: all stages, no leak on any stage including `hardcoded-values`. A leak is a product finding: report it, never weaken the guard.
-- [ ] **Step 4: Commit** `content: add validated configuration problem`.
+- [x] **Step 2: Implement** the guard and author the package; static GREEN.
+- [x] **Step 3: Live** `-run '^TestSecurityBank$/^configuration-001$' -timeout=40m`: all stages, no leak on any stage including `hardcoded-values`. A leak is a product finding: report it, never weaken the guard.
+- [x] **Step 4: Commit** `content: add validated configuration problem`.
 
 ### Task 6: `security-001` (behavioral, hard)
 
@@ -257,25 +257,25 @@ Package design (pinned):
   - `alternative-pod-level-context` (runAsNonRoot, runAsUser and seccomp at Pod level; the rest at container level) → 5.
 - Live note: the restricted policy must actually reject the setup Pods in the sandbox (record the ReplicaSet FailedCreate event). If PSA or seccomp does not behave as upstream here, report BLOCKED with evidence rather than reshaping the problem.
 
-- [ ] **Step 1: RED** add cases; `-run 'TestSecurityProblems/security-001'` FAIL (missing).
-- [ ] **Step 2: Author**; static GREEN.
-- [ ] **Step 3: Live** `-run '^TestSecurityBank$/^security-001$' -timeout=40m` on both seeds; record the admission evidence.
-- [ ] **Step 4: Commit** `content: add validated security context problem`.
+- [x] **Step 1: RED** add cases; `-run 'TestSecurityProblems/security-001'` FAIL (missing).
+- [x] **Step 2: Author**; static GREEN.
+- [x] **Step 3: Live** `-run '^TestSecurityBank$/^security-001$' -timeout=40m` on both seeds; record the admission evidence.
+- [x] **Step 4: Commit** `content: add validated security context problem`.
 
 ### Task 7: Group totals, coverage, full run, records
 
 **Files:** Modify `curriculum/coverage.yaml`, the content test (group test + competency coverage), `bank_deployment_content_test.go`, `README.md`, `runtime/README.md`, plan records.
 
-- [ ] **Step 1: RED.**
+- [x] **Step 1: RED.**
   - `TestSecurityBankContent`: 5 problems, 25 points, all IDs present; remove the present-only guard.
   - `TestSecurityCoverage`: exactly one group `{id: environment-security, domain: environment-security, count: 5, points: 25, problems: securityIDs}`.
   - `TestSecurityCompetencies`: each of the 8 strings is used.
   - The bank must contain at least one problem of each type `build`, `modify`, `troubleshoot` and `behavioral`.
   - `TestDeploymentCoverage`: global 17 / 80 / 17 distinct IDs.
   - Run → FAIL.
-- [ ] **Step 2: GREEN.** Append the group to `coverage.yaml`. Update the README bank table, totals and validate loop, and the `runtime/README.md` list.
-- [ ] **Step 3: Full live run** once on the frozen tree: smoke, then `-run '^TestSecurityBank$' -count=1 -timeout=180m -v`. Then `go test ./... -count=1`, both vets and gofmt.
-- [ ] **Step 4: Records.**
+- [x] **Step 2: GREEN.** Append the group to `coverage.yaml`. Update the README bank table, totals and validate loop, and the `runtime/README.md` list.
+- [x] **Step 3: Full live run** once on the frozen tree: smoke, then `-run '^TestSecurityBank$' -count=1 -timeout=180m -v`. Then `go test ./... -count=1`, both vets and gofmt.
+- [x] **Step 4: Records.**
   - Tick the original plan's Task 17 and add an 실행 기록 with SHA, durations, seeds, stage counts, NOT RUN items and the 17/80 partial bank.
   - Fill in this plan's Verified evidence, citing local log paths with the `.superpowers/sdd/2026-11-02-task17-environment-security/` prefix marked local-only.
   - Commit `docs: record validated environment-security milestone`.
@@ -309,5 +309,11 @@ Log files cited below live in the local, uncommitted (gitignored) `.superpowers/
 - Practice-5 CLI start: with all five packages validated, the parent test's step now PASSES: `bank_security_test.go:29: BANK CLI start practice5 exit=0` (`준비 완료: practice-33da034d7f4f | 5문제 ...`, `학습 시작: practice-33da034d7f4f`). The 12 earlier packages are listed as `제외:` because they were not validated in this filtered run; the five security problems alone satisfy the 5-problem minimum. (In the per-package runs of Tasks 2-6 this step was FAIL by design.)
 - Final checks: `go test ./... -count=1` exit 0, `go vet ./...` exit 0, `go vet -tags=integration ./...` exit 0, `gofmt -l .` empty (`.superpowers/sdd/2026-11-02-task17-environment-security/task-7-logs/verify-full.log`, local-only). The run left no kind cluster or test container (checked right after the run).
 - Historical, not claimed on the current tree: the per-package runs of Tasks 2-6 (custom-resource-001 689s seeds [1 2], access-001 967s seeds [1 4], resources-001 737s seeds [1 3], configuration-001 1378s after R8 seeds [1 2], security-001 435s after R9 seeds [1 2]) ran before the Task 7 addendum (R6 changed access-001, R10 changed security-001 text and tests) or before later fixes; their content hashes differ from the hashes above wherever the package changed. This full run is the validation of record.
+- Known limitations (grader 8; learner mistakes that give ERROR instead of a learner-fault FAIL; none occurred in a validated stage, 0 ERROR in 78 stages):
+  - access-001: a mistyped or missing `serviceAccountName` makes the new ReplicaSet FailedCreate (ServiceAccount not found) with no current-revision Pods, so `reporter-ready` gives ERROR.
+  - resources-001: a quota tampered below the requests, or a LimitRange `max` below them, leaves zero worker Pods, so `worker-ready` gives ERROR.
+  - security-001 (F2): `declared-context` passes but the Pod is rejected for another reason (for example a `hostPath` volume or `hostNetwork`), so `gateway-ready` gives ERROR.
+  - Proposed follow-up for the next GraderVersion: classify a learner-caused ReplicaSet `ReplicaFailure`/FailedCreate (ServiceAccount not found, PodSecurity, LimitRange or quota violations) as a learner-fault FAIL in the `ready` checker. That change bumps `GraderVersion` and invalidates every certificate, so it is planned once, after Task 18 and before Task 19, not inside Task 17.
+- Final-review fix wave (records and test only; no `problems/` file changed, so no content hash changed): `TestSecurityProblems` now also rejects `ERROR` in the initial vector and in every case vector (only PASS or FAIL is accepted). The problem schema already rejects `ERROR` at load (`value must be one of 'PASS', 'FAIL'`, shown by two scratch mutations), so the new assertion is defence in depth; a third scratch mutation with the schema temporarily relaxed shows it bites alone (`initial: expected status of criterion gateway-ready is "ERROR", want PASS or FAIL`, `case runs-as-root: ...`); everything was restored with `git checkout` (`.superpowers/sdd/2026-11-02-task17-environment-security/task-7-logs/mutation-error-expectation.log`, local-only). `TestSecurityCustomResourceReset` (the hardened B2 test) was rerun live on `c1570f3` with the sandbox env: `--- PASS: TestSecurityCustomResourceReset (186.11s)`, `ok  github.com/JunYupK/JunKloud/tests/integration 186.132s`, `EXIT=0`, 2026-11-02T12:48:10Z-12:51:24Z (`.superpowers/sdd/2026-11-02-task17-environment-security/task-7-logs/reset-live-1.log`, local-only): the CRD exists before cleanup, is `NotFound` after it, grading with the CRD gone is FAIL "not found" (never ERROR), and the CRD is installed again by the next setup.
 - Not verified: the unprivileged-port sysctl (`net.ipv4.ip_unprivileged_port_start`) of the kind node's containerd was not read live (the dockerd of the sandbox was lost after the run); the security-001 explanation therefore only says that low-port binding depends on the runtime's sysctl. Native M2/4GiB/Windows NOT RUN. mock-01 is not built (Task 18).
 - Coverage: environment-security 5 problems/25 points join design-build 5/20, deployment 4/20 and observability 3/15 for a 17-problem/80-point partial bank with no duplicate IDs (`TestDeploymentCoverage` 17/80/17). `TestSecurityCompetencies` finds all 8 official competency strings; the bank has build, modify, troubleshoot and behavioral problems and easy, medium and hard difficulties. The default 20-question, 100-point mock is still incomplete (networking 20 points and `mock-01` are Task 18).
