@@ -1,0 +1,14 @@
+apiVersion: ops.junkloud.dev/v1
+kind: Backup
+metadata:
+  labels:
+    team: finance
+  name: nightly
+  namespace: ${namespace}
+spec:
+  retentionDays: 7
+  description: Nightly backup of the ledger application
+  target:
+    name: ledger
+    kind: Deployment
+  schedule: '0 2 * * *'

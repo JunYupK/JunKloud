@@ -1,0 +1,299 @@
+{
+  "schema_version": 1,
+  "id": "custom-resource-001",
+  "version": "1.0.0",
+  "title": "Find the backup custom resource type and create a Backup",
+  "domain": "environment-security",
+  "difficulty": "easy",
+  "type": "build",
+  "tags": [
+    "environment-security",
+    "custom-resource"
+  ],
+  "competencies": [
+    "CRD and Operator resources"
+  ],
+  "capabilities": [],
+  "parameters": {
+    "namespace": [
+      "jk-custom-resource-001-a",
+      "jk-custom-resource-001-b"
+    ]
+  },
+  "namespace": "${namespace}",
+  "budget": {
+    "cpu": "500m",
+    "memory": "192Mi"
+  },
+  "scope": {
+    "cluster_resources": [
+      {
+        "api_version": "apiextensions.k8s.io/v1",
+        "kind": "CustomResourceDefinition",
+        "name": "backups.ops.junkloud.dev"
+      }
+    ]
+  },
+  "criteria": [
+    {
+      "id": "crd-discovered",
+      "kind": "file",
+      "points": 1,
+      "feedback": "answers/backup-crd.txt에 백업용 커스텀 리소스 타입의 전체 이름(<plural>.<group>)만 적어야 합니다. kubectl get crd 또는 kubectl api-resources로 관리자가 설치한 타입을 찾으세요.",
+      "args": {
+        "path": "answers/backup-crd.txt",
+        "format": "text",
+        "matches": [
+          "^\\s*backups\\.ops\\.junkloud\\.dev\\s*$"
+        ]
+      }
+    },
+    {
+      "id": "backup-exists",
+      "kind": "resource",
+      "points": 1,
+      "feedback": "ops.junkloud.dev/v1 Backup 타입의 nightly 오브젝트가 네임스페이스에 있어야 합니다. ConfigMap 등 다른 오브젝트로는 대신할 수 없습니다.",
+      "target": {
+        "api_version": "ops.junkloud.dev/v1",
+        "kind": "Backup",
+        "namespace": "${namespace}",
+        "name": "nightly"
+      }
+    },
+    {
+      "id": "backup-schedule",
+      "kind": "field",
+      "points": 1,
+      "feedback": "Backup nightly의 spec.schedule이 \"0 2 * * *\"이어야 합니다.",
+      "target": {
+        "api_version": "ops.junkloud.dev/v1",
+        "kind": "Backup",
+        "namespace": "${namespace}",
+        "name": "nightly"
+      },
+      "args": {
+        "fields": [
+          {
+            "path": "spec.schedule",
+            "equals": "0 2 * * *"
+          }
+        ]
+      },
+      "depends_on": [
+        "backup-exists"
+      ]
+    },
+    {
+      "id": "backup-target",
+      "kind": "field",
+      "points": 1,
+      "feedback": "Backup nightly의 spec.target이 kind Deployment, name ledger이어야 합니다.",
+      "target": {
+        "api_version": "ops.junkloud.dev/v1",
+        "kind": "Backup",
+        "namespace": "${namespace}",
+        "name": "nightly"
+      },
+      "args": {
+        "fields": [
+          {
+            "path": "spec.target.kind",
+            "equals": "Deployment"
+          },
+          {
+            "path": "spec.target.name",
+            "equals": "ledger"
+          }
+        ]
+      },
+      "depends_on": [
+        "backup-exists"
+      ]
+    },
+    {
+      "id": "backup-retention",
+      "kind": "field",
+      "points": 1,
+      "feedback": "Backup nightly의 spec.retentionDays가 7이어야 합니다 (스키마는 1~30만 허용합니다).",
+      "target": {
+        "api_version": "ops.junkloud.dev/v1",
+        "kind": "Backup",
+        "namespace": "${namespace}",
+        "name": "nightly"
+      },
+      "args": {
+        "fields": [
+          {
+            "path": "spec.retentionDays",
+            "equals": 7
+          }
+        ]
+      },
+      "depends_on": [
+        "backup-exists"
+      ]
+    }
+  ],
+  "setup": [
+    {
+      "kind": "apply",
+      "args": {
+        "path": "setup/crd.yaml"
+      }
+    },
+    {
+      "kind": "apply",
+      "args": {
+        "path": "setup/app.yaml"
+      }
+    }
+  ],
+  "solution": [
+    {
+      "kind": "apply",
+      "args": {
+        "path": "solution/backup.yaml"
+      }
+    },
+    {
+      "kind": "file",
+      "args": {
+        "source": "solution/backup-crd.txt",
+        "path": "answers/backup-crd.txt"
+      }
+    }
+  ],
+  "initial_expected": {
+    "crd-discovered": "FAIL",
+    "backup-exists": "FAIL",
+    "backup-schedule": "FAIL",
+    "backup-target": "FAIL",
+    "backup-retention": "FAIL"
+  },
+  "initial_score": 0,
+  "cases": [
+    {
+      "id": "configmap-substitute",
+      "actions": [
+        {
+          "kind": "apply",
+          "args": {
+            "path": "cases/configmap-substitute.yaml"
+          }
+        },
+        {
+          "kind": "file",
+          "args": {
+            "source": "solution/backup-crd.txt",
+            "path": "answers/backup-crd.txt"
+          }
+        }
+      ],
+      "expected": {
+        "crd-discovered": "PASS",
+        "backup-exists": "FAIL",
+        "backup-schedule": "FAIL",
+        "backup-target": "FAIL",
+        "backup-retention": "FAIL"
+      },
+      "expected_score": 1
+    },
+    {
+      "id": "missing-answer",
+      "actions": [
+        {
+          "kind": "apply",
+          "args": {
+            "path": "solution/backup.yaml"
+          }
+        }
+      ],
+      "expected": {
+        "crd-discovered": "FAIL",
+        "backup-exists": "PASS",
+        "backup-schedule": "PASS",
+        "backup-target": "PASS",
+        "backup-retention": "PASS"
+      },
+      "expected_score": 4
+    },
+    {
+      "id": "wrong-target",
+      "actions": [
+        {
+          "kind": "apply",
+          "args": {
+            "path": "cases/wrong-target.yaml"
+          }
+        },
+        {
+          "kind": "file",
+          "args": {
+            "source": "solution/backup-crd.txt",
+            "path": "answers/backup-crd.txt"
+          }
+        }
+      ],
+      "expected": {
+        "crd-discovered": "PASS",
+        "backup-exists": "PASS",
+        "backup-schedule": "PASS",
+        "backup-target": "FAIL",
+        "backup-retention": "PASS"
+      },
+      "expected_score": 4
+    },
+    {
+      "id": "wrong-retention",
+      "actions": [
+        {
+          "kind": "apply",
+          "args": {
+            "path": "cases/wrong-retention.yaml"
+          }
+        },
+        {
+          "kind": "file",
+          "args": {
+            "source": "solution/backup-crd.txt",
+            "path": "answers/backup-crd.txt"
+          }
+        }
+      ],
+      "expected": {
+        "crd-discovered": "PASS",
+        "backup-exists": "PASS",
+        "backup-schedule": "PASS",
+        "backup-target": "PASS",
+        "backup-retention": "FAIL"
+      },
+      "expected_score": 4
+    },
+    {
+      "id": "alternative-extra-fields",
+      "actions": [
+        {
+          "kind": "apply",
+          "args": {
+            "path": "cases/alternative-extra-fields.yaml"
+          }
+        },
+        {
+          "kind": "file",
+          "args": {
+            "source": "cases/alternative-answer.txt",
+            "path": "answers/backup-crd.txt"
+          }
+        }
+      ],
+      "expected": {
+        "crd-discovered": "PASS",
+        "backup-exists": "PASS",
+        "backup-schedule": "PASS",
+        "backup-target": "PASS",
+        "backup-retention": "PASS"
+      },
+      "expected_score": 5
+    }
+  ]
+}
