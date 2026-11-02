@@ -3,10 +3,17 @@
 package environment
 
 import (
+	"context"
+	"strings"
 	"testing"
+	"time"
 
 	"k8s.io/apimachinery/pkg/api/meta"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
+	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/runtime/schema"
+	dynamicfake "k8s.io/client-go/dynamic/fake"
 
 	"github.com/JunYupK/JunKloud/internal/model"
 	"github.com/JunYupK/JunKloud/internal/testutil"
@@ -216,4 +223,75 @@ func TestRequiredNamespaces(t *testing.T) {
 		namespaceObj("svc-alpha-client"), configMap("svc-alpha-client", "d")}}}, testMapper())
 	testutil.NoError(t, err)
 	testutil.Equal(t, len(requiredNamespaces(owner, explicit)), 0)
+}
+
+func crdWithConditions(name string, conds ...map[string]any) *unstructured.Unstructured {
+	list := make([]any, 0, len(conds))
+	for _, c := range conds {
+		list = append(list, c)
+	}
+	return &unstructured.Unstructured{Object: map[string]any{
+		"apiVersion": "apiextensions.k8s.io/v1", "kind": "CustomResourceDefinition",
+		"metadata": map[string]any{"name": name},
+		"status":   map[string]any{"conditions": list},
+	}}
+}
+
+func TestWaitCRDEstablished(t *testing.T) {
+	const name = "widgets.example.com"
+	cond := func(typ, status string) map[string]any {
+		return map[string]any{"type": typ, "status": status}
+	}
+	cases := []struct {
+		name    string
+		crd     *unstructured.Unstructured // nil: the CRD does not exist
+		wantErr bool
+	}{
+		{"established", crdWithConditions(name, cond("NamesAccepted", "True"), cond("Established", "True")), false},
+		{"names not accepted", crdWithConditions(name, cond("NamesAccepted", "False"), cond("Established", "False")), true},
+		{"established false", crdWithConditions(name, cond("NamesAccepted", "True"), cond("Established", "False")), true},
+		{"no conditions", crdWithConditions(name), true},
+		{"missing", nil, true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			var objs []runtime.Object
+			if tc.crd != nil {
+				objs = append(objs, tc.crd)
+			}
+			dyn := dynamicfake.NewSimpleDynamicClient(runtime.NewScheme(), objs...)
+			err := waitCRDEstablished(context.Background(), dyn, name, 30*time.Millisecond, time.Millisecond)
+			if !tc.wantErr {
+				testutil.NoError(t, err)
+				return
+			}
+			if err == nil || !strings.Contains(err.Error(), name) {
+				t.Fatalf("got error %v, want one naming %s", err, name)
+			}
+		})
+	}
+}
+
+func TestWaitCRDEstablishedBecomesTrue(t *testing.T) {
+	const name = "widgets.example.com"
+	dyn := dynamicfake.NewSimpleDynamicClient(runtime.NewScheme(), crdWithConditions(name))
+	gvr := schema.GroupVersionResource{Group: "apiextensions.k8s.io", Version: "v1", Resource: "customresourcedefinitions"}
+	go func() {
+		time.Sleep(20 * time.Millisecond)
+		_, _ = dyn.Resource(gvr).UpdateStatus(context.Background(), crdWithConditions(name,
+			map[string]any{"type": "Established", "status": "True"}), metav1.UpdateOptions{})
+	}()
+	testutil.NoError(t, waitCRDEstablished(context.Background(), dyn, name, 5*time.Second, 2*time.Millisecond))
+}
+
+func TestWaitCRDEstablishedHonoursContext(t *testing.T) {
+	const name = "widgets.example.com"
+	dyn := dynamicfake.NewSimpleDynamicClient(runtime.NewScheme(), crdWithConditions(name))
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	err := waitCRDEstablished(ctx, dyn, name, time.Minute, time.Millisecond)
+	testutil.ErrorIs(t, err, context.Canceled)
+	if !strings.Contains(err.Error(), name) {
+		t.Fatalf("error %v does not name %s", err, name)
+	}
 }
