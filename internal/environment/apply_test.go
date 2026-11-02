@@ -13,6 +13,7 @@ import (
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/runtime/schema"
+	"k8s.io/client-go/dynamic"
 	dynamicfake "k8s.io/client-go/dynamic/fake"
 
 	"github.com/JunYupK/JunKloud/internal/model"
@@ -293,5 +294,49 @@ func TestWaitCRDEstablishedHonoursContext(t *testing.T) {
 	testutil.ErrorIs(t, err, context.Canceled)
 	if !strings.Contains(err.Error(), name) {
 		t.Fatalf("error %v does not name %s", err, name)
+	}
+}
+
+// slowCRDs answers a CRD GET only after delay (honouring the request
+// context), the way a slow API server does. Unused methods panic via the nil
+// embedded interface.
+type slowCRDs struct {
+	dynamic.NamespaceableResourceInterface
+	delay time.Duration
+	crd   *unstructured.Unstructured
+}
+
+func (s slowCRDs) Get(ctx context.Context, _ string, _ metav1.GetOptions, _ ...string) (*unstructured.Unstructured, error) {
+	select {
+	case <-ctx.Done():
+		return nil, ctx.Err()
+	case <-time.After(s.delay):
+		return s.crd, nil
+	}
+}
+
+type slowDynamic struct {
+	dynamic.Interface
+	crds slowCRDs
+}
+
+func (s slowDynamic) Resource(schema.GroupVersionResource) dynamic.NamespaceableResourceInterface {
+	return s.crds
+}
+
+// An in-flight GET must not outlive the wait's own deadline: a read that
+// only answers after the deadline neither extends the wait nor turns it into
+// a success.
+func TestWaitCRDEstablishedBoundsInFlightReads(t *testing.T) {
+	const name = "widgets.example.com"
+	established := crdWithConditions(name, map[string]any{"type": "Established", "status": "True"})
+	dyn := slowDynamic{crds: slowCRDs{delay: 2 * time.Second, crd: established}}
+	start := time.Now()
+	err := waitCRDEstablished(context.Background(), dyn, name, 50*time.Millisecond, time.Millisecond)
+	if elapsed := time.Since(start); elapsed > time.Second {
+		t.Fatalf("wait took %s, want it bounded by its 50ms deadline", elapsed)
+	}
+	if err == nil || !strings.Contains(err.Error(), name) {
+		t.Fatalf("got error %v, want a timeout naming %s", err, name)
 	}
 }

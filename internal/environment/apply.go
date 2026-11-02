@@ -540,14 +540,16 @@ func isCRD(ref model.ObjectRef) bool {
 // waitCRDEstablished polls the CRD until its Established condition is True,
 // so a later Apply (which plans against a fresh type mapper) finds the new
 // kind. It gives up after timeout or when ctx ends; the error names the CRD.
+// Every read runs under the same deadline, so a slow GET can neither extend
+// the wait nor turn into a success after it.
 func waitCRDEstablished(ctx context.Context, dyn dynamic.Interface, name string, timeout, poll time.Duration) error {
-	deadline := time.NewTimer(timeout)
-	defer deadline.Stop()
+	waitCtx, cancel := context.WithTimeout(ctx, timeout)
+	defer cancel()
 	ticker := time.NewTicker(poll)
 	defer ticker.Stop()
 	last := "not read yet"
 	for {
-		crd, err := dyn.Resource(crdGVR).Get(ctx, name, metav1.GetOptions{})
+		crd, err := dyn.Resource(crdGVR).Get(waitCtx, name, metav1.GetOptions{})
 		switch {
 		case err == nil:
 			established, state := crdEstablished(crd)
@@ -555,13 +557,14 @@ func waitCRDEstablished(ctx context.Context, dyn dynamic.Interface, name string,
 				return nil
 			}
 			last = state
-		case ctx.Err() == nil:
+		case waitCtx.Err() == nil:
 			last = err.Error()
 		}
 		select {
-		case <-ctx.Done():
-			return fmt.Errorf("environment: wait for CRD %s to be established: %w", name, ctx.Err())
-		case <-deadline.C:
+		case <-waitCtx.Done():
+			if ctx.Err() != nil {
+				return fmt.Errorf("environment: wait for CRD %s to be established: %w", name, ctx.Err())
+			}
 			return fmt.Errorf("environment: CRD %s not established within %s (%s)", name, timeout, last)
 		case <-ticker.C:
 		}
