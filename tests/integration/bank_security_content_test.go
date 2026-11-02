@@ -16,6 +16,7 @@ import (
 	"github.com/JunYupK/JunKloud/internal/problem"
 	"github.com/JunYupK/JunKloud/internal/testutil"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
+	"k8s.io/apimachinery/pkg/runtime"
 )
 
 var securityIDs = []string{"custom-resource-001", "access-001", "resources-001", "configuration-001", "security-001"}
@@ -30,16 +31,25 @@ var securityCases = map[string]map[string]int{
 		"wrong-retention":          4,
 		"alternative-extra-fields": 5,
 	},
+	"access-001": {
+		"bound-to-default":        1,
+		"edit-rolebinding":        4,
+		"cluster-wide-binding":    4,
+		"sa-not-used":             4,
+		"alternative-split-roles": 5,
+	},
 }
 
 // securityCapabilities and securityInitialScores pin each package's declared
 // capabilities and the score of the untouched environment.
 var securityCapabilities = map[string][]string{
 	"custom-resource-001": nil,
+	"access-001":          nil,
 }
 
 var securityInitialScores = map[string]int{
 	"custom-resource-001": 0,
+	"access-001":          2,
 }
 
 // presentSecurityIDs returns the security IDs whose package exists, so the
@@ -379,4 +389,366 @@ func nestedMap(t *testing.T, o map[string]any, path ...string) map[string]any {
 		t.Fatalf("%v is not an object in %v (%v)", path, o, err)
 	}
 	return m
+}
+
+// ------------------------------------------------------------- access-001
+
+type accessCheck struct {
+	Verb, Resource, Group, Name, Namespace string
+	ClusterScope, Allowed                  bool
+}
+
+func accessChecksOf(t *testing.T, c model.Criterion) []accessCheck {
+	t.Helper()
+	raw, ok := c.Args["checks"].([]any)
+	if !ok {
+		t.Fatalf("criterion %s has no checks", c.ID)
+	}
+	str := func(m map[string]any, k string) string { s, _ := m[k].(string); return s }
+	var out []accessCheck
+	for _, r := range raw {
+		m := r.(map[string]any)
+		allowed, ok := m["allowed"].(bool)
+		if !ok {
+			t.Fatalf("criterion %s has a check without explicit allowed: %v", c.ID, m)
+		}
+		cs, _ := m["cluster_scope"].(bool)
+		out = append(out, accessCheck{Verb: str(m, "verb"), Resource: str(m, "resource"), Group: str(m, "group"), Name: str(m, "name"), Namespace: str(m, "namespace"), ClusterScope: cs, Allowed: allowed})
+	}
+	return out
+}
+
+// accessObjects renders every object a group of actions applies, keyed by kind.
+func accessObjects(t *testing.T, p model.Problem, f model.FrozenProblem, actions []model.Action) map[string][]map[string]any {
+	t.Helper()
+	out := map[string][]map[string]any{}
+	for _, a := range actions {
+		if a.Kind != model.ActionApply {
+			t.Fatalf("access-001 uses only apply actions, got %s", a.Kind)
+		}
+		for _, o := range applyObjects(t, p, f, a) {
+			kind, _ := o["kind"].(string)
+			out[kind] = append(out[kind], o)
+		}
+	}
+	return out
+}
+
+// onlyObject returns the single object of a kind.
+func onlyObject(t *testing.T, label string, objs map[string][]map[string]any, kind string) map[string]any {
+	t.Helper()
+	if len(objs[kind]) != 1 {
+		t.Fatalf("%s: want exactly one %s, got %d", label, kind, len(objs[kind]))
+	}
+	return objs[kind][0]
+}
+
+func kindsOf(objs map[string][]map[string]any) []string {
+	var out []string
+	for k := range objs {
+		out = append(out, k)
+	}
+	slices.Sort(out)
+	return out
+}
+
+// ruleTuples flattens RBAC rules to "group|resource|resourceName|verb"
+// tuples (an empty resourceName means every name), so differently laid out
+// Roles with the same rights compare equal.
+func ruleTuples(t *testing.T, o map[string]any) []string {
+	t.Helper()
+	rules, _ := o["rules"].([]any)
+	strs := func(m map[string]any, k string) []string {
+		var out []string
+		for _, v := range m[k].([]any) {
+			out = append(out, v.(string))
+		}
+		return out
+	}
+	var out []string
+	for _, r := range rules {
+		m := r.(map[string]any)
+		names := []string{""}
+		if _, ok := m["resourceNames"]; ok {
+			names = strs(m, "resourceNames")
+		}
+		for _, g := range strs(m, "apiGroups") {
+			for _, res := range strs(m, "resources") {
+				for _, n := range names {
+					for _, v := range strs(m, "verbs") {
+						out = append(out, g+"|"+res+"|"+n+"|"+v)
+					}
+				}
+			}
+		}
+	}
+	slices.Sort(out)
+	return slices.Compact(out)
+}
+
+func deepCopyObject(o map[string]any) map[string]any { return runtime.DeepCopyJSON(o) }
+
+// access-001: the allowed and forbidden action lists are the ones the
+// question states, the cluster-scoped objects of the cluster-wide case are
+// owned through the scope, the provided Deployment is the one the solution
+// changes in exactly one field, and every wrong case differs from the solution
+// in exactly the mistake it is named after.
+func TestSecurityAccessContracts(t *testing.T) {
+	p := loadGroup(t, []string{"access-001"})[0]
+	f, err := problem.Freeze(p, 1)
+	testutil.NoError(t, err)
+	ns := f.Namespace
+	q := string(p.Files[problem.QuestionFile])
+
+	// Scope: exactly the ClusterRole and ClusterRoleBinding of the
+	// cluster-wide case.
+	const clusterName = "jk-report-reader"
+	testutil.Equal(t, p.Scope.Namespaces == nil, true)
+	testutil.Equal(t, p.Scope.ClusterResources, []model.ObjectRef{
+		{APIVersion: "rbac.authorization.k8s.io/v1", Kind: "ClusterRole", Name: clusterName},
+		{APIVersion: "rbac.authorization.k8s.io/v1", Kind: "ClusterRoleBinding", Name: clusterName},
+	})
+
+	// Setup: ConfigMap report-config and Deployment reporter running as the
+	// default ServiceAccount with a mounted token.
+	setup := accessObjects(t, p, f, p.Setup)
+	testutil.Equal(t, kindsOf(setup), []string{"ConfigMap", "Deployment"})
+	testutil.Equal(t, nestedString(t, onlyObject(t, "setup", setup, "ConfigMap"), "metadata", "name"), "report-config")
+	provided := onlyObject(t, "setup", setup, "Deployment")
+	testutil.Equal(t, nestedString(t, provided, "metadata", "name"), "reporter")
+	testutil.Equal(t, nestedString(t, provided, "metadata", "namespace"), ns)
+	testutil.Equal(t, nestedString(t, provided, "spec", "replicas"), "1")
+	podSpec := nestedMap(t, provided, "spec", "template", "spec")
+	for _, banned := range []string{"serviceAccountName", "serviceAccount", "automountServiceAccountToken"} {
+		if _, ok := podSpec[banned]; ok {
+			t.Errorf("the provided Deployment must not set %s", banned)
+		}
+	}
+	containers := podSpec["containers"].([]any)
+	testutil.Equal(t, len(containers), 1)
+	c0 := containers[0].(map[string]any)
+	testutil.Equal(t, c0["name"], any("reporter"))
+	testutil.Equal(t, c0["image"], any("docker.io/library/busybox:1.37.0"))
+	testutil.Equal(t, c0["command"], any([]any{"sh", "-c", "sleep 3600"}))
+
+	// Criteria: ids, kinds and dependencies.
+	crit := map[string]model.Criterion{}
+	var order []string
+	for _, c := range p.Criteria {
+		crit[c.ID] = c
+		order = append(order, c.ID)
+	}
+	testutil.Equal(t, order, []string{"reporter-ready", "can-read", "least-privilege", "runs-as-sa", "default-sa-unchanged"})
+	ready := crit["reporter-ready"]
+	testutil.Equal(t, ready.Kind, model.CriterionReady)
+	testutil.Equal(t, ready.Target.Name, "reporter")
+	testutil.Equal(t, fmt.Sprint(ready.Args["replicas"]), "1")
+	testutil.Equal(t, ready.Timeout, 90*time.Second)
+	for _, lit := range []string{"1 Ready replica", "10-second stability window", "90-second observation limit"} {
+		if !strings.Contains(q, lit) {
+			t.Errorf("question must state %q", lit)
+		}
+	}
+	for id, c := range crit {
+		if id == "reporter-ready" {
+			continue
+		}
+		testutil.Equal(t, c.Kind, model.CriterionAuthorization)
+		testutil.Equal(t, c.Target.APIVersion, "v1")
+		testutil.Equal(t, c.Target.Kind, "ServiceAccount")
+		testutil.Equal(t, c.Target.Namespace, "${namespace}")
+		want := "report-reader"
+		if id == "default-sa-unchanged" {
+			want = "default"
+		}
+		testutil.Equal(t, c.Target.Name, want)
+	}
+
+	// The allowed / forbidden lists are exactly these, and each check is
+	// stated in the question.
+	type pinned struct {
+		check  accessCheck
+		phrase string
+	}
+	assertPinned := func(id string, want []pinned) {
+		t.Helper()
+		got := accessChecksOf(t, crit[id])
+		var wantChecks []accessCheck
+		for _, w := range want {
+			wantChecks = append(wantChecks, w.check)
+			if !strings.Contains(q, w.phrase) {
+				t.Errorf("%s: question must state %q (for %+v)", id, w.phrase, w.check)
+			}
+		}
+		testutil.Equal(t, got, wantChecks)
+	}
+	assertPinned("can-read", []pinned{
+		{accessCheck{Verb: "get", Resource: "pods", Allowed: true}, "get, list and watch Pods in `${namespace}`"},
+		{accessCheck{Verb: "list", Resource: "pods", Allowed: true}, "get, list and watch Pods in `${namespace}`"},
+		{accessCheck{Verb: "watch", Resource: "pods", Allowed: true}, "get, list and watch Pods in `${namespace}`"},
+		{accessCheck{Verb: "get", Resource: "configmaps", Name: "report-config", Allowed: true}, "get the ConfigMap `report-config` in `${namespace}`"},
+	})
+	assertPinned("least-privilege", []pinned{
+		{accessCheck{Verb: "delete", Resource: "pods"}, "delete Pods"},
+		{accessCheck{Verb: "get", Resource: "secrets"}, "get or list Secrets"},
+		{accessCheck{Verb: "list", Resource: "secrets"}, "get or list Secrets"},
+		{accessCheck{Verb: "create", Resource: "deployments", Group: "apps"}, "create Deployments"},
+		{accessCheck{Verb: "list", Resource: "pods", ClusterScope: true}, "list Pods in all namespaces"},
+		{accessCheck{Verb: "list", Resource: "pods", Namespace: "kube-system"}, "list Pods in the namespace `kube-system`"},
+		{accessCheck{Verb: "get", Resource: "configmaps", Name: "other"}, "get any other ConfigMap (for example one named `other`)"},
+	})
+	assertPinned("default-sa-unchanged", []pinned{
+		{accessCheck{Verb: "get", Resource: "pods"}, "it must still not be able to get or list Pods or to get the ConfigMap `report-config`"},
+		{accessCheck{Verb: "list", Resource: "pods"}, "it must still not be able to get or list Pods or to get the ConfigMap `report-config`"},
+		{accessCheck{Verb: "get", Resource: "configmaps", Name: "report-config"}, "it must still not be able to get or list Pods or to get the ConfigMap `report-config`"},
+	})
+	assertPinned("runs-as-sa", []pinned{
+		{accessCheck{Verb: "get", Resource: "pods", Allowed: true}, "run Deployment `reporter` as `report-reader`"},
+	})
+	runs := crit["runs-as-sa"]
+	testutil.Equal(t, runs.DependsOn, []string{"reporter-ready"})
+	testutil.Equal(t, runs.Args["runs_as"], any(map[string]any{"api_version": "apps/v1", "kind": "Deployment", "name": "reporter", "identity": "token"}))
+	for _, lit := range []string{"ServiceAccount token mounted", "automountServiceAccountToken: false", "`cat`", "this point needs the first one", "ClusterRole", "`edit`"} {
+		if !strings.Contains(q, lit) {
+			t.Errorf("question must state %q", lit)
+		}
+	}
+	for id, c := range crit {
+		if id != "runs-as-sa" && c.DependsOn != nil {
+			t.Errorf("%s must not depend on another criterion", id)
+		}
+	}
+
+	// Solution: ServiceAccount, Role with the two stated rules, RoleBinding,
+	// and the provided Deployment with only serviceAccountName added.
+	sol := accessObjects(t, p, f, p.Solution)
+	testutil.Equal(t, kindsOf(sol), []string{"Deployment", "Role", "RoleBinding", "ServiceAccount"})
+	solSA := onlyObject(t, "solution", sol, "ServiceAccount")
+	solRole := onlyObject(t, "solution", sol, "Role")
+	solRB := onlyObject(t, "solution", sol, "RoleBinding")
+	solDeploy := onlyObject(t, "solution", sol, "Deployment")
+	testutil.Equal(t, nestedString(t, solSA, "metadata", "name"), "report-reader")
+	testutil.Equal(t, nestedString(t, solSA, "metadata", "namespace"), ns)
+	canonical := []string{"|configmaps|report-config|get", "|pods||get", "|pods||list", "|pods||watch"}
+	testutil.Equal(t, ruleTuples(t, solRole), canonical)
+	testutil.Equal(t, nestedString(t, solRB, "subjects"), fmt.Sprint([]any{map[string]any{"kind": "ServiceAccount", "name": "report-reader", "namespace": ns}}))
+	testutil.Equal(t, nestedString(t, solRB, "roleRef"), fmt.Sprint(map[string]any{"apiGroup": "rbac.authorization.k8s.io", "kind": "Role", "name": nestedString(t, solRole, "metadata", "name")}))
+	testutil.Equal(t, nestedString(t, solDeploy, "spec", "template", "spec", "serviceAccountName"), "report-reader")
+	unchanged := deepCopyObject(solDeploy)
+	unstructured.RemoveNestedField(unchanged, "spec", "template", "spec", "serviceAccountName")
+	testutil.Equal(t, unchanged, provided)
+
+	// Cluster-scoped objects appear only in the cluster-wide case, with the
+	// scoped names.
+	clusterKinds := []string{"ClusterRole", "ClusterRoleBinding"}
+	for _, group := range append([][]model.Action{p.Setup, p.Solution}, func() [][]model.Action {
+		var gs [][]model.Action
+		for _, c := range p.Cases {
+			if c.ID != "cluster-wide-binding" {
+				gs = append(gs, c.Actions)
+			}
+		}
+		return gs
+	}()...) {
+		objs := accessObjects(t, p, f, group)
+		for _, k := range clusterKinds {
+			if len(objs[k]) != 0 {
+				t.Errorf("only cluster-wide-binding may apply a %s", k)
+			}
+		}
+	}
+
+	// Cases.
+	rbWith := func(mutate func(rb map[string]any)) map[string]any {
+		rb := deepCopyObject(solRB)
+		mutate(rb)
+		return rb
+	}
+	for _, c := range p.Cases {
+		objs := accessObjects(t, p, f, c.Actions)
+		switch c.ID {
+		case "bound-to-default":
+			// Same Role, same RoleBinding, only the subject is `default`;
+			// no ServiceAccount report-reader and no Deployment change.
+			testutil.Equal(t, kindsOf(objs), []string{"Role", "RoleBinding"})
+			testutil.Equal(t, onlyObject(t, c.ID, objs, "Role"), solRole)
+			want := rbWith(func(rb map[string]any) { rb["subjects"].([]any)[0].(map[string]any)["name"] = "default" })
+			testutil.Equal(t, onlyObject(t, c.ID, objs, "RoleBinding"), want)
+		case "edit-rolebinding":
+			// Same ServiceAccount and Deployment; the RoleBinding points at
+			// the built-in ClusterRole edit instead of the Role.
+			testutil.Equal(t, kindsOf(objs), []string{"Deployment", "RoleBinding", "ServiceAccount"})
+			testutil.Equal(t, onlyObject(t, c.ID, objs, "ServiceAccount"), solSA)
+			testutil.Equal(t, onlyObject(t, c.ID, objs, "Deployment"), solDeploy)
+			want := rbWith(func(rb map[string]any) {
+				rb["roleRef"] = map[string]any{"apiGroup": "rbac.authorization.k8s.io", "kind": "ClusterRole", "name": "edit"}
+			})
+			testutil.Equal(t, onlyObject(t, c.ID, objs, "RoleBinding"), want)
+		case "cluster-wide-binding":
+			// Same rules and subject, but as ClusterRole + ClusterRoleBinding
+			// with the scoped names.
+			testutil.Equal(t, kindsOf(objs), []string{"ClusterRole", "ClusterRoleBinding", "Deployment", "ServiceAccount"})
+			testutil.Equal(t, onlyObject(t, c.ID, objs, "ServiceAccount"), solSA)
+			testutil.Equal(t, onlyObject(t, c.ID, objs, "Deployment"), solDeploy)
+			cr := onlyObject(t, c.ID, objs, "ClusterRole")
+			crb := onlyObject(t, c.ID, objs, "ClusterRoleBinding")
+			testutil.Equal(t, nestedString(t, cr, "metadata", "name"), clusterName)
+			testutil.Equal(t, nestedString(t, crb, "metadata", "name"), clusterName)
+			testutil.Equal(t, cr["rules"], solRole["rules"])
+			testutil.Equal(t, crb["subjects"], solRB["subjects"])
+			testutil.Equal(t, crb["roleRef"], any(map[string]any{"apiGroup": "rbac.authorization.k8s.io", "kind": "ClusterRole", "name": clusterName}))
+			if _, ok := crb["metadata"].(map[string]any)["namespace"]; ok {
+				t.Error("a ClusterRoleBinding has no namespace")
+			}
+		case "sa-not-used":
+			// Exactly the solution's RBAC; the Deployment keeps `default`.
+			testutil.Equal(t, kindsOf(objs), []string{"Role", "RoleBinding", "ServiceAccount"})
+			testutil.Equal(t, onlyObject(t, c.ID, objs, "ServiceAccount"), solSA)
+			testutil.Equal(t, onlyObject(t, c.ID, objs, "Role"), solRole)
+			testutil.Equal(t, onlyObject(t, c.ID, objs, "RoleBinding"), solRB)
+		case "alternative-split-roles":
+			// Two Roles whose rules add up to the solution's rights, each
+			// bound to report-reader; the Deployment is the solution's.
+			testutil.Equal(t, kindsOf(objs), []string{"Deployment", "Role", "RoleBinding", "ServiceAccount"})
+			testutil.Equal(t, onlyObject(t, c.ID, objs, "ServiceAccount"), solSA)
+			testutil.Equal(t, onlyObject(t, c.ID, objs, "Deployment"), solDeploy)
+			testutil.Equal(t, len(objs["Role"]), 2)
+			testutil.Equal(t, len(objs["RoleBinding"]), 2)
+			var union, roleNames, bound []string
+			for _, r := range objs["Role"] {
+				tuples := ruleTuples(t, r)
+				if len(tuples) == 0 || slices.Equal(tuples, canonical) {
+					t.Errorf("each split Role must hold part of the rights, got %v", tuples)
+				}
+				union = append(union, tuples...)
+				roleNames = append(roleNames, nestedString(t, r, "metadata", "name"))
+			}
+			slices.Sort(union)
+			testutil.Equal(t, slices.Compact(union), canonical)
+			testutil.Equal(t, len(slices.Compact(slices.Clone(union))), len(union))
+			for _, rb := range objs["RoleBinding"] {
+				testutil.Equal(t, rb["subjects"], solRB["subjects"])
+				ref := rb["roleRef"].(map[string]any)
+				testutil.Equal(t, ref["kind"], any("Role"))
+				testutil.Equal(t, ref["apiGroup"], any("rbac.authorization.k8s.io"))
+				bound = append(bound, ref["name"].(string))
+			}
+			slices.Sort(roleNames)
+			slices.Sort(bound)
+			testutil.Equal(t, bound, roleNames)
+			if slices.Contains(roleNames, "report-reader") {
+				t.Error("the split Roles must be named differently from the solution Role")
+			}
+		default:
+			t.Errorf("access-001 case %s has no contract", c.ID)
+		}
+	}
+
+	// The explanation spells out the reset limit and the edit mistake.
+	if !strings.Contains(string(p.Files["explanation.ko.md"]), "reset") {
+		t.Error("the explanation must mention that cluster-scoped objects survive reset")
+	}
+	if strings.Contains(q, "automountServiceAccountToken: true") {
+		t.Error("the question must not demand an explicit automount value")
+	}
 }
