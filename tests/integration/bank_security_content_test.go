@@ -744,9 +744,11 @@ func TestSecurityAccessContracts(t *testing.T) {
 				union = append(union, tuples...)
 				roleNames = append(roleNames, nestedString(t, r, "metadata", "name"))
 			}
+			// The Roles must not overlap: the union has no duplicate tuple.
+			// Compact a clone, so the comparison sees the uncompacted length.
 			slices.Sort(union)
-			testutil.Equal(t, slices.Compact(union), canonical)
-			testutil.Equal(t, len(slices.Compact(slices.Clone(union))), len(union))
+			testutil.Equal(t, slices.Compact(slices.Clone(union)), canonical)
+			testutil.Equal(t, len(union), len(canonical))
 			for _, rb := range objs["RoleBinding"] {
 				testutil.Equal(t, rb["subjects"], solRB["subjects"])
 				ref := rb["roleRef"].(map[string]any)
