@@ -1631,8 +1631,8 @@ func TestSecurityConfigurationRedaction(t *testing.T) {
 
 // ------------------------------------------------------------ security-001
 
-// orderedObjects renders a group of actions and returns the applied objects in
-// order, with the targets of its delete-owned steps.
+// orderedObjects renders a group of actions (apply only) and returns the
+// applied objects in order.
 func orderedObjects(t *testing.T, p model.Problem, f model.FrozenProblem, actions []model.Action) []map[string]any {
 	t.Helper()
 	built, err := author.BuildActions(p.Files, f.Parameters, actions)
@@ -1653,23 +1653,6 @@ func objectKinds(objs []map[string]any) []string {
 		out = append(out, o["kind"].(string))
 	}
 	return out
-}
-
-func objectOfKind(t *testing.T, label string, objs []map[string]any, kind string) map[string]any {
-	t.Helper()
-	var found map[string]any
-	for _, o := range objs {
-		if o["kind"] == kind {
-			if found != nil {
-				t.Fatalf("%s: two %s objects", label, kind)
-			}
-			found = o
-		}
-	}
-	if found == nil {
-		t.Fatalf("%s: no %s object", label, kind)
-	}
-	return found
 }
 
 // sameJSON compares two values by their JSON encoding, so int64, int and
@@ -1706,8 +1689,9 @@ func TestSecurityGatewayContracts(t *testing.T) {
 	testutil.Equal(t, p.Competencies, []string{"admission control", "SecurityContext and capabilities"})
 
 	// Setup: the Namespace comes first (so the policy is in force before the
-	// Deployment exists), carries exactly the two PSA labels, then Deployment
-	// and Service. The Deployment has no securityContext at all.
+	// Deployment exists), carries exactly the two PSA labels, then the
+	// Deployment (there is no Service). The Deployment has no securityContext
+	// at all.
 	setupObjs := orderedObjects(t, p, f, p.Setup)
 	testutil.Equal(t, objectKinds(setupObjs), []string{"Namespace", "Deployment"})
 	nsObj := setupObjs[0]
@@ -1731,10 +1715,8 @@ func TestSecurityGatewayContracts(t *testing.T) {
 	sameJSON(t, "ports", c0["ports"], []any{map[string]any{"containerPort": 8080}})
 	testutil.Equal(t, c0["volumeMounts"], any([]any{map[string]any{"name": "www", "mountPath": "/www"}}))
 	testutil.Equal(t, podSpec["volumes"], any([]any{map[string]any{"name": "www", "emptyDir": map[string]any{}}}))
-	// No Service: nothing grades one, and the application binds port 8080.
-	if strings.Contains(script, "-p 80 ") {
-		t.Error("the application must not bind port 80")
-	}
+	// No Service: nothing grades one (the real command, port 8080, is pinned
+	// above).
 	for _, o := range setupObjs {
 		if o["kind"] == "Service" {
 			t.Error("setup must not contain a Service: nothing grades it")
@@ -1880,7 +1862,7 @@ func TestSecurityGatewayContracts(t *testing.T) {
 			t.Errorf("the handout must not mention %q: nothing grades it", ungraded)
 		}
 	}
-	for _, lit := range []string{"FailedCreate", "violates PodSecurity", "ERROR", "NET_BIND_SERVICE", "8080", "emptyDir", "gateway-ready", "hostPath", "알려진 경계 사례", "policy-weakened", "policy-removed-and-hardened", "runs-as-root", "alternative-pod-level-context"} {
+	for _, lit := range []string{"FailedCreate", "violates PodSecurity", "ERROR", "NET_BIND_SERVICE", "ambient capability", "ip_unprivileged_port_start", "8080", "선언된 `runAsUser`가 0", "그 결과이지 FAIL의 원인이 아닙니다", "emptyDir", "gateway-ready", "hostPath", "알려진 경계 사례", "policy-weakened", "policy-removed-and-hardened", "runs-as-root", "alternative-pod-level-context"} {
 		if !strings.Contains(string(p.Files["explanation.ko.md"]), lit) {
 			t.Errorf("the explanation must mention %q", lit)
 		}
