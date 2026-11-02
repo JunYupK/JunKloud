@@ -60,6 +60,12 @@ var securityCases = map[string]map[string]int{
 		"secret-value-as-key":        2,
 		"alternative-optional-false": 5,
 	},
+	"security-001": {
+		"policy-weakened":               1,
+		"policy-removed-and-hardened":   4,
+		"runs-as-root":                  2,
+		"alternative-pod-level-context": 5,
+	},
 }
 
 // securityCapabilities and securityInitialScores pin each package's declared
@@ -69,6 +75,7 @@ var securityCapabilities = map[string][]string{
 	"access-001":          nil,
 	"resources-001":       nil,
 	"configuration-001":   nil,
+	"security-001":        nil,
 }
 
 var securityInitialScores = map[string]int{
@@ -76,6 +83,7 @@ var securityInitialScores = map[string]int{
 	"access-001":          2,
 	"resources-001":       1,
 	"configuration-001":   1,
+	"security-001":        2,
 }
 
 // securityForbidden lists, per problem, strings that no evaluation may ever
@@ -1616,5 +1624,258 @@ func TestSecurityConfigurationRedaction(t *testing.T) {
 	testutil.Equal(t, status(lit), map[string]string{"currency-ref": "FAIL", "token-ref": "FAIL", "secret-unchanged": "PASS"})
 	if got := evaluationLeaks(lit, forbidden); len(got) != 0 {
 		t.Errorf("hardcoded-values leaks: %v", got)
+	}
+}
+
+// ------------------------------------------------------------ security-001
+
+// orderedObjects renders a group of actions and returns the applied objects in
+// order, with the targets of its delete-owned steps.
+func orderedObjects(t *testing.T, p model.Problem, f model.FrozenProblem, actions []model.Action) []map[string]any {
+	t.Helper()
+	built, err := author.BuildActions(p.Files, f.Parameters, actions)
+	testutil.NoError(t, err)
+	var out []map[string]any
+	for _, a := range built {
+		if a.Kind != model.ActionApply {
+			t.Fatalf("security-001 uses only apply, got %s", a.Kind)
+		}
+		out = append(out, a.Objects...)
+	}
+	return out
+}
+
+func objectKinds(objs []map[string]any) []string {
+	var out []string
+	for _, o := range objs {
+		out = append(out, o["kind"].(string))
+	}
+	return out
+}
+
+func objectOfKind(t *testing.T, label string, objs []map[string]any, kind string) map[string]any {
+	t.Helper()
+	var found map[string]any
+	for _, o := range objs {
+		if o["kind"] == kind {
+			if found != nil {
+				t.Fatalf("%s: two %s objects", label, kind)
+			}
+			found = o
+		}
+	}
+	if found == nil {
+		t.Fatalf("%s: no %s object", label, kind)
+	}
+	return found
+}
+
+// sameJSON compares two values by their JSON encoding, so int64, int and
+// float64 renderings of one number are equal.
+func sameJSON(t *testing.T, label string, got, want any) {
+	t.Helper()
+	g, err := json.Marshal(got)
+	testutil.NoError(t, err)
+	w, err := json.Marshal(want)
+	testutil.NoError(t, err)
+	if string(g) != string(w) {
+		t.Errorf("%s:\n got %s\nwant %s", label, g, w)
+	}
+}
+
+func TestSecurityGatewayContracts(t *testing.T) {
+	p := loadGroup(t, []string{"security-001"})[0]
+	f, err := problem.Freeze(p, 1)
+	testutil.NoError(t, err)
+	ns := f.Namespace
+	q := string(p.Files[problem.QuestionFile])
+	const (
+		image     = "docker.io/library/busybox:1.37.0"
+		script    = "mkdir -p /www && echo gateway-ok > /www/index.html && exec httpd -f -p 8080 -h /www"
+		enforce   = "pod-security.kubernetes.io/enforce"
+		enforceV  = "pod-security.kubernetes.io/enforce-version"
+		restarted = "kubectl.kubernetes.io/restartedAt"
+	)
+
+	testutil.Equal(t, p.Scope.Namespaces == nil, true)
+	testutil.Equal(t, len(p.Scope.ClusterResources), 0)
+	testutil.Equal(t, p.Type, "behavioral")
+	testutil.Equal(t, p.Difficulty, "hard")
+	testutil.Equal(t, p.Competencies, []string{"admission control", "SecurityContext and capabilities"})
+
+	// Setup: the Namespace comes first (so the policy is in force before the
+	// Deployment exists), carries exactly the two PSA labels, then Deployment
+	// and Service. The Deployment has no securityContext at all.
+	setupObjs := orderedObjects(t, p, f, p.Setup)
+	testutil.Equal(t, objectKinds(setupObjs), []string{"Namespace", "Deployment", "Service"})
+	nsObj := setupObjs[0]
+	testutil.Equal(t, nsObj["metadata"], any(map[string]any{"name": ns, "labels": map[string]any{enforce: "restricted", enforceV: "latest"}}))
+	deploy := setupObjs[1]
+	testutil.Equal(t, nestedString(t, deploy, "metadata", "name"), "gateway")
+	testutil.Equal(t, nestedString(t, deploy, "metadata", "namespace"), ns)
+	testutil.Equal(t, nestedString(t, deploy, "spec", "replicas"), "1")
+	podSpec := nestedMap(t, deploy, "spec", "template", "spec")
+	if _, has := podSpec["securityContext"]; has {
+		t.Error("the setup Pod must have no securityContext")
+	}
+	c0 := appContainer(t, "setup", deploy)
+	testutil.Equal(t, c0["name"], any("gateway"))
+	testutil.Equal(t, c0["image"], any(image))
+	testutil.Equal(t, c0["imagePullPolicy"], any("Never"))
+	testutil.Equal(t, c0["command"], any([]any{"sh", "-c", script}))
+	if _, has := c0["securityContext"]; has {
+		t.Error("the setup container must have no securityContext")
+	}
+	sameJSON(t, "ports", c0["ports"], []any{map[string]any{"containerPort": 8080}})
+	testutil.Equal(t, c0["volumeMounts"], any([]any{map[string]any{"name": "www", "mountPath": "/www"}}))
+	testutil.Equal(t, podSpec["volumes"], any([]any{map[string]any{"name": "www", "emptyDir": map[string]any{}}}))
+	// Port 80 is not bound by the application: Service 80 -> 8080.
+	svc := setupObjs[2]
+	testutil.Equal(t, nestedString(t, svc, "metadata", "name"), "gateway")
+	sameJSON(t, "service spec", svc["spec"], map[string]any{
+		"selector": map[string]any{"app": "gateway"},
+		"ports":    []any{map[string]any{"name": "http", "port": 80, "targetPort": 8080, "protocol": "TCP"}},
+	})
+	if strings.Contains(script, "80 ") && strings.Contains(script, "-p 80 ") {
+		t.Error("the application must not bind port 80")
+	}
+
+	// Criteria.
+	crit := map[string]model.Criterion{}
+	var order []string
+	for _, c := range p.Criteria {
+		crit[c.ID] = c
+		order = append(order, c.ID)
+		testutil.Equal(t, c.Points, 1)
+	}
+	testutil.Equal(t, order, []string{"policy-enforced", "workload-unchanged", "declared-context", "runtime-context", "serves-port-80"})
+	pe := crit["policy-enforced"]
+	testutil.Equal(t, pe.Kind, model.CriterionField)
+	testutil.Equal(t, pe.Target, model.ObjectRef{APIVersion: "v1", Kind: "Namespace", Name: "${namespace}"})
+	testutil.Equal(t, pe.Args["fields"], any([]any{map[string]any{"path": "metadata.labels['" + enforce + "']", "equals": "restricted"}}))
+	wu := crit["workload-unchanged"]
+	testutil.Equal(t, wu.Kind, model.CriterionField)
+	testutil.Equal(t, wu.Target.Kind+" "+wu.Target.Name, "Deployment gateway")
+	testutil.Equal(t, wu.Args["fields"], any([]any{
+		map[string]any{"path": "spec.template.spec.containers[name=gateway].image", "equals": image},
+		map[string]any{"path": "spec.template.spec.containers[name=gateway].command", "equals": []any{"sh", "-c", script}},
+	}))
+	dc := crit["declared-context"]
+	testutil.Equal(t, dc.Kind, model.CriterionSecurityContext)
+	testutil.Equal(t, dc.Target.Kind+" "+dc.Target.Name, "Deployment gateway")
+	sameJSON(t, "declared-context args", dc.Args, map[string]any{"containers": []any{map[string]any{
+		"name": "gateway", "run_as_user": 10001, "run_as_non_root": true, "allow_privilege_escalation": false,
+		"capabilities": map[string]any{"drop": []any{"ALL"}}, "seccomp": "RuntimeDefault", "read_only_root_filesystem": true}}})
+	testutil.Equal(t, dc.DependsOn == nil, true)
+	rc := crit["runtime-context"]
+	testutil.Equal(t, rc.Kind, model.CriterionSecurityContext)
+	testutil.Equal(t, rc.Target.Kind+" "+rc.Target.Name, "Deployment gateway")
+	sameJSON(t, "runtime-context args", rc.Args, map[string]any{"behavior": map[string]any{"container": "gateway", "uid": 10001, "no_capabilities": true, "read_only_root": true}})
+	// A Pod the policy rejects does not exist: without this dependency the
+	// criterion would be ERROR "no running pod" instead of FAIL.
+	testutil.Equal(t, rc.DependsOn, []string{"declared-context"})
+	sv := crit["serves-port-80"]
+	testutil.Equal(t, sv.Kind, model.CriterionHTTP)
+	testutil.Equal(t, sv.Target.Kind+" "+sv.Target.Name, "Service gateway")
+	testutil.Equal(t, fmt.Sprint(sv.Args["port"]), "80")
+	testutil.Equal(t, sv.Args["body_marker"], any("gateway-ok"))
+	testutil.Equal(t, sv.DependsOn, []string{"runtime-context"})
+	testutil.Equal(t, sv.Timeout, 60*time.Second)
+	// No ready or log criterion could meet "no Pods because admission blocked them".
+	for _, c := range p.Criteria {
+		if c.Kind == model.CriterionReady || c.Kind == model.CriterionLogs {
+			t.Errorf("criterion %s would meet a Pod-less workload", c.ID)
+		}
+	}
+
+	// Every pinned literal is stated in the question; nothing ungraded is forbidden.
+	for _, lit := range []string{
+		"`gateway`", "port 80, targetPort 8080", "`restricted`", "`" + enforce + "`", "`10001`", "`RuntimeDefault`", "`/www`", "`emptyDir`",
+		"`docker.io/library/busybox:1.37.0`", "the provided command", "`gateway-ok`", "port 8080",
+		"removing it or setting another value loses the point", "`runAsUser`", "`runAsNonRoot`", "`allowPrivilegeEscalation`", "`capabilities.drop`", "`readOnlyRootFilesystem`",
+		"a container value overrides the Pod value", "exist only on the container", "grade after the Pod is Running", "this point needs the third one", "60-second limit", "this point needs the fourth one",
+	} {
+		if !strings.Contains(q, lit) {
+			t.Errorf("question must state %q", lit)
+		}
+	}
+	for _, ungraded := range []string{enforceV, "replicas", "do not change", "Do not change", "NET_BIND_SERVICE"} {
+		if strings.Contains(q, ungraded) {
+			t.Errorf("the question must not mention %q: nothing grades it", ungraded)
+		}
+	}
+
+	// Solution: one Deployment apply, the setup Deployment plus the container securityContext.
+	wantCtx := func(user int64) map[string]any {
+		return map[string]any{
+			"runAsUser": user, "runAsNonRoot": true, "allowPrivilegeEscalation": false, "readOnlyRootFilesystem": true,
+			"capabilities": map[string]any{"drop": []any{"ALL"}}, "seccompProfile": map[string]any{"type": "RuntimeDefault"}}
+	}
+	withCtx := func(d map[string]any, ctr map[string]any, pod map[string]any) map[string]any {
+		out := deepCopyObject(d)
+		if ctr != nil {
+			appContainer(t, "copy", out)["securityContext"] = ctr
+		}
+		if pod != nil {
+			nestedMap(t, out, "spec", "template", "spec")["securityContext"] = pod
+		}
+		return out
+	}
+	solObjs := orderedObjects(t, p, f, p.Solution)
+	testutil.Equal(t, objectKinds(solObjs), []string{"Deployment"})
+	solDeploy := solObjs[0]
+	sameJSON(t, "solution Deployment", solDeploy, withCtx(deploy, wantCtx(10001), nil))
+	if len(p.Solution) != 1 {
+		t.Errorf("the solution must be one apply, got %d actions", len(p.Solution))
+	}
+
+	// Cases: each differs from the solution only in its named mistake.
+	for _, c := range p.Cases {
+		objs := orderedObjects(t, p, f, c.Actions)
+		switch c.ID {
+		case "policy-weakened":
+			// The label is lowered; the workload stays insecure and is restarted so Pods run.
+			testutil.Equal(t, objectKinds(objs), []string{"Namespace", "Deployment"})
+			testutil.Equal(t, objs[0]["metadata"], any(map[string]any{"name": ns, "labels": map[string]any{enforce: "privileged", enforceV: "latest"}}))
+			restart := deepCopyObject(deploy)
+			nestedMap(t, restart, "spec", "template", "metadata")["annotations"] = map[string]any{restarted: "2026-01-01T00:00:00Z"}
+			sameJSON(t, c.ID+" Deployment", objs[1], restart)
+			if _, has := nestedMap(t, objs[1], "spec", "template", "spec")["securityContext"]; has {
+				t.Error("the weakened-policy workload must stay insecure")
+			}
+		case "policy-removed-and-hardened":
+			// The label is removed (server-side apply drops the labels the setup apply owns); the workload is the solution.
+			testutil.Equal(t, objectKinds(objs), []string{"Namespace", "Deployment"})
+			testutil.Equal(t, objs[0]["metadata"], any(map[string]any{"name": ns}))
+			sameJSON(t, c.ID+" Deployment", objs[1], solDeploy)
+		case "runs-as-root":
+			testutil.Equal(t, objectKinds(objs), []string{"Deployment"})
+			sameJSON(t, c.ID+" Deployment", objs[0], withCtx(deploy, wantCtx(0), nil))
+		case "alternative-pod-level-context":
+			testutil.Equal(t, objectKinds(objs), []string{"Deployment"})
+			pod := map[string]any{"runAsUser": 10001, "runAsNonRoot": true, "seccompProfile": map[string]any{"type": "RuntimeDefault"}}
+			ctr := map[string]any{"allowPrivilegeEscalation": false, "readOnlyRootFilesystem": true, "capabilities": map[string]any{"drop": []any{"ALL"}}}
+			sameJSON(t, c.ID+" Deployment", objs[0], withCtx(deploy, ctr, pod))
+		default:
+			t.Errorf("security-001 case %s has no contract", c.ID)
+		}
+	}
+
+	// Handout and explanation.
+	readme := string(p.Files["setup/provided/README.txt"])
+	for _, lit := range []string{enforce + "=restricted", "Keep the label at restricted", "keep the image and the command of container gateway", "user ID 10001", "all capabilities dropped", "seccomp RuntimeDefault", "read-only root filesystem", "/www", "gateway-ok"} {
+		if !strings.Contains(readme, lit) {
+			t.Errorf("the handout must state %q", lit)
+		}
+	}
+	for _, ungraded := range []string{enforceV, "replicas", "do not change", "Do not change"} {
+		if strings.Contains(readme, ungraded) {
+			t.Errorf("the handout must not mention %q: nothing grades it", ungraded)
+		}
+	}
+	for _, lit := range []string{"FailedCreate", "violates PodSecurity", "ERROR", "NET_BIND_SERVICE", "8080", "emptyDir", "policy-weakened", "policy-removed-and-hardened", "runs-as-root", "alternative-pod-level-context"} {
+		if !strings.Contains(string(p.Files["explanation.ko.md"]), lit) {
+			t.Errorf("the explanation must mention %q", lit)
+		}
 	}
 }
