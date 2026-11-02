@@ -39,6 +39,7 @@ func preflightBank(t *testing.T, ps []model.Problem) {
 	defer artifacts.Close()
 	grader.AddArtifactCheckers(checks, artifacts)
 	grader.AddNetworkCheckers(checks, grader.NewNetworkChecker(nil, nil))
+	grader.AddSecurityCheckers(checks, grader.NewSecurityChecker(grader.SecurityConfig{}))
 	engine := grader.NewEngine(checks)
 	stop := errors.New("static preflight complete; no runtime effects")
 	v, err := author.NewValidator(author.Config{Identity: model.Identity{ID: "0123456789ab"}, Env: m, Janitor: environment.ManagedJanitor{Manager: m}, Engine: engine, Store: st,

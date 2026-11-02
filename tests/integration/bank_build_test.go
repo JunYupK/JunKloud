@@ -148,7 +148,7 @@ func smokeBank(t *testing.T, b bankRuntime, problems []model.Problem) {
 			// Deployment smoke proves native Helm release/value state and real
 			// stable/canary UID membership + HTTP, in addition to native image
 			// readiness. Preserve the actual criteria's dependency graph/budgets.
-			if p.Domain == model.DomainDeployment {
+			if p.Domain == model.DomainDeployment || p.Domain == model.DomainEnvironmentSecurity {
 				chosen = f.Definition.Criteria
 			}
 			f.Definition.Criteria = chosen
