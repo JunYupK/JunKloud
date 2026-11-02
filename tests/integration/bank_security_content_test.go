@@ -3,6 +3,7 @@
 package integration
 
 import (
+	"context"
 	"crypto/sha256"
 	"encoding/base64"
 	"encoding/hex"
@@ -17,6 +18,7 @@ import (
 	"time"
 
 	"github.com/JunYupK/JunKloud/internal/author"
+	"github.com/JunYupK/JunKloud/internal/grader"
 	"github.com/JunYupK/JunKloud/internal/model"
 	"github.com/JunYupK/JunKloud/internal/problem"
 	"github.com/JunYupK/JunKloud/internal/testutil"
@@ -54,7 +56,8 @@ var securityCases = map[string]map[string]int{
 	"configuration-001": {
 		"hardcoded-values":           3,
 		"wrong-configmap-key":        2,
-		"configmap-edited":           3,
+		"configmap-edited":           4,
+		"secret-value-as-key":        2,
 		"alternative-optional-false": 5,
 	},
 }
@@ -1333,7 +1336,7 @@ func TestSecurityConfigurationContracts(t *testing.T) {
 		crit[c.ID] = c
 		order = append(order, c.ID)
 	}
-	testutil.Equal(t, order, []string{"currency-ref", "token-ref", "shop-ready", "shop-serves", "inputs-unchanged"})
+	testutil.Equal(t, order, []string{"currency-ref", "token-ref", "shop-ready", "shop-serves", "secret-unchanged"})
 	fieldsOf := func(id string) map[string]string {
 		t.Helper()
 		c := crit[id]
@@ -1350,20 +1353,29 @@ func TestSecurityConfigurationContracts(t *testing.T) {
 		fmt.Sprintf(env, "CURRENCY", "configMapKeyRef.name"): "shop-config", fmt.Sprintf(env, "CURRENCY", "configMapKeyRef.key"): "currency"})
 	testutil.Equal(t, fieldsOf("token-ref"), map[string]string{
 		fmt.Sprintf(env, "API_TOKEN", "secretKeyRef.name"): "shop-secret", fmt.Sprintf(env, "API_TOKEN", "secretKeyRef.key"): "api-token"})
-	testutil.Equal(t, fieldsOf("inputs-unchanged"), map[string]string{"data.currency": "EUR"})
+	// data values are compared decoded; the path is a Secret data path, so the
+	// grader redacts expected and actual.
+	testutil.Equal(t, fieldsOf("secret-unchanged"), map[string]string{"data['api-token']": canary})
 	for _, id := range []string{"currency-ref", "token-ref", "shop-ready"} {
 		testutil.Equal(t, crit[id].Target.APIVersion+" "+crit[id].Target.Kind+" "+crit[id].Target.Name, "apps/v1 Deployment shop")
 	}
-	testutil.Equal(t, crit["inputs-unchanged"].Target.Kind+" "+crit["inputs-unchanged"].Target.Name, "ConfigMap shop-config")
+	testutil.Equal(t, crit["secret-unchanged"].Target.APIVersion+" "+crit["secret-unchanged"].Target.Kind+" "+crit["secret-unchanged"].Target.Name, "v1 Secret shop-secret")
 	testutil.Equal(t, crit["shop-serves"].Target.Kind+" "+crit["shop-serves"].Target.Name, "Service shop")
-	for _, id := range []string{"currency-ref", "token-ref", "inputs-unchanged"} {
+	for _, id := range []string{"currency-ref", "token-ref", "secret-unchanged"} {
 		testutil.Equal(t, crit[id].DependsOn == nil, true)
 	}
-	// No criterion reads the Secret: the canary is protected by never being
-	// part of any evidence, which the bank's leak guard asserts.
+	// Exactly one criterion reads the Secret, and it has no prerequisite, so
+	// the redactor learns the Secret in every evaluation (the key of a
+	// learner's secretKeyRef or a kubelet message may echo its value).
+	var secretReaders []string
 	for _, c := range p.Criteria {
-		testutil.Equal(t, c.Target.Kind == "Secret", false)
+		if c.Target.Kind == "Secret" {
+			secretReaders = append(secretReaders, c.ID)
+		}
 	}
+	testutil.Equal(t, secretReaders, []string{"secret-unchanged"})
+	testutil.Equal(t, crit["secret-unchanged"].DependsOn == nil, true)
+	testutil.Equal(t, crit["secret-unchanged"].Args["wait"] == nil, true)
 	ready := crit["shop-ready"]
 	testutil.Equal(t, ready.Kind, model.CriterionReady)
 	testutil.Equal(t, fmt.Sprint(ready.Args["replicas"]), "1")
@@ -1381,15 +1393,16 @@ func TestSecurityConfigurationContracts(t *testing.T) {
 	for _, lit := range []string{
 		"`shop`", "`app`", "port 80, targetPort 8080", "`shop-config`", "`currency`", "`EUR`", "`shop-secret`", "`api-token`",
 		"`CURRENCY`", "`API_TOKEN`", "`configMapKeyRef`", "`secretKeyRef`", "literal `value`",
-		"Do not change the value of `currency` in ConfigMap `shop-config`", "`shop currency=EUR token=ok`",
+		"Do not change Secret `shop-secret`", "`shop currency=EUR token=ok`",
 		"1 Ready replica", "10-second stability window", "90-second observation limit", "60-second limit", "this point needs the third one",
-		"keeps both the fourth and the fifth point", "`optional` and any other environment variables do not matter",
+		"still holds the `api-token` value it had", "the value is never shown", "reads its ConfigMap value when its container starts", "keeps the fourth point from you",
+		"`optional` and any other environment variables do not matter",
 	} {
 		if !strings.Contains(q, lit) {
 			t.Errorf("question must state %q", lit)
 		}
 	}
-	for _, ungraded := range []string{"image", "command", "Do not change the Secret", "Do not change the ConfigMap,"} {
+	for _, ungraded := range []string{"image", "command", "Do not change the ConfigMap", "Do not change the value of `currency`", "do not change the ConfigMap", "keeps both the fourth and the fifth point"} {
 		if strings.Contains(q, ungraded) {
 			t.Errorf("the question must not mention %q: nothing grades it", ungraded)
 		}
@@ -1441,6 +1454,13 @@ func TestSecurityConfigurationContracts(t *testing.T) {
 			if _, ok := cm["data"].(map[string]any)["Currency"]; ok {
 				t.Error("the setup ConfigMap must not have the wrong key")
 			}
+		case "secret-value-as-key":
+			// Correct CURRENCY; API_TOKEN names the token value as the secret key.
+			testutil.Equal(t, g.deleted, wantDel)
+			testutil.Equal(t, g.kinds(), []string{"Deployment"})
+			asKey := deepCopyObject(solDeploy)
+			envOf(appContainer(t, c.ID, asKey))[1].(map[string]any)["valueFrom"].(map[string]any)["secretKeyRef"].(map[string]any)["key"] = canary
+			testutil.Equal(t, g.objs["Deployment"], asKey)
 		case "configmap-edited":
 			// The ConfigMap value changes, the Deployment is the solution.
 			testutil.Equal(t, g.deleted, wantDel)
@@ -1473,8 +1493,8 @@ func TestSecurityConfigurationContracts(t *testing.T) {
 	if strings.Contains(readme, "image or command") || strings.Contains(readme, "do not change the image") {
 		t.Error("the handout must not forbid changing the image or command: nothing grades it")
 	}
-	if !strings.Contains(readme, "Do not change the value of currency in shop-config") {
-		t.Error("the handout must repeat the graded ConfigMap rule")
+	if !strings.Contains(readme, "Do not change Secret shop-secret") || strings.Contains(readme, "shop-config.") {
+		t.Error("the handout must repeat the graded Secret rule and no ConfigMap rule")
 	}
 	for name, b := range p.Files {
 		if name != "setup/app.yaml" && !strings.HasPrefix(name, "cases/") && strings.Contains(string(b), canary) {
@@ -1486,15 +1506,115 @@ func TestSecurityConfigurationContracts(t *testing.T) {
 			t.Errorf("%s shows the token to the learner", name)
 		}
 	}
-	// A hardcoded literal is the one place the canary may sit in a case.
+	// Only the two cases that plant the token (as a literal and as a secret key) may carry it.
 	for name, b := range p.Files {
-		if strings.HasPrefix(name, "cases/") && strings.Contains(string(b), canary) && name != "cases/hardcoded-values.yaml" {
+		if strings.HasPrefix(name, "cases/") && strings.Contains(string(b), canary) && name != "cases/hardcoded-values.yaml" && name != "cases/secret-value-as-key.yaml" {
 			t.Errorf("%s contains the token", name)
 		}
 	}
-	for _, lit := range []string{"CreateContainerConfigError", "ERROR", "api-token", "hardcoded-values", "wrong-configmap-key", "configmap-edited", "optional: false"} {
+	for _, lit := range []string{"CreateContainerConfigError", "ERROR", "api-token", "hardcoded-values", "wrong-configmap-key", "configmap-edited", "secret-value-as-key", "secret-unchanged", "optional: false"} {
 		if !strings.Contains(string(p.Files["explanation.ko.md"]), lit) {
 			t.Errorf("the explanation must mention %q", lit)
 		}
+	}
+}
+
+// configReader serves fixed objects by "Kind/name".
+type configReader map[string]map[string]any
+
+func (r configReader) Get(_ context.Context, ref model.ObjectRef) (map[string]any, error) {
+	if o, ok := r[ref.Kind+"/"+ref.Name]; ok {
+		return runtime.DeepCopyJSON(o), nil
+	}
+	return nil, grader.ErrNotFound
+}
+
+func (configReader) List(context.Context, grader.ListQuery) ([]map[string]any, error) {
+	return nil, nil
+}
+
+// TestSecurityConfigurationRedaction runs the real engine and field checker on
+// the Deployments of the cases that plant the token (as a literal and as a
+// secret key) and proves two things: the criterion that reads Secret
+// shop-secret keeps every evaluation free of the token (`data` values are
+// compared decoded and redacted), and without that criterion the token WOULD
+// leak (the secret key a learner wrote is echoed by token-ref), so the
+// Secret-reading criterion is what protects it.
+func TestSecurityConfigurationRedaction(t *testing.T) {
+	p := loadGroup(t, []string{"configuration-001"})[0]
+	f, err := problem.Freeze(p, 1)
+	testutil.NoError(t, err)
+	canary := securityForbidden["configuration-001"][0]
+	secretWith := func(value string) map[string]any {
+		return map[string]any{"apiVersion": "v1", "kind": "Secret", "metadata": map[string]any{"name": "shop-secret", "namespace": f.Namespace},
+			"data": map[string]any{"api-token": base64.StdEncoding.EncodeToString([]byte(value))}}
+	}
+	deployOf := func(caseID string) map[string]any {
+		for _, c := range p.Cases {
+			if c.ID == caseID {
+				return resourcesActions(t, p, f, caseID, c.Actions).objs["Deployment"]
+			}
+		}
+		t.Fatalf("no case %s", caseID)
+		return nil
+	}
+	eval := func(secret map[string]any, deploy map[string]any, ids ...string) model.Evaluation {
+		t.Helper()
+		fp := f
+		fp.Definition = f.Definition
+		fp.Definition.Criteria = nil
+		for _, c := range p.Criteria {
+			if slices.Contains(ids, c.ID) {
+				fp.Definition.Criteria = append(fp.Definition.Criteria, c)
+			}
+		}
+		red := grader.NewRedactor()
+		reader := configReader{"Secret/shop-secret": secret, "Deployment/shop": deploy}
+		engine := grader.NewEngine(grader.DefaultCheckers(reader, grader.WithRedactor(red)), grader.WithRedactor(red))
+		ev, err := engine.Evaluate(context.Background(), grader.Target{Problem: fp})
+		testutil.NoError(t, err)
+		return ev
+	}
+	status := func(ev model.Evaluation) map[string]string {
+		out := map[string]string{}
+		for _, r := range ev.Results {
+			out[r.CriterionID] = r.Status
+		}
+		return out
+	}
+	forbidden := []string{canary}
+
+	// The secret key is the token: token-ref FAILs, the Secret is unchanged.
+	asKey := eval(secretWith(canary), deployOf("secret-value-as-key"), "currency-ref", "token-ref", "secret-unchanged")
+	testutil.Equal(t, status(asKey), map[string]string{"currency-ref": "PASS", "token-ref": "FAIL", "secret-unchanged": "PASS"})
+	if got := evaluationLeaks(asKey, forbidden); len(got) != 0 {
+		t.Errorf("secret-value-as-key leaks: %v", got)
+	}
+	for _, r := range asKey.Results {
+		if r.CriterionID == "token-ref" && !strings.Contains(r.Reason, grader.Redacted) {
+			t.Errorf("token-ref must show the scrubbed key, got %q", r.Reason)
+		}
+		if r.CriterionID == "secret-unchanged" {
+			testutil.Equal(t, fmt.Sprint(r.Evidence.Actual), fmt.Sprint(map[string]any{"data['api-token']": grader.Redacted}))
+		}
+	}
+	// Negative control: without the Secret-reading criterion the token leaks.
+	if got := evaluationLeaks(eval(secretWith(canary), deployOf("secret-value-as-key"), "token-ref"), forbidden); len(got) == 0 {
+		t.Error("the control must leak: token-ref alone echoes the secret key a learner wrote")
+	}
+	// A changed Secret FAILs secret-unchanged and shows neither value. (The
+	// grader learns the values the cluster holds: an original value that the
+	// learner has already overwritten and also wrote as a secret key is no
+	// longer known to it; that corner is outside this package's cases.)
+	changed := eval(secretWith("another-token-value"), deployOf("hardcoded-values"), "token-ref", "secret-unchanged")
+	testutil.Equal(t, status(changed)["secret-unchanged"], "FAIL")
+	if got := evaluationLeaks(changed, []string{canary, "another-token-value"}); len(got) != 0 {
+		t.Errorf("a changed Secret leaks: %v", got)
+	}
+	// The literal value in the Deployment is never echoed either.
+	lit := eval(secretWith(canary), deployOf("hardcoded-values"), "currency-ref", "token-ref", "secret-unchanged")
+	testutil.Equal(t, status(lit), map[string]string{"currency-ref": "FAIL", "token-ref": "FAIL", "secret-unchanged": "PASS"})
+	if got := evaluationLeaks(lit, forbidden); len(got) != 0 {
+		t.Errorf("hardcoded-values leaks: %v", got)
 	}
 }
