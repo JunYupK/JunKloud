@@ -6,7 +6,7 @@ NetworkPolicy는 Pod 단위의 방화벽 규칙입니다. 정책의 `podSelector
 ## 진단 순서
 1. `kubectl get pods --show-labels -n <namespace>`와 `kubectl get pods --show-labels -n <namespace>-mon`으로 api(`role=api`), web(`role=web`), batch(`role=batch`)와 monitor(`app=monitor`), intruder(`component=intruder`)의 라벨을 확인합니다. 정책은 이 라벨로 Pod를 고릅니다.
 2. `kubectl get networkpolicy`와 `kubectl describe networkpolicy <이름>`으로 각 정책의 `podSelector`, `policyTypes`, 허용 규칙을 봅니다. 정책이 `Ingress`만 가지는지 `Egress`도 가지는지, 어떤 Pod를 격리하는지 확인합니다.
-3. 요구를 정책으로 나눕니다. api의 ingress는 role=web(같은 네임스페이스)과 app=monitor(`<namespace>-mon` 네임스페이스에서 AND)만 허용하고 포트는 8080입니다. web의 egress는 api의 8080번 포트와 kube-system의 53번 포트(UDP, TCP)입니다.
+3. 요구를 정책으로 나눕니다. api의 ingress는 role=web(같은 네임스페이스)과 app=monitor(`<namespace>-mon` 네임스페이스에서 AND)만 허용하고 포트는 8080입니다. web의 egress는 api의 8080번 포트와 kube-system의 53번 포트(UDP, TCP)입니다. web의 egress 정책은 `role: web` 라벨로 Pod를 고릅니다(문제도 `role: web` 라벨의 Pod라고 적습니다).
 4. 적용한 뒤 허용된 클라이언트로 먼저 확인하고(예: web에서 `api`에 요청), 막힌 클라이언트가 응답 없이 시간 초과가 되는지 봅니다. 모두 막혀 있다면 허용 규칙이나 DNS를 빠뜨린 것입니다.
 
 ## 해결
@@ -74,6 +74,7 @@ spec:
     - {protocol: TCP, port: 53}
 ```
 - 허용 규칙을 나눠 정책 두 개로 써도, 항목 두 개의 한 정책으로 합쳐도 같은 결과입니다(`alternative-single-policy`). 합칠 때도 monitor 항목은 `namespaceSelector`와 `podSelector`를 한 항목 안에 함께 둡니다.
+- egress 정책의 `podSelector`는 `role: web`으로 씁니다. 문제는 web의 Pod를 `role: web` 라벨로 정의하고 채점기의 검사용 클라이언트도 `role` 라벨만 가지므로, Deployment web의 Pod에 `app: web`이 있더라도 `app: web`으로 고르면 정책이 검사용 클라이언트에 적용되지 않아 web 클라이언트가 ledger에 접속합니다(`egress-by-app-label`).
 - Deployment의 라벨을 바꾸지 않습니다. 채점기의 검사용 Pod는 문제에 적힌 라벨을 직접 달고 실행되므로 Deployment를 바꿔도 연결 결과가 달라지지 않고, `workloads-unchanged` 점수만 잃습니다.
 - 채점은 정책 객체의 모양이 아니라 연결 결과를 봅니다. 허용된 클라이언트가 같은 Pod에 연결되는 동안 막힌 클라이언트가 시간 초과가 되어야 막힘으로 인정합니다. 서버가 죽었거나 모두를 막는 상태는 정답이 아닙니다.
 
@@ -82,6 +83,7 @@ spec:
 - `allow-all-ingress`: api의 ingress를 `ingress: [{}]`로 모든 곳에 열면 web과 monitor는 통과하고 egress도 맞지만, batch, intruder, 라벨 없는 Pod가 모두 연결되어 `batch-blocked`, `monitor-allowed`, `unlabeled-blocked`를 잃습니다 (5점).
 - `batch-relabeled`: 정책은 정답인데 batch Pod의 라벨을 `role: web`으로 바꾸면 `workloads-unchanged` 한 점만 잃습니다 (7점). 검사용 Pod는 선언된 라벨을 달고 실행되므로 라벨을 바꿔도 정책 우회가 되지 않습니다.
 - `missing-egress`: ingress 정책만 만들고 web의 egress를 제한하지 않으면 web이 ledger에 연결되어 `web-egress-blocked`를 잃습니다 (7점).
+- `egress-by-app-label`: ingress 정책은 정답이고 web의 egress 정책만 `podSelector`를 `app: web`으로 쓰면, 정책은 라벨 `app: web`을 가진 Pod에만 적용됩니다. 검사용 클라이언트는 `role: web`만 달고 있어 선택되지 않으므로 egress 제한을 받지 않고 ledger에 접속합니다. `web-egress-blocked`만 잃습니다 (7점). web의 egress 정책은 `role: web` 라벨로 Pod를 골라야 합니다.
 - `and-or-split`: monitor를 허용하는 `from`을 항목 두 개로 나누어 `namespaceSelector`(`<namespace>-mon`)와 `podSelector`(`app: monitor`)를 따로 쓰면 OR이 되어, `<namespace>-mon`의 모든 Pod(intruder 포함)와 `<namespace>`의 `app: monitor` Pod가 모두 허용됩니다. 두 개의 막힘이 깨지므로 `monitor-allowed`만 잃습니다 (7점). 한 항목 안에 두 selector를 함께 써야 AND입니다.
 - `alternative-single-policy`: 하나의 정책에 `from` 항목 두 개(role=web, 그리고 `<namespace>-mon`의 app=monitor)를 쓰고, 별도의 egress 정책이 api를 `app: api`로, DNS를 kube-system의 `k8s-app: kube-dns` Pod로 고르는 방식도 같은 연결 결과를 만들므로 만점입니다 (8점).
 

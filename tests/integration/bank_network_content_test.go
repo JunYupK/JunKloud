@@ -59,6 +59,7 @@ var networkCases = map[string]map[string]int{
 		"allow-all-ingress":         5,
 		"batch-relabeled":           7,
 		"missing-egress":            7,
+		"egress-by-app-label":       7,
 		"and-or-split":              7,
 		"alternative-single-policy": 8,
 	},
@@ -1106,6 +1107,12 @@ func TestNetworkPolicyContracts(t *testing.T) {
 		testutil.Equal(t, c.Timeout, 60*time.Second)
 		testutil.Equal(t, c.DependsOn, []string{r.dep})
 	}
+	// N1: the web-egress-blocked feedback explains the selector label.
+	for _, lit := range []string{"role=web 라벨로 Pod를 골라야", "app=web으로 고르면"} {
+		if !strings.Contains(crit["web-egress-blocked"].Feedback, lit) {
+			t.Errorf("web-egress-blocked feedback must mention %q", lit)
+		}
+	}
 	wu := crit["workloads-unchanged"]
 	testutil.Equal(t, wu.Kind, model.CriterionField)
 	testutil.Equal(t, wu.Target, model.ObjectRef{APIVersion: "apps/v1", Kind: "Deployment", Namespace: "${namespace}", Name: "batch"})
@@ -1159,6 +1166,18 @@ func TestNetworkPolicyContracts(t *testing.T) {
 			for _, name := range g.order {
 				sameJSON(t, c.ID+" "+name, g.objs[name], sol[strings.TrimPrefix(name, "NetworkPolicy/")])
 			}
+		case "egress-by-app-label":
+			// The solution, except that web-egress selects app: web. The
+			// check clients carry role: web only, so the policy never
+			// selects them and web-denied reaches ledger.
+			testutil.Equal(t, g.order, []string{"NetworkPolicy/api-from-web", "NetworkPolicy/api-from-monitor", "NetworkPolicy/web-egress"})
+			sameJSON(t, c.ID+" api-from-web", g.objs["NetworkPolicy/api-from-web"], sol["api-from-web"])
+			sameJSON(t, c.ID+" api-from-monitor", g.objs["NetworkPolicy/api-from-monitor"], sol["api-from-monitor"])
+			sameJSON(t, c.ID+" web-egress", g.objs["NetworkPolicy/web-egress"],
+				npPolicy(ns, "web-egress", npSel("app", "web"), []any{"Egress"}, nil, []any{
+					map[string]any{"to": []any{map[string]any{"podSelector": npSel("role", "api")}}, "ports": npPorts([2]any{"TCP", 8080})},
+					map[string]any{"to": []any{map[string]any{"namespaceSelector": npSel("kubernetes.io/metadata.name", "kube-system")}}, "ports": npPorts([2]any{"UDP", 53}, [2]any{"TCP", 53})},
+				}))
 		case "and-or-split":
 			// The monitor peer written as two separate from entries
 			// (namespaceSelector OR podSelector) instead of one ANDed peer:
@@ -1219,6 +1238,10 @@ func TestNetworkPolicyContracts(t *testing.T) {
 		"case allow-all-ingress": {"batch-blocked", "monitor-allowed", "unlabeled-blocked"},
 		"case batch-relabeled":   {"workloads-unchanged"},
 		"case missing-egress":    {"web-egress-blocked"},
+		// Trace: web-egress selects app=web, but the check clients carry
+		// role=web only, so the policy never applies to web-denied and it
+		// reaches ledger; every ingress criterion and web-reaches-api hold.
+		"case egress-by-app-label": {"web-egress-blocked"},
 		// Trace: the lookalike (app=monitor in the problem namespace) and the
 		// intruder (any -mon Pod) connect, so only monitor-allowed FAILs.
 		"case and-or-split":              {"monitor-allowed"},
@@ -1254,6 +1277,8 @@ func TestNetworkPolicyContracts(t *testing.T) {
 		"1 Ready replica", "10-second stability window, 90-second observation limit",
 		"60-second limit", "this point needs the first one", "this point needs the second one",
 		"`batch` must keep reaching `ledger`",
+		// N1: the egress bullet names the selector label of the check clients.
+		"egress of the Pods labelled `role: web` in `${namespace}` (the Pods of `web`) is allowed only to the Pods of `api` on port `8080`",
 	} {
 		if !strings.Contains(q, lit) {
 			t.Errorf("question must state %q", lit)
@@ -1270,6 +1295,7 @@ func TestNetworkPolicyContracts(t *testing.T) {
 		"Deployment api", "Deployment ledger", "Deployment web", "Deployment batch", "Deployment monitor", "Deployment intruder",
 		"role: web", "role: batch", "app: monitor", "api-ok", "ledger-ok", "port 80", "port 8080", "port 53", "kube-system",
 		"Do not change the labels app: batch and role: batch, the image or the command of the Pod template of Deployment batch",
+		"Egress of the Pods labelled role: web in ${namespace} (the Pods of web) is allowed only to the Pods of api on port 8080",
 	} {
 		if !strings.Contains(readme, lit) {
 			t.Errorf("the handout must state %q", lit)
@@ -1281,7 +1307,7 @@ func TestNetworkPolicyContracts(t *testing.T) {
 	for _, lit := range []string{
 		"NetworkPolicy", "podSelector", "namespaceSelector", "policyTypes", "kubernetes.io/metadata.name", "kube-system", "53",
 		"timeout", "kubectl get networkpolicy", "kubectl describe networkpolicy", "kubectl get pods --show-labels",
-		"deny-all", "allow-all-ingress", "batch-relabeled", "missing-egress", "and-or-split", "alternative-single-policy",
+		"deny-all", "allow-all-ingress", "batch-relabeled", "missing-egress", "egress-by-app-label", "and-or-split", "alternative-single-policy",
 		"api-ready", "ledger-ready", "web-reaches-api", "batch-blocked", "monitor-allowed", "unlabeled-blocked", "web-egress-blocked", "workloads-unchanged",
 		"https://kubernetes.io/docs/concepts/services-networking/network-policies/",
 		// J2, J3: deny-all fails DNS in-namespace; the gating sentence.

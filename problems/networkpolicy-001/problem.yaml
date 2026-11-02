@@ -238,7 +238,7 @@
       "id": "web-egress-blocked",
       "kind": "network-policy",
       "points": 1,
-      "feedback": "role=web 클라이언트는 ledger에 접속할 수 없어야 하고(연결이 시간 초과로 막힘) role=batch 클라이언트는 계속 ledger에 접속할 수 있어야 합니다. web의 egress를 api의 8080번 포트와 DNS(UDP/TCP 53번)로만 제한하는 정책이 없으면 web이 ledger에 접속해 이 점수를 잃습니다. egress를 제한하는 정책은 policyTypes에 Egress를 넣어야 적용됩니다. 또 모든 Pod를 막는 정책을 쓰면 batch도 ledger에 접속하지 못해 허용 쪽 검사가 실패합니다.",
+      "feedback": "role=web 클라이언트는 ledger에 접속할 수 없어야 하고(연결이 시간 초과로 막힘) role=batch 클라이언트는 계속 ledger에 접속할 수 있어야 합니다. web의 egress를 api의 8080번 포트와 DNS(UDP/TCP 53번)로만 제한하는 정책이 없으면 web이 ledger에 접속해 이 점수를 잃습니다. egress를 제한하는 정책은 policyTypes에 Egress를 넣어야 적용됩니다. 또 모든 Pod를 막는 정책을 쓰면 batch도 ledger에 접속하지 못해 허용 쪽 검사가 실패합니다. egress 정책은 role=web 라벨로 Pod를 골라야 합니다. 검사용 클라이언트는 role 라벨만 가지므로 app=web으로 고르면 정책이 클라이언트에 적용되지 않아 web 클라이언트가 ledger에 접속합니다.",
       "target": {
         "api_version": "v1",
         "kind": "Service",
@@ -416,6 +416,28 @@
           "kind": "apply",
           "args": {
             "path": "cases/missing-egress.yaml"
+          }
+        }
+      ],
+      "expected": {
+        "api-ready": "PASS",
+        "ledger-ready": "PASS",
+        "web-reaches-api": "PASS",
+        "batch-blocked": "PASS",
+        "monitor-allowed": "PASS",
+        "unlabeled-blocked": "PASS",
+        "web-egress-blocked": "FAIL",
+        "workloads-unchanged": "PASS"
+      },
+      "expected_score": 7
+    },
+    {
+      "id": "egress-by-app-label",
+      "actions": [
+        {
+          "kind": "apply",
+          "args": {
+            "path": "cases/egress-by-app-label.yaml"
           }
         }
       ],

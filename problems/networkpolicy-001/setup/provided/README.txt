@@ -1,6 +1,6 @@
 Deployment api, Deployment ledger, Deployment web and Deployment batch exist in ${namespace}; the Pods of each carry the labels app and role with the name of their Deployment as the value (role: api, role: ledger, role: web, role: batch). Service api and Service ledger forward port 80 to port 8080 of their Pods; api answers api-ok and ledger answers ledger-ok. web and batch only run sleep. Deployment monitor (Pods labelled app: monitor) and Deployment intruder (Pods labelled component: intruder, no label app) exist in ${namespace}-mon. No NetworkPolicy exists yet.
 Create NetworkPolicies in ${namespace} only:
 - Ingress to the Pods of api on port 8080 is allowed only from Pods labelled role: web in ${namespace} and from Pods labelled app: monitor in ${namespace}-mon. Every other ingress to api is denied.
-- Egress of the Pods of web is allowed only to the Pods of api on port 8080 and for DNS, UDP and TCP port 53 to the namespace kube-system, so that web cannot reach ledger. batch must keep reaching ledger.
+- Egress of the Pods labelled role: web in ${namespace} (the Pods of web) is allowed only to the Pods of api on port 8080 and for DNS, UDP and TCP port 53 to the namespace kube-system, so that web cannot reach ledger. batch must keep reaching ledger.
 Do not change the labels app: batch and role: batch, the image or the command of the Pod template of Deployment batch.
 Blocked means that the connection times out while an allowed client reaches the same Pod.

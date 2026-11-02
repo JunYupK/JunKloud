@@ -3,7 +3,7 @@ Namespace `${namespace}` holds the Deployments `api`, `ledger`, `web` and `batch
 Create NetworkPolicies in `${namespace}` only, so that:
 
 - ingress to the Pods of `api` on port `8080` is allowed only from Pods labelled `role: web` in `${namespace}` and from Pods labelled `app: monitor` in `${namespace}-mon`; every other ingress to `api` is denied;
-- egress of the Pods of `web` is allowed only to the Pods of `api` on port `8080` and for DNS, UDP and TCP port `53` to the namespace kube-system, so that `web` cannot reach `ledger`; `batch` must keep reaching `ledger`.
+- egress of the Pods labelled `role: web` in `${namespace}` (the Pods of `web`) is allowed only to the Pods of `api` on port `8080` and for DNS, UDP and TCP port `53` to the namespace kube-system, so that `web` cannot reach `ledger`; `batch` must keep reaching `ledger`.
 
 Do not change the labels `app: batch` and `role: batch`, the image or the command of the Pod template of Deployment `batch`. Blocked means that the connection times out while an allowed client reaches the same Pod; a refused connection, or a Pod that answers nobody, is not a block.
 
