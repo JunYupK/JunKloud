@@ -16,7 +16,7 @@ ResourceQuota는 네임스페이스가 쓸 수 있는 총량(`requests.cpu`, `li
 ## 오답 피드백
 - 쿼터를 삭제하면 Pod는 뜨지만 `team-quota`가 없으므로 `quota-intact`와 `quota-used`를 잃습니다 (3점).
 - 쿼터의 `requests.cpu`를 2로 올리면 마찬가지로 `quota-intact`와 `quota-used`를 잃습니다 (3점).
-- requests cpu를 300m로 두면 Pod 하나만 쿼터에 들어가고 (300m <= 500m) 두 번째 Pod는 500m를 넘어 거부됩니다. 값이 문제의 요구와 다르므로 `worker-resources`를 잃고, 이 값에 의존하는 `worker-ready`와 `quota-used`도 잃습니다 (2점). Pod 한 개가 먼저 admission을 통과해 실행되더라도 결과는 같습니다.
+- requests cpu를 300m로 두면 (limit은 request보다 작을 수 없으므로 limits cpu도 300m 이상으로 올려야 하고, 그렇지 않으면 API가 Deployment 자체를 거부합니다. 이 오답 케이스는 limits cpu도 300m로 올립니다) Pod 하나만 쿼터에 들어가고 (300m <= 500m) 두 번째 Pod는 500m를 넘어 거부됩니다. 값이 문제의 요구와 다르므로 `worker-resources`를 잃고, 이 값에 의존하는 `worker-ready`와 `quota-used`도 잃습니다 (2점). Pod 한 개가 먼저 admission을 통과해 실행되더라도 결과는 같습니다.
 - LimitRange를 만들지 않으면 `limitrange-defaults`만 잃습니다 (4점).
 - `cpu: 0.1`, `memory: 67108864`처럼 다른 표기로 같은 양을 적은 답은 정답입니다 (5점).
 

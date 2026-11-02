@@ -991,7 +991,7 @@ func TestSecurityResourcesContracts(t *testing.T) {
 		"Do not delete or change `team-quota`", "its five hard values must stay as they are",
 		"`0.1` for `100m`", "`67108864` for `64Mi`",
 		"2 Ready replicas", "10-second stability window", "90-second observation limit",
-		"this point needs the first one", "`200m`", "up to 60 seconds", "this point needs the third and the second one",
+		"this point needs the first one", "`200m`", "up to 60 seconds", "counting only the two `worker` Pods", "remove any other Pod that you started", "this point needs the third and the second one",
 	} {
 		if !strings.Contains(q, lit) {
 			t.Errorf("question must state %q", lit)
@@ -1164,6 +1164,19 @@ func TestSecurityResourcesContracts(t *testing.T) {
 		default:
 			t.Errorf("resources-001 case %s has no contract", c.ID)
 		}
+	}
+
+	// The handout may not add an ungraded "do not change" clause: only the
+	// quota is graded (quota-intact), not the image or the command.
+	readme := string(p.Files["setup/provided/README.txt"])
+	if strings.Contains(readme, "do not change the image") || strings.Contains(readme, "or command") {
+		t.Error("the handout must not forbid changing the image or command: nothing grades it")
+	}
+	if !strings.Contains(readme, "Do not delete or change team-quota") {
+		t.Error("the handout must repeat the graded quota rule")
+	}
+	if !strings.Contains(string(p.Files["explanation.ko.md"]), "limits cpu도 300m") {
+		t.Error("the explanation must say the oversized case raises the limit as well")
 	}
 
 	// The explanation covers the trap and the wrong answers in Korean.
