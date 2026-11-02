@@ -3,6 +3,7 @@
 package integration
 
 import (
+	"fmt"
 	"os"
 	"path/filepath"
 	"slices"
@@ -22,7 +23,7 @@ var networkIDs = []string{"service-001", "ingress-001", "networkpolicy-001"}
 // pending package may be missing; every other package must exist. The task
 // that adds a package removes its ID here (TestNetworkTablesHavePackages
 // fails while an existing package is still listed as pending).
-var networkPending = []string{"service-001", "ingress-001", "networkpolicy-001"}
+var networkPending = []string{"ingress-001", "networkpolicy-001"}
 
 // networkPoints pins the points of each networking problem.
 var networkPoints = map[string]int{
@@ -33,7 +34,15 @@ var networkPoints = map[string]int{
 
 // networkCases maps problem ID -> case ID -> expected score. Each package adds
 // its row with its task; the table pins the exact case set of each package.
-var networkCases = map[string]map[string]int{}
+var networkCases = map[string]map[string]int{
+	"service-001": {
+		"pods-relabeled":                2,
+		"wrong-target-port":             4,
+		"clusterip-only":                5,
+		"empty-service":                 4,
+		"alternative-named-target-port": 6,
+	},
+}
 
 // networkCapabilities and networkInitialScores pin each package's declared
 // capabilities and the score of the untouched environment.
@@ -43,7 +52,9 @@ var networkCapabilities = map[string][]string{
 	"networkpolicy-001": {"network-policy"},
 }
 
-var networkInitialScores = map[string]int{}
+var networkInitialScores = map[string]int{
+	"service-001": 3,
+}
 
 // networkCompetencies are the three official items of spec section 3.1 that
 // the networking domain covers, used exactly.
@@ -337,4 +348,277 @@ func TestNetworkSmokeCriteriaFilter(t *testing.T) {
 	kept, dropped = smokeNetworkCriteria(all, true)
 	testutil.Equal(t, ids(kept), []string{"ready", "allowed", "independent"})
 	testutil.Equal(t, dropped, []string{"blocked", "after-blocked", "after-after"})
+}
+
+// ----------------------------------------------------------- service-001
+
+// networkObjects renders a group of actions: the objects it applies in order,
+// keyed "Kind/name", and the objects it deletes (delete-owned) in order.
+type networkGroup struct {
+	order   []string
+	objs    map[string]map[string]any
+	deleted []string
+}
+
+func networkActions(t *testing.T, p model.Problem, f model.FrozenProblem, label string, actions []model.Action) networkGroup {
+	t.Helper()
+	built, err := author.BuildActions(p.Files, f.Parameters, actions)
+	testutil.NoError(t, err)
+	g := networkGroup{objs: map[string]map[string]any{}}
+	for _, a := range built {
+		switch a.Kind {
+		case model.ActionApply:
+			for _, o := range a.Objects {
+				key := fmt.Sprint(o["kind"]) + "/" + nestedString(t, o, "metadata", "name")
+				if _, dup := g.objs[key]; dup {
+					t.Fatalf("%s: two %s objects", label, key)
+				}
+				g.objs[key] = o
+				g.order = append(g.order, key)
+			}
+		case model.ActionDeleteOwned:
+			for _, ref := range a.Targets {
+				g.deleted = append(g.deleted, ref.Kind+"/"+ref.Name)
+			}
+		default:
+			t.Fatalf("%s: service-001 uses only apply and delete-owned, got %s", label, a.Kind)
+		}
+	}
+	return g
+}
+
+func TestNetworkServiceContracts(t *testing.T) {
+	p := loadGroup(t, []string{"service-001"})[0]
+	f, err := problem.Freeze(p, 1)
+	testutil.NoError(t, err)
+	ns := f.Namespace
+	q := string(p.Files[problem.QuestionFile])
+	const (
+		image          = "docker.io/library/busybox:1.37.0"
+		catalogScript  = "mkdir -p /www && printf catalog-ok > /www/index.html && exec httpd -f -p 8080 -h /www"
+		frontendScript = `while true; do if b=$(wget -qO- -T 2 http://catalog/ 2>/dev/null); then echo "frontend fetched $b"; else echo "frontend fetch failed"; fi; sleep 3; done`
+	)
+
+	testutil.Equal(t, p.Type, "troubleshoot")
+	testutil.Equal(t, p.Difficulty, "medium")
+	testutil.Equal(t, p.Competencies, []string{"Service access and troubleshooting"})
+	testutil.Equal(t, p.Scope.Namespaces == nil, true)
+	testutil.Equal(t, len(p.Scope.ClusterResources), 0)
+	testutil.Equal(t, fmt.Sprint(p.Parameters["namespace"]), "[jk-service-001-a jk-service-001-b]")
+
+	// Setup: the catalog Deployment, the broken Service and the frontend.
+	setup := networkActions(t, p, f, "setup", p.Setup)
+	testutil.Equal(t, setup.order, []string{"Deployment/catalog", "Service/catalog", "Deployment/frontend"})
+	testutil.Equal(t, len(setup.deleted), 0)
+	catalog := setup.objs["Deployment/catalog"]
+	testutil.Equal(t, nestedString(t, catalog, "metadata", "namespace"), ns)
+	testutil.Equal(t, nestedString(t, catalog, "spec", "replicas"), "2")
+	sameJSON(t, "catalog selector", nestedMap(t, catalog, "spec", "selector")["matchLabels"], map[string]any{"app": "catalog"})
+	sameJSON(t, "catalog template labels", nestedMap(t, catalog, "spec", "template", "metadata")["labels"], map[string]any{"app": "catalog", "tier": "backend"})
+	cc := appContainer(t, "catalog", catalog)
+	testutil.Equal(t, cc["name"], any("catalog"))
+	testutil.Equal(t, cc["image"], any(image))
+	testutil.Equal(t, cc["imagePullPolicy"], any("Never"))
+	testutil.Equal(t, cc["command"], any([]any{"sh", "-c", catalogScript}))
+	sameJSON(t, "catalog ports", cc["ports"], []any{map[string]any{"name": "http", "containerPort": 8080}})
+	svc := setup.objs["Service/catalog"]
+	testutil.Equal(t, nestedString(t, svc, "metadata", "namespace"), ns)
+	sameJSON(t, "setup Service spec", svc["spec"], map[string]any{
+		"type":     "ClusterIP",
+		"selector": map[string]any{"app": "catalog-api"},
+		"ports":    []any{map[string]any{"name": "http", "port": 80, "targetPort": 9090, "protocol": "TCP"}},
+	})
+	frontend := setup.objs["Deployment/frontend"]
+	testutil.Equal(t, nestedString(t, frontend, "metadata", "namespace"), ns)
+	testutil.Equal(t, nestedString(t, frontend, "spec", "replicas"), "1")
+	sameJSON(t, "frontend selector", nestedMap(t, frontend, "spec", "selector")["matchLabels"], map[string]any{"app": "frontend"})
+	sameJSON(t, "frontend template labels", nestedMap(t, frontend, "spec", "template", "metadata")["labels"], map[string]any{"app": "frontend"})
+	fc := appContainer(t, "frontend", frontend)
+	testutil.Equal(t, fc["name"], any("frontend"))
+	testutil.Equal(t, fc["image"], any(image))
+	testutil.Equal(t, fc["imagePullPolicy"], any("Never"))
+	testutil.Equal(t, fc["command"], any([]any{"sh", "-c", frontendScript}))
+
+	// Criteria: six, one point each, in the pinned order and shape.
+	crit := map[string]model.Criterion{}
+	var order []string
+	for _, c := range p.Criteria {
+		crit[c.ID] = c
+		order = append(order, c.ID)
+		testutil.Equal(t, c.Points, 1)
+	}
+	testutil.Equal(t, order, []string{"catalog-ready", "workloads-unchanged", "service-routes", "service-type", "frontend-ready", "frontend-reaches"})
+	cr := crit["catalog-ready"]
+	testutil.Equal(t, cr.Kind, model.CriterionReady)
+	testutil.Equal(t, cr.Target.APIVersion+" "+cr.Target.Kind+" "+cr.Target.Name, "apps/v1 Deployment catalog")
+	testutil.Equal(t, fmt.Sprint(cr.Args["replicas"]), "2")
+	testutil.Equal(t, cr.Timeout, 90*time.Second)
+	wu := crit["workloads-unchanged"]
+	testutil.Equal(t, wu.Kind, model.CriterionField)
+	testutil.Equal(t, wu.Target.Kind+" "+wu.Target.Name, "Deployment catalog")
+	sameJSON(t, "workloads-unchanged args", wu.Args, map[string]any{"fields": []any{
+		map[string]any{"path": "spec.template.metadata.labels.app", "equals": "catalog"},
+		map[string]any{"path": "spec.template.metadata.labels.tier", "equals": "backend"},
+		map[string]any{"path": "spec.template.spec.containers[name=catalog].image", "equals": image},
+		map[string]any{"path": "spec.template.spec.containers[name=catalog].command", "equals": []any{"sh", "-c", catalogScript}},
+	}})
+	sr := crit["service-routes"]
+	testutil.Equal(t, sr.Kind, model.CriterionHTTP)
+	testutil.Equal(t, sr.Target, model.ObjectRef{APIVersion: "v1", Kind: "Service", Namespace: "${namespace}", Name: "catalog"})
+	sameJSON(t, "service-routes args", sr.Args, map[string]any{"port": 80, "path": "/", "body_marker": "catalog-ok"})
+	testutil.Equal(t, sr.Timeout, 60*time.Second)
+	testutil.Equal(t, sr.DependsOn, []string{"catalog-ready"})
+	st := crit["service-type"]
+	testutil.Equal(t, st.Kind, model.CriterionField)
+	testutil.Equal(t, st.Target, model.ObjectRef{APIVersion: "v1", Kind: "Service", Namespace: "${namespace}", Name: "catalog"})
+	sameJSON(t, "service-type args", st.Args, map[string]any{"fields": []any{
+		map[string]any{"path": "spec.type", "equals": "NodePort"},
+		map[string]any{"path": "spec.ports[name=http].nodePort", "equals": 30080},
+	}})
+	fr := crit["frontend-ready"]
+	testutil.Equal(t, fr.Kind, model.CriterionReady)
+	testutil.Equal(t, fr.Target.APIVersion+" "+fr.Target.Kind+" "+fr.Target.Name, "apps/v1 Deployment frontend")
+	testutil.Equal(t, fmt.Sprint(fr.Args["replicas"]), "1")
+	testutil.Equal(t, fr.Timeout, 90*time.Second)
+	re := crit["frontend-reaches"]
+	testutil.Equal(t, re.Kind, model.CriterionLogs)
+	testutil.Equal(t, re.Target.APIVersion+" "+re.Target.Kind+" "+re.Target.Name, "apps/v1 Deployment frontend")
+	sameJSON(t, "frontend-reaches args", re.Args, map[string]any{"container": "frontend", "matches": []any{"^frontend fetched catalog-ok$"}, "wait": true})
+	testutil.Equal(t, re.Timeout, 60*time.Second)
+	testutil.Equal(t, re.DependsOn, []string{"service-routes", "frontend-ready"})
+	// The window: the loop fetches every 3 seconds and the check observes for
+	// 60, so a fix is seen well inside the window.
+	testutil.Equal(t, strings.Contains(frontendScript, "sleep 3"), true)
+
+	// Solution: one apply of the repaired Service.
+	solution := networkActions(t, p, f, "solution", p.Solution)
+	testutil.Equal(t, solution.order, []string{"Service/catalog"})
+	testutil.Equal(t, len(solution.deleted), 0)
+	if len(p.Solution) != 1 {
+		t.Errorf("the solution must be one apply, got %d actions", len(p.Solution))
+	}
+	wantSvc := func(mut func(spec map[string]any)) map[string]any {
+		out := deepCopyObject(svc)
+		spec := nestedMap(t, out, "spec")
+		spec["type"] = "NodePort"
+		spec["selector"] = map[string]any{"app": "catalog", "tier": "backend"}
+		spec["ports"] = []any{map[string]any{"name": "http", "port": 80, "targetPort": 8080, "protocol": "TCP", "nodePort": 30080}}
+		if mut != nil {
+			mut(spec)
+		}
+		return out
+	}
+	solSvc := solution.objs["Service/catalog"]
+	sameJSON(t, "solution Service", solSvc, wantSvc(nil))
+
+	// Cases: each differs from the solution only in its named mistake.
+	for _, c := range p.Cases {
+		g := networkActions(t, p, f, c.ID, c.Actions)
+		switch c.ID {
+		case "pods-relabeled":
+			// The Deployment is recreated with the other label (its selector
+			// is immutable); the Service keeps its wrong port and is not touched.
+			testutil.Equal(t, g.deleted, []string{"Deployment/catalog"})
+			testutil.Equal(t, g.order, []string{"Deployment/catalog"})
+			want := deepCopyObject(catalog)
+			nestedMap(t, want, "spec", "selector")["matchLabels"] = map[string]any{"app": "catalog-api"}
+			nestedMap(t, want, "spec", "template", "metadata")["labels"] = map[string]any{"app": "catalog-api", "tier": "backend"}
+			sameJSON(t, c.ID+" Deployment", g.objs["Deployment/catalog"], want)
+		case "wrong-target-port":
+			testutil.Equal(t, len(g.deleted), 0)
+			testutil.Equal(t, g.order, []string{"Service/catalog"})
+			want := wantSvc(func(spec map[string]any) {
+				spec["ports"].([]any)[0].(map[string]any)["targetPort"] = 9090
+			})
+			sameJSON(t, c.ID+" Service", g.objs["Service/catalog"], want)
+		case "clusterip-only":
+			testutil.Equal(t, len(g.deleted), 0)
+			testutil.Equal(t, g.order, []string{"Service/catalog"})
+			want := wantSvc(func(spec map[string]any) {
+				spec["type"] = "ClusterIP"
+				delete(spec["ports"].([]any)[0].(map[string]any), "nodePort")
+			})
+			sameJSON(t, c.ID+" Service", g.objs["Service/catalog"], want)
+		case "empty-service":
+			// Removing a field from a setup-created Service: delete-owned,
+			// then apply (a server-side apply cannot remove it).
+			testutil.Equal(t, g.deleted, []string{"Service/catalog"})
+			testutil.Equal(t, g.order, []string{"Service/catalog"})
+			want := wantSvc(func(spec map[string]any) { delete(spec, "selector") })
+			sameJSON(t, c.ID+" Service", g.objs["Service/catalog"], want)
+		case "alternative-named-target-port":
+			testutil.Equal(t, len(g.deleted), 0)
+			testutil.Equal(t, g.order, []string{"Service/catalog"})
+			want := wantSvc(func(spec map[string]any) {
+				spec["selector"] = map[string]any{"app": "catalog"}
+				spec["ports"].([]any)[0].(map[string]any)["targetPort"] = "http"
+			})
+			sameJSON(t, c.ID+" Service", g.objs["Service/catalog"], want)
+		default:
+			t.Errorf("service-001 case %s has no contract", c.ID)
+		}
+	}
+	// The pods-relabeled case is the only one that touches a workload: the
+	// frontend and the Service of every other case stay as setup created them.
+	for _, c := range p.Cases {
+		g := networkActions(t, p, f, c.ID, c.Actions)
+		if _, has := g.objs["Deployment/frontend"]; has {
+			t.Errorf("case %s must not touch the frontend", c.ID)
+		}
+		if c.ID != "pods-relabeled" {
+			if _, has := g.objs["Deployment/catalog"]; has {
+				t.Errorf("case %s must not touch the catalog Deployment", c.ID)
+			}
+		}
+	}
+
+	// The question states every graded literal and nothing ungraded is
+	// forbidden: exactly one "do not change" sentence, about the catalog
+	// Pod template, which workloads-unchanged grades.
+	for _, lit := range []string{
+		"`catalog`", "`frontend`", "`${namespace}`", "2 replicas", "`8080`", "`http`", "`80`", "`NodePort`", "`30080`",
+		"every 3 seconds", "`frontend fetched catalog-ok`", "`docker.io/library/busybox:1.37.0`", "the provided command",
+		"`app: catalog`", "`tier: backend`", "Do not change the labels, the image or the command of the Pod template of Deployment `catalog`",
+		"2 Ready replicas", "1 Ready replica", "10-second stability window, 90-second observation limit",
+		"60-second limit", "this point needs the first one, because it judges the Pods of that Deployment",
+		"this point needs the third and the fifth one", "any other node port",
+	} {
+		if !strings.Contains(q, lit) {
+			t.Errorf("question must state %q", lit)
+		}
+	}
+	testutil.Equal(t, strings.Count(q, "not change"), 1)
+	for _, ungraded := range []string{"Ingress", "replicas of `frontend`", "ClusterIP", "port-forward", "curl", "kubectl"} {
+		if strings.Contains(q, ungraded) {
+			t.Errorf("the question must not mention %q: nothing grades it", ungraded)
+		}
+	}
+
+	// Handout and explanation.
+	readme := string(p.Files["setup/provided/README.txt"])
+	for _, lit := range []string{
+		"Deployment catalog", "Service catalog", "Deployment frontend", "port 80", "port 8080", "NodePort", "30080", "named http",
+		"Do not change the labels, the image or the command of the Pod template of Deployment catalog", "frontend fetched catalog-ok",
+	} {
+		if !strings.Contains(readme, lit) {
+			t.Errorf("the handout must state %q", lit)
+		}
+	}
+	testutil.Equal(t, strings.Count(readme, "not change"), 1)
+	for _, ungraded := range []string{"Ingress", "ClusterIP", "kubectl", "curl"} {
+		if strings.Contains(readme, ungraded) {
+			t.Errorf("the handout must not mention %q: nothing grades it", ungraded)
+		}
+	}
+	expl := string(p.Files["explanation.ko.md"])
+	for _, lit := range []string{
+		"EndpointSlice", "selector", "targetPort", "NodePort", "30080", "kubectl get endpointslices", "kubectl get pods --show-labels",
+		"pods-relabeled", "wrong-target-port", "clusterip-only", "empty-service", "alternative-named-target-port",
+		"workloads-unchanged", "service-routes", "service-type", "frontend-reaches", "frontend-ready", "catalog-ready",
+		"selector를 바꿀 수 없", "https://kubernetes.io/docs/concepts/services-networking/service/",
+	} {
+		if !strings.Contains(expl, lit) {
+			t.Errorf("the explanation must mention %q", lit)
+		}
+	}
 }

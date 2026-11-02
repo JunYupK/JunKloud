@@ -1,0 +1,322 @@
+{
+  "schema_version": 1,
+  "id": "service-001",
+  "version": "1.0.0",
+  "title": "Repair a Service that does not reach its Pods and expose it with a NodePort",
+  "domain": "networking",
+  "difficulty": "medium",
+  "type": "troubleshoot",
+  "tags": [
+    "networking",
+    "service",
+    "endpoints",
+    "nodeport"
+  ],
+  "competencies": [
+    "Service access and troubleshooting"
+  ],
+  "capabilities": [],
+  "parameters": {
+    "namespace": [
+      "jk-service-001-a",
+      "jk-service-001-b"
+    ]
+  },
+  "namespace": "${namespace}",
+  "budget": {
+    "cpu": "500m",
+    "memory": "192Mi"
+  },
+  "criteria": [
+    {
+      "id": "catalog-ready",
+      "kind": "ready",
+      "points": 1,
+      "feedback": "Deployment catalog의 replica 2개가 모두 Ready여야 합니다. Pod가 Ready가 아니면 kubectl get pods와 kubectl describe pod로 원인을 확인하세요. catalog의 라벨, 이미지, command는 바꾸지 않고 Service를 고쳐야 합니다.",
+      "target": {
+        "api_version": "apps/v1",
+        "kind": "Deployment",
+        "namespace": "${namespace}",
+        "name": "catalog"
+      },
+      "args": {
+        "replicas": 2
+      },
+      "timeout": "90s"
+    },
+    {
+      "id": "workloads-unchanged",
+      "kind": "field",
+      "points": 1,
+      "feedback": "Deployment catalog의 Pod template은 라벨 app=catalog, tier=backend, 제공된 이미지와 command를 그대로 유지해야 합니다. Service의 selector가 Pod 라벨과 맞지 않을 때는 Pod 라벨을 Service에 맞추지 말고 Service의 selector를 Pod의 라벨(kubectl get pods --show-labels)에 맞추세요.",
+      "target": {
+        "api_version": "apps/v1",
+        "kind": "Deployment",
+        "namespace": "${namespace}",
+        "name": "catalog"
+      },
+      "args": {
+        "fields": [
+          {
+            "path": "spec.template.metadata.labels.app",
+            "equals": "catalog"
+          },
+          {
+            "path": "spec.template.metadata.labels.tier",
+            "equals": "backend"
+          },
+          {
+            "path": "spec.template.spec.containers[name=catalog].image",
+            "equals": "docker.io/library/busybox:1.37.0"
+          },
+          {
+            "path": "spec.template.spec.containers[name=catalog].command",
+            "equals": [
+              "sh",
+              "-c",
+              "mkdir -p /www && printf catalog-ok > /www/index.html && exec httpd -f -p 8080 -h /www"
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "id": "service-routes",
+      "kind": "http",
+      "points": 1,
+      "feedback": "Service catalog의 80번 포트로 보낸 요청이 catalog Pod의 8080 포트에 도달해 본문 'catalog-ok'를 받아야 합니다. kubectl get endpointslices -l kubernetes.io/service-name=catalog 가 비어 있으면 selector가 Pod 라벨과 맞지 않는 것이고, 주소가 있는데 연결이 거부되면 targetPort가 앱의 포트(8080 또는 이름 http)와 다른 것입니다.",
+      "target": {
+        "api_version": "v1",
+        "kind": "Service",
+        "namespace": "${namespace}",
+        "name": "catalog"
+      },
+      "args": {
+        "port": 80,
+        "path": "/",
+        "body_marker": "catalog-ok"
+      },
+      "depends_on": [
+        "catalog-ready"
+      ],
+      "timeout": "60s"
+    },
+    {
+      "id": "service-type",
+      "kind": "field",
+      "points": 1,
+      "feedback": "Service catalog는 type이 NodePort이고 이름이 http인 포트의 nodePort가 30080이어야 합니다. type만 바꾸면 nodePort가 임의로 할당되므로 nodePort: 30080을 직접 지정하고, 포트 이름 http는 유지하세요.",
+      "target": {
+        "api_version": "v1",
+        "kind": "Service",
+        "namespace": "${namespace}",
+        "name": "catalog"
+      },
+      "args": {
+        "fields": [
+          {
+            "path": "spec.type",
+            "equals": "NodePort"
+          },
+          {
+            "path": "spec.ports[name=http].nodePort",
+            "equals": 30080
+          }
+        ]
+      }
+    },
+    {
+      "id": "frontend-ready",
+      "kind": "ready",
+      "points": 1,
+      "feedback": "Deployment frontend의 replica 1개가 Ready여야 합니다. kubectl get pods와 kubectl describe pod로 frontend Pod의 상태를 확인하세요.",
+      "target": {
+        "api_version": "apps/v1",
+        "kind": "Deployment",
+        "namespace": "${namespace}",
+        "name": "frontend"
+      },
+      "args": {
+        "replicas": 1
+      },
+      "timeout": "90s"
+    },
+    {
+      "id": "frontend-reaches",
+      "kind": "logs",
+      "points": 1,
+      "feedback": "frontend의 로그에 'frontend fetched catalog-ok' 줄이 있어야 합니다. frontend는 3초마다 http://catalog/ 를 요청하며 요청이 실패하면 'frontend fetch failed'를 찍습니다. Service가 고쳐졌는지 kubectl logs deploy/frontend 로 확인하세요. frontend를 고칠 필요는 없습니다.",
+      "target": {
+        "api_version": "apps/v1",
+        "kind": "Deployment",
+        "namespace": "${namespace}",
+        "name": "frontend"
+      },
+      "args": {
+        "container": "frontend",
+        "matches": [
+          "^frontend fetched catalog-ok$"
+        ],
+        "wait": true
+      },
+      "depends_on": [
+        "service-routes",
+        "frontend-ready"
+      ],
+      "timeout": "60s"
+    }
+  ],
+  "setup": [
+    {
+      "kind": "apply",
+      "args": {
+        "path": "setup/app.yaml"
+      }
+    }
+  ],
+  "solution": [
+    {
+      "kind": "apply",
+      "args": {
+        "path": "solution/service.yaml"
+      }
+    }
+  ],
+  "initial_expected": {
+    "catalog-ready": "PASS",
+    "workloads-unchanged": "PASS",
+    "service-routes": "FAIL",
+    "service-type": "FAIL",
+    "frontend-ready": "PASS",
+    "frontend-reaches": "FAIL"
+  },
+  "initial_score": 3,
+  "cases": [
+    {
+      "id": "pods-relabeled",
+      "actions": [
+        {
+          "kind": "delete-owned",
+          "args": {
+            "targets": [
+              {
+                "api_version": "apps/v1",
+                "kind": "Deployment",
+                "namespace": "${namespace}",
+                "name": "catalog"
+              }
+            ]
+          }
+        },
+        {
+          "kind": "apply",
+          "args": {
+            "path": "cases/pods-relabeled.yaml"
+          }
+        }
+      ],
+      "expected": {
+        "catalog-ready": "PASS",
+        "workloads-unchanged": "FAIL",
+        "service-routes": "FAIL",
+        "service-type": "FAIL",
+        "frontend-ready": "PASS",
+        "frontend-reaches": "FAIL"
+      },
+      "expected_score": 2
+    },
+    {
+      "id": "wrong-target-port",
+      "actions": [
+        {
+          "kind": "apply",
+          "args": {
+            "path": "cases/wrong-target-port.yaml"
+          }
+        }
+      ],
+      "expected": {
+        "catalog-ready": "PASS",
+        "workloads-unchanged": "PASS",
+        "service-routes": "FAIL",
+        "service-type": "PASS",
+        "frontend-ready": "PASS",
+        "frontend-reaches": "FAIL"
+      },
+      "expected_score": 4
+    },
+    {
+      "id": "clusterip-only",
+      "actions": [
+        {
+          "kind": "apply",
+          "args": {
+            "path": "cases/clusterip-only.yaml"
+          }
+        }
+      ],
+      "expected": {
+        "catalog-ready": "PASS",
+        "workloads-unchanged": "PASS",
+        "service-routes": "PASS",
+        "service-type": "FAIL",
+        "frontend-ready": "PASS",
+        "frontend-reaches": "PASS"
+      },
+      "expected_score": 5
+    },
+    {
+      "id": "empty-service",
+      "actions": [
+        {
+          "kind": "delete-owned",
+          "args": {
+            "targets": [
+              {
+                "api_version": "v1",
+                "kind": "Service",
+                "namespace": "${namespace}",
+                "name": "catalog"
+              }
+            ]
+          }
+        },
+        {
+          "kind": "apply",
+          "args": {
+            "path": "cases/empty-service.yaml"
+          }
+        }
+      ],
+      "expected": {
+        "catalog-ready": "PASS",
+        "workloads-unchanged": "PASS",
+        "service-routes": "FAIL",
+        "service-type": "PASS",
+        "frontend-ready": "PASS",
+        "frontend-reaches": "FAIL"
+      },
+      "expected_score": 4
+    },
+    {
+      "id": "alternative-named-target-port",
+      "actions": [
+        {
+          "kind": "apply",
+          "args": {
+            "path": "cases/alternative-named-target-port.yaml"
+          }
+        }
+      ],
+      "expected": {
+        "catalog-ready": "PASS",
+        "workloads-unchanged": "PASS",
+        "service-routes": "PASS",
+        "service-type": "PASS",
+        "frontend-ready": "PASS",
+        "frontend-reaches": "PASS"
+      },
+      "expected_score": 6
+    }
+  ]
+}
