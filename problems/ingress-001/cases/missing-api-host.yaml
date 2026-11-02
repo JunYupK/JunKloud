@@ -1,0 +1,25 @@
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: shop
+  namespace: ${namespace}
+spec:
+  ingressClassName: cloud-provider-kind
+  rules:
+  - host: shop.${namespace}.example
+    http:
+      paths:
+      - path: /
+        pathType: Prefix
+        backend:
+          service:
+            name: shop-web
+            port:
+              number: 80
+      - path: /api
+        pathType: Prefix
+        backend:
+          service:
+            name: shop-api
+            port:
+              number: 80

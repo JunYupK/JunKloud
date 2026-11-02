@@ -1,0 +1,284 @@
+{
+  "schema_version": 1,
+  "id": "ingress-001",
+  "version": "1.0.0",
+  "title": "Route two hosts and a path to two Services with an Ingress",
+  "domain": "networking",
+  "difficulty": "medium",
+  "type": "build",
+  "tags": [
+    "networking",
+    "ingress",
+    "host-routing",
+    "path-routing"
+  ],
+  "competencies": [
+    "Ingress"
+  ],
+  "capabilities": [
+    "ingress"
+  ],
+  "parameters": {
+    "namespace": [
+      "jk-ingress-001-a",
+      "jk-ingress-001-b"
+    ]
+  },
+  "namespace": "${namespace}",
+  "budget": {
+    "cpu": "500m",
+    "memory": "192Mi"
+  },
+  "criteria": [
+    {
+      "id": "web-ready",
+      "kind": "ready",
+      "points": 1,
+      "feedback": "Deployment shop-web의 replica 1개가 Ready여야 합니다. 제공된 Deployment이므로 Ingress를 만들기 전에 kubectl get pods로 상태를 확인하세요. Pod가 Ready가 아니면 kubectl describe pod로 원인을 확인합니다.",
+      "target": {
+        "api_version": "apps/v1",
+        "kind": "Deployment",
+        "namespace": "${namespace}",
+        "name": "shop-web"
+      },
+      "args": {
+        "replicas": 1
+      },
+      "timeout": "90s"
+    },
+    {
+      "id": "api-ready",
+      "kind": "ready",
+      "points": 1,
+      "feedback": "Deployment shop-api의 replica 1개가 Ready여야 합니다. 제공된 Deployment이므로 Ingress를 만들기 전에 kubectl get pods로 상태를 확인하세요. Pod가 Ready가 아니면 kubectl describe pod로 원인을 확인합니다.",
+      "target": {
+        "api_version": "apps/v1",
+        "kind": "Deployment",
+        "namespace": "${namespace}",
+        "name": "shop-api"
+      },
+      "args": {
+        "replicas": 1
+      },
+      "timeout": "90s"
+    },
+    {
+      "id": "root-route",
+      "kind": "http",
+      "points": 1,
+      "feedback": "Host가 shop.<namespace>.example이고 경로가 /인 요청이 Ingress shop을 거쳐 Service shop-web에 도달해 본문 'web-ok'을 받아야 합니다. 200이 아닌 응답이면 그 host의 rule에 경로 /가 없거나 backend의 Service 이름이나 포트가 Service와 맞지 않는 것이고, 본문이 'web-ok'이 아니면 / 경로가 다른 Service로 가고 있습니다. kubectl describe ingress shop의 Rules와 Backends를 확인하세요.",
+      "target": {
+        "api_version": "networking.k8s.io/v1",
+        "kind": "Ingress",
+        "namespace": "${namespace}",
+        "name": "shop"
+      },
+      "args": {
+        "host": "shop.${namespace}.example",
+        "path": "/",
+        "body_marker": "web-ok"
+      },
+      "depends_on": [
+        "web-ready"
+      ],
+      "timeout": "60s"
+    },
+    {
+      "id": "api-path-route",
+      "kind": "http",
+      "points": 1,
+      "feedback": "Host가 shop.<namespace>.example이고 경로가 /api/인 요청이 Ingress shop을 거쳐 Service shop-api에 도달해 본문 'api-ok'을 받아야 합니다. /api 경로(pathType Prefix)를 Service shop-api로 보내야 합니다. shop-web도 /api/에 200으로 응답하지만 본문이 'web-ok'이므로 /api가 shop-web으로 가면 이 점수를 잃습니다. backend의 Service 이름과 포트(80 또는 이름 http)를 확인하세요.",
+      "target": {
+        "api_version": "networking.k8s.io/v1",
+        "kind": "Ingress",
+        "namespace": "${namespace}",
+        "name": "shop"
+      },
+      "args": {
+        "host": "shop.${namespace}.example",
+        "path": "/api/",
+        "body_marker": "api-ok"
+      },
+      "depends_on": [
+        "api-ready"
+      ],
+      "timeout": "60s"
+    },
+    {
+      "id": "api-host-route",
+      "kind": "http",
+      "points": 1,
+      "feedback": "Host가 api.<namespace>.example이고 경로가 /api/인 요청이 Ingress shop을 거쳐 Service shop-api에 도달해 본문 'api-ok'을 받아야 합니다. 이 host의 rule(경로 / Prefix)을 만들고 backend를 Service shop-api의 포트 80(또는 이름 http)로 지정하세요. host가 rule에 없으면 Ingress controller가 404를 돌려줍니다.",
+      "target": {
+        "api_version": "networking.k8s.io/v1",
+        "kind": "Ingress",
+        "namespace": "${namespace}",
+        "name": "shop"
+      },
+      "args": {
+        "host": "api.${namespace}.example",
+        "path": "/api/",
+        "body_marker": "api-ok"
+      },
+      "depends_on": [
+        "api-ready"
+      ],
+      "timeout": "60s"
+    },
+    {
+      "id": "ingress-shape",
+      "kind": "field",
+      "points": 1,
+      "feedback": "Ingress shop은 spec.ingressClassName이 cloud-provider-kind이고, shop.<namespace>.example과 api.<namespace>.example 두 host의 rule을 각각 가져야 합니다. host 없는 rule이나 defaultBackend 하나로 두 host를 한꺼번에 받는 것은 해결이 아닙니다. kubectl get ingress shop -o yaml로 spec.ingressClassName과 rules[].host를 확인하세요.",
+      "target": {
+        "api_version": "networking.k8s.io/v1",
+        "kind": "Ingress",
+        "namespace": "${namespace}",
+        "name": "shop"
+      },
+      "args": {
+        "fields": [
+          {
+            "path": "spec.ingressClassName",
+            "equals": "cloud-provider-kind"
+          },
+          {
+            "path": "spec.rules[host=shop.${namespace}.example].host",
+            "exists": true
+          },
+          {
+            "path": "spec.rules[host=api.${namespace}.example].host",
+            "exists": true
+          }
+        ]
+      }
+    }
+  ],
+  "setup": [
+    {
+      "kind": "apply",
+      "args": {
+        "path": "setup/app.yaml"
+      }
+    }
+  ],
+  "solution": [
+    {
+      "kind": "apply",
+      "args": {
+        "path": "solution/ingress.yaml"
+      }
+    }
+  ],
+  "initial_expected": {
+    "web-ready": "PASS",
+    "api-ready": "PASS",
+    "root-route": "FAIL",
+    "api-path-route": "FAIL",
+    "api-host-route": "FAIL",
+    "ingress-shape": "FAIL"
+  },
+  "initial_score": 2,
+  "cases": [
+    {
+      "id": "all-to-web",
+      "actions": [
+        {
+          "kind": "apply",
+          "args": {
+            "path": "cases/all-to-web.yaml"
+          }
+        }
+      ],
+      "expected": {
+        "web-ready": "PASS",
+        "api-ready": "PASS",
+        "root-route": "PASS",
+        "api-path-route": "FAIL",
+        "api-host-route": "FAIL",
+        "ingress-shape": "PASS"
+      },
+      "expected_score": 4
+    },
+    {
+      "id": "missing-api-host",
+      "actions": [
+        {
+          "kind": "apply",
+          "args": {
+            "path": "cases/missing-api-host.yaml"
+          }
+        }
+      ],
+      "expected": {
+        "web-ready": "PASS",
+        "api-ready": "PASS",
+        "root-route": "PASS",
+        "api-path-route": "PASS",
+        "api-host-route": "FAIL",
+        "ingress-shape": "FAIL"
+      },
+      "expected_score": 4
+    },
+    {
+      "id": "wrong-backend-port",
+      "actions": [
+        {
+          "kind": "apply",
+          "args": {
+            "path": "cases/wrong-backend-port.yaml"
+          }
+        }
+      ],
+      "expected": {
+        "web-ready": "PASS",
+        "api-ready": "PASS",
+        "root-route": "PASS",
+        "api-path-route": "FAIL",
+        "api-host-route": "FAIL",
+        "ingress-shape": "PASS"
+      },
+      "expected_score": 4
+    },
+    {
+      "id": "no-class",
+      "actions": [
+        {
+          "kind": "apply",
+          "args": {
+            "path": "cases/no-class.yaml"
+          }
+        }
+      ],
+      "expected": {
+        "web-ready": "PASS",
+        "api-ready": "PASS",
+        "root-route": "PASS",
+        "api-path-route": "PASS",
+        "api-host-route": "PASS",
+        "ingress-shape": "FAIL"
+      },
+      "expected_score": 5
+    },
+    {
+      "id": "alternative-port-name",
+      "actions": [
+        {
+          "kind": "apply",
+          "args": {
+            "path": "cases/alternative-port-name.yaml"
+          }
+        }
+      ],
+      "expected": {
+        "web-ready": "PASS",
+        "api-ready": "PASS",
+        "root-route": "PASS",
+        "api-path-route": "PASS",
+        "api-host-route": "PASS",
+        "ingress-shape": "PASS"
+      },
+      "expected_score": 6
+    }
+  ]
+}

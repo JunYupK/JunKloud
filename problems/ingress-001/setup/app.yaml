@@ -1,0 +1,109 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: shop-web
+  namespace: ${namespace}
+  labels:
+    app: shop-web
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: shop-web
+  template:
+    metadata:
+      labels:
+        app: shop-web
+    spec:
+      containers:
+      - name: app
+        image: docker.io/library/busybox:1.37.0
+        imagePullPolicy: Never
+        command:
+        - sh
+        - -c
+        - mkdir -p /www/api && printf web-ok > /www/index.html && printf web-ok > /www/api/index.html && exec httpd -f -p 8080 -h /www
+        ports:
+        - name: http
+          containerPort: 8080
+        readinessProbe:
+          tcpSocket:
+            port: 8080
+          periodSeconds: 2
+        resources:
+          requests:
+            cpu: 10m
+            memory: 8Mi
+          limits:
+            cpu: 100m
+            memory: 32Mi
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: shop-web
+  namespace: ${namespace}
+spec:
+  type: ClusterIP
+  selector:
+    app: shop-web
+  ports:
+  - name: http
+    port: 80
+    targetPort: 8080
+    protocol: TCP
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: shop-api
+  namespace: ${namespace}
+  labels:
+    app: shop-api
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: shop-api
+  template:
+    metadata:
+      labels:
+        app: shop-api
+    spec:
+      containers:
+      - name: app
+        image: docker.io/library/busybox:1.37.0
+        imagePullPolicy: Never
+        command:
+        - sh
+        - -c
+        - mkdir -p /www/api && printf api-ok > /www/api/index.html && exec httpd -f -p 8080 -h /www
+        ports:
+        - name: http
+          containerPort: 8080
+        readinessProbe:
+          tcpSocket:
+            port: 8080
+          periodSeconds: 2
+        resources:
+          requests:
+            cpu: 10m
+            memory: 8Mi
+          limits:
+            cpu: 100m
+            memory: 32Mi
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: shop-api
+  namespace: ${namespace}
+spec:
+  type: ClusterIP
+  selector:
+    app: shop-api
+  ports:
+  - name: http
+    port: 80
+    targetPort: 8080
+    protocol: TCP

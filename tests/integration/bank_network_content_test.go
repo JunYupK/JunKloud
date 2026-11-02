@@ -15,6 +15,7 @@ import (
 	"github.com/JunYupK/JunKloud/internal/model"
 	"github.com/JunYupK/JunKloud/internal/problem"
 	"github.com/JunYupK/JunKloud/internal/testutil"
+	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 )
 
 var networkIDs = []string{"service-001", "ingress-001", "networkpolicy-001"}
@@ -23,7 +24,7 @@ var networkIDs = []string{"service-001", "ingress-001", "networkpolicy-001"}
 // pending package may be missing; every other package must exist. The task
 // that adds a package removes its ID here (TestNetworkTablesHavePackages
 // fails while an existing package is still listed as pending).
-var networkPending = []string{"ingress-001", "networkpolicy-001"}
+var networkPending = []string{"networkpolicy-001"}
 
 // networkPoints pins the points of each networking problem.
 var networkPoints = map[string]int{
@@ -43,6 +44,13 @@ var networkCases = map[string]map[string]int{
 		"pods-labelled-directly":        5,
 		"alternative-named-target-port": 6,
 	},
+	"ingress-001": {
+		"all-to-web":            4,
+		"missing-api-host":      4,
+		"wrong-backend-port":    4,
+		"no-class":              5,
+		"alternative-port-name": 6,
+	},
 }
 
 // networkCapabilities and networkInitialScores pin each package's declared
@@ -55,6 +63,7 @@ var networkCapabilities = map[string][]string{
 
 var networkInitialScores = map[string]int{
 	"service-001": 3,
+	"ingress-001": 2,
 }
 
 // networkCompetencies are the three official items of spec section 3.1 that
@@ -651,4 +660,235 @@ func TestNetworkServiceContracts(t *testing.T) {
 			t.Errorf("the explanation must mention %q", lit)
 		}
 	}
+}
+
+// ----------------------------------------------------------- ingress-001
+
+// ingressRule is one host rule of the shop Ingress: path -> Service name.
+type ingressRule struct {
+	host  string
+	paths [][2]string // {path, service}
+}
+
+// buildIngress renders the shop Ingress of the solution with the given class
+// ("" omits it), rules and backend port (number or name).
+func buildIngress(ns, class string, rules []ingressRule, port any) map[string]any {
+	var rs []any
+	for _, r := range rules {
+		var ps []any
+		for _, p := range r.paths {
+			ps = append(ps, map[string]any{
+				"path": p[0], "pathType": "Prefix",
+				"backend": map[string]any{"service": map[string]any{"name": p[1], "port": port}},
+			})
+		}
+		rs = append(rs, map[string]any{"host": r.host, "http": map[string]any{"paths": ps}})
+	}
+	spec := map[string]any{"rules": rs}
+	if class != "" {
+		spec["ingressClassName"] = class
+	}
+	return map[string]any{
+		"apiVersion": "networking.k8s.io/v1", "kind": "Ingress",
+		"metadata": map[string]any{"name": "shop", "namespace": ns},
+		"spec":     spec,
+	}
+}
+
+func TestNetworkIngressContracts(t *testing.T) {
+	p := loadGroup(t, []string{"ingress-001"})[0]
+	f, err := problem.Freeze(p, 1)
+	testutil.NoError(t, err)
+	ns := f.Namespace
+	q := string(p.Files[problem.QuestionFile])
+	const (
+		image     = "docker.io/library/busybox:1.37.0"
+		webScript = "mkdir -p /www/api && printf web-ok > /www/index.html && printf web-ok > /www/api/index.html && exec httpd -f -p 8080 -h /www"
+		apiScript = "mkdir -p /www/api && printf api-ok > /www/api/index.html && exec httpd -f -p 8080 -h /www"
+		class     = "cloud-provider-kind"
+	)
+	shopHost := "shop." + ns + ".example"
+	apiHost := "api." + ns + ".example"
+
+	testutil.Equal(t, p.Type, "build")
+	testutil.Equal(t, p.Difficulty, "medium")
+	testutil.Equal(t, p.Competencies, []string{"Ingress"})
+	testutil.Equal(t, p.Scope.Namespaces == nil, true)
+	testutil.Equal(t, len(p.Scope.ClusterResources), 0)
+	testutil.Equal(t, fmt.Sprint(p.Parameters["namespace"]), "[jk-ingress-001-a jk-ingress-001-b]")
+
+	// Setup: two backends and their Services; the Ingress is the learner's.
+	setup := networkActions(t, p, f, "setup", p.Setup)
+	testutil.Equal(t, setup.order, []string{"Deployment/shop-web", "Service/shop-web", "Deployment/shop-api", "Service/shop-api"})
+	testutil.Equal(t, len(setup.deleted), 0)
+	for _, b := range []struct{ name, script string }{{"shop-web", webScript}, {"shop-api", apiScript}} {
+		d := setup.objs["Deployment/"+b.name]
+		testutil.Equal(t, nestedString(t, d, "metadata", "namespace"), ns)
+		testutil.Equal(t, nestedString(t, d, "spec", "replicas"), "1")
+		sameJSON(t, b.name+" selector", nestedMap(t, d, "spec", "selector")["matchLabels"], map[string]any{"app": b.name})
+		sameJSON(t, b.name+" template labels", nestedMap(t, d, "spec", "template", "metadata")["labels"], map[string]any{"app": b.name})
+		c := appContainer(t, b.name, d)
+		testutil.Equal(t, c["name"], any("app"))
+		testutil.Equal(t, c["image"], any(image))
+		testutil.Equal(t, c["imagePullPolicy"], any("Never"))
+		testutil.Equal(t, c["command"], any([]any{"sh", "-c", b.script}))
+		sameJSON(t, b.name+" ports", c["ports"], []any{map[string]any{"name": "http", "containerPort": 8080}})
+		s := setup.objs["Service/"+b.name]
+		testutil.Equal(t, nestedString(t, s, "metadata", "namespace"), ns)
+		sameJSON(t, b.name+" Service spec", s["spec"], map[string]any{
+			"type":     "ClusterIP",
+			"selector": map[string]any{"app": b.name},
+			"ports":    []any{map[string]any{"name": "http", "port": 80, "targetPort": 8080, "protocol": "TCP"}},
+		})
+	}
+	// The markers differ, so a wrong backend that answers 200 loses the point:
+	// shop-web answers web-ok on / and on /api/, shop-api answers api-ok on /api/.
+	testutil.Equal(t, strings.Contains(webScript, "web-ok") && !strings.Contains(webScript, "api-ok"), true)
+	testutil.Equal(t, strings.Contains(apiScript, "api-ok") && !strings.Contains(apiScript, "web-ok"), true)
+
+	// Criteria: six, one point each, in the pinned order and shape.
+	crit := map[string]model.Criterion{}
+	var order []string
+	for _, c := range p.Criteria {
+		crit[c.ID] = c
+		order = append(order, c.ID)
+		testutil.Equal(t, c.Points, 1)
+	}
+	testutil.Equal(t, order, []string{"web-ready", "api-ready", "root-route", "api-path-route", "api-host-route", "ingress-shape"})
+	for _, r := range []struct{ id, name string }{{"web-ready", "shop-web"}, {"api-ready", "shop-api"}} {
+		c := crit[r.id]
+		testutil.Equal(t, c.Kind, model.CriterionReady)
+		testutil.Equal(t, c.Target.APIVersion+" "+c.Target.Kind+" "+c.Target.Name, "apps/v1 Deployment "+r.name)
+		testutil.Equal(t, fmt.Sprint(c.Args["replicas"]), "1")
+		testutil.Equal(t, c.Timeout, 90*time.Second)
+	}
+	ingressRef := model.ObjectRef{APIVersion: "networking.k8s.io/v1", Kind: "Ingress", Namespace: "${namespace}", Name: "shop"}
+	for _, r := range []struct {
+		id, host, path, marker, dep string
+	}{
+		{"root-route", "shop.${namespace}.example", "/", "web-ok", "web-ready"},
+		{"api-path-route", "shop.${namespace}.example", "/api/", "api-ok", "api-ready"},
+		{"api-host-route", "api.${namespace}.example", "/api/", "api-ok", "api-ready"},
+	} {
+		c := crit[r.id]
+		testutil.Equal(t, c.Kind, model.CriterionHTTP)
+		testutil.Equal(t, c.Target, ingressRef)
+		// Each route criterion sets its own Host header and path.
+		sameJSON(t, r.id+" args", c.Args, map[string]any{"host": r.host, "path": r.path, "body_marker": r.marker})
+		testutil.Equal(t, c.Timeout, 60*time.Second)
+		testutil.Equal(t, c.DependsOn, []string{r.dep})
+	}
+	// The shape criterion closes the routes the three requests cannot see: a
+	// rule without host or a default backend answers both hosts by itself.
+	sh := crit["ingress-shape"]
+	testutil.Equal(t, sh.Kind, model.CriterionField)
+	testutil.Equal(t, sh.Target, ingressRef)
+	sameJSON(t, "ingress-shape args", sh.Args, map[string]any{"fields": []any{
+		map[string]any{"path": "spec.ingressClassName", "equals": class},
+		map[string]any{"path": "spec.rules[host=shop.${namespace}.example].host", "exists": true},
+		map[string]any{"path": "spec.rules[host=api.${namespace}.example].host", "exists": true},
+	}})
+
+	// Solution: one apply of the Ingress.
+	solution := networkActions(t, p, f, "solution", p.Solution)
+	testutil.Equal(t, solution.order, []string{"Ingress/shop"})
+	testutil.Equal(t, len(solution.deleted), 0)
+	if len(p.Solution) != 1 {
+		t.Errorf("the solution must be one apply, got %d actions", len(p.Solution))
+	}
+	shopRules := []ingressRule{
+		{shopHost, [][2]string{{"/", "shop-web"}, {"/api", "shop-api"}}},
+		{apiHost, [][2]string{{"/", "shop-api"}}},
+	}
+	sameJSON(t, "solution Ingress", solution.objs["Ingress/shop"], buildIngress(ns, class, shopRules, map[string]any{"number": 80}))
+
+	// Cases: each differs from the solution only in its named mistake. The
+	// Ingress is not part of the setup, so every case is a plain apply.
+	for _, c := range p.Cases {
+		g := networkActions(t, p, f, c.ID, c.Actions)
+		testutil.Equal(t, len(g.deleted), 0)
+		testutil.Equal(t, g.order, []string{"Ingress/shop"})
+		var want map[string]any
+		switch c.ID {
+		case "all-to-web":
+			want = buildIngress(ns, class, []ingressRule{
+				{shopHost, [][2]string{{"/", "shop-web"}, {"/api", "shop-web"}}},
+				{apiHost, [][2]string{{"/", "shop-web"}}},
+			}, map[string]any{"number": 80})
+		case "missing-api-host":
+			want = buildIngress(ns, class, shopRules[:1], map[string]any{"number": 80})
+		case "wrong-backend-port":
+			want = buildIngress(ns, class, shopRules, map[string]any{"number": 80})
+			for _, r := range nestedSlice(t, want, "spec", "rules") {
+				for _, pp := range r.(map[string]any)["http"].(map[string]any)["paths"].([]any) {
+					svc := pp.(map[string]any)["backend"].(map[string]any)["service"].(map[string]any)
+					if svc["name"] == "shop-api" {
+						svc["port"] = map[string]any{"number": 8080}
+					}
+				}
+			}
+		case "no-class":
+			want = buildIngress(ns, "", shopRules, map[string]any{"number": 80})
+		case "alternative-port-name":
+			want = buildIngress(ns, class, shopRules, map[string]any{"name": "http"})
+			want["metadata"].(map[string]any)["annotations"] = map[string]any{"example.com/owner": "shop-team"}
+		default:
+			t.Errorf("ingress-001 case %s has no contract", c.ID)
+			continue
+		}
+		sameJSON(t, c.ID+" Ingress", g.objs["Ingress/shop"], want)
+	}
+
+	// The question states every graded literal. It has no "do not change"
+	// sentence: nothing grades the provided workloads.
+	for _, lit := range []string{
+		"`shop-web`", "`shop-api`", "`${namespace}`", "port `80`", "port `8080`", "`web-ok`", "`api-ok`",
+		"Ingress `shop`", "`cloud-provider-kind`", "`spec.ingressClassName`", "`Prefix`",
+		"`shop.${namespace}.example`", "`api.${namespace}.example`", "`/api`", "`/api/`", "`Host`",
+		"1 Ready replica", "10-second stability window, 90-second observation limit",
+		"60-second limit", "this point needs the first one", "this point needs the second one",
+		"a rule for each of the hosts", "HTTP 200",
+	} {
+		if !strings.Contains(q, lit) {
+			t.Errorf("question must state %q", lit)
+		}
+	}
+	testutil.Equal(t, strings.Count(q, "not change"), 0)
+	for _, ungraded := range []string{"kubectl", "curl", "port-forward", "NetworkPolicy"} {
+		if strings.Contains(q, ungraded) {
+			t.Errorf("the question must not mention %q: nothing grades it", ungraded)
+		}
+	}
+	readme := string(p.Files["setup/provided/README.txt"])
+	for _, lit := range []string{
+		"Deployment shop-web", "Deployment shop-api", "Service shop-web", "Service shop-api", "port 80", "port 8080", "web-ok", "api-ok",
+		"Ingress shop", "cloud-provider-kind", "ingressClassName", "Prefix", "shop.${namespace}.example", "api.${namespace}.example", "/api",
+	} {
+		if !strings.Contains(readme, lit) {
+			t.Errorf("the handout must state %q", lit)
+		}
+	}
+	testutil.Equal(t, strings.Count(readme, "not change"), 0)
+
+	expl := string(p.Files["explanation.ko.md"])
+	for _, lit := range []string{
+		"IngressClass", "ingressClassName", "pathType", "Prefix", "Host", "kubectl get ingress", "kubectl describe ingress", "ADDRESS",
+		"all-to-web", "missing-api-host", "wrong-backend-port", "no-class", "alternative-port-name",
+		"root-route", "api-path-route", "api-host-route", "ingress-shape", "web-ready", "api-ready", "web-ok", "api-ok",
+		"https://kubernetes.io/docs/concepts/services-networking/ingress/",
+	} {
+		if !strings.Contains(expl, lit) {
+			t.Errorf("the explanation must mention %q", lit)
+		}
+	}
+}
+
+func nestedSlice(t *testing.T, o map[string]any, path ...string) []any {
+	t.Helper()
+	v, found, err := unstructured.NestedFieldNoCopy(o, path...)
+	s, ok := v.([]any)
+	if err != nil || !found || !ok {
+		t.Fatalf("%v is not a list in %v (%v)", path, o, err)
+	}
+	return s
 }
