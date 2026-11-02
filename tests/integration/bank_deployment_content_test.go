@@ -186,11 +186,11 @@ func TestDeploymentCoverage(t *testing.T) {
 	}
 	testutil.Equal(t, deployment, 1)
 	// design-build 5/20 + deployment 4/20 + observability 3/15 +
-	// environment-security 5/25, no problem in two groups (checked above
-	// through seen). Mock-01's networking group (Task 18) is still missing.
-	testutil.Equal(t, count, 17)
-	testutil.Equal(t, points, 80)
-	testutil.Equal(t, len(seen), 17)
+	// environment-security 5/25 + networking 3/20, no problem in two groups
+	// (checked above through seen).
+	testutil.Equal(t, count, 20)
+	testutil.Equal(t, points, 100)
+	testutil.Equal(t, len(seen), 20)
 	testutil.Equal(t, problem.PracticeMinCount, 5)
 	_, err = problem.Select(loadGroup(t, deploymentIDs), problem.SelectOptions{Mode: model.ModePractice, Count: 4, Seed: 1})
 	if !errors.Is(err, problem.ErrInvalidCount) {

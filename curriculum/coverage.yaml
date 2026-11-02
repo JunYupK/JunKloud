@@ -48,6 +48,17 @@
         "configuration-001",
         "security-001"
       ]
+    },
+    {
+      "id": "networking",
+      "domain": "networking",
+      "count": 3,
+      "points": 20,
+      "problems": [
+        "service-001",
+        "ingress-001",
+        "networkpolicy-001"
+      ]
     }
   ]
 }

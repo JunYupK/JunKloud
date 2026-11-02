@@ -1292,3 +1292,31 @@ func TestNetworkPolicyContracts(t *testing.T) {
 		}
 	}
 }
+
+// TestNetworkBankContent pins the networking group: three packages worth 20
+// points (6 + 6 + 8), one per competency.
+func TestNetworkBankContent(t *testing.T) {
+	ps := loadGroup(t, networkIDs)
+	testutil.Equal(t, len(ps), 3)
+	testutil.Equal(t, sumPoints(ps), 20)
+	for _, p := range ps {
+		testutil.Equal(t, p.Domain, model.DomainNetworking)
+		testutil.Equal(t, sumPoints([]model.Problem{p}), networkPoints[p.ID])
+	}
+}
+
+// TestNetworkCoverage pins the networking group of curriculum/coverage.yaml.
+func TestNetworkCoverage(t *testing.T) {
+	found := 0
+	for _, g := range readCoverageGroups(t) {
+		if g.Domain != model.DomainNetworking {
+			continue
+		}
+		found++
+		testutil.Equal(t, g.ID, "networking")
+		testutil.Equal(t, g.Count, 3)
+		testutil.Equal(t, g.Points, 20)
+		testutil.Equal(t, g.Problems, networkIDs)
+	}
+	testutil.Equal(t, found, 1)
+}
