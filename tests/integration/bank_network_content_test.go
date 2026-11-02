@@ -24,7 +24,7 @@ var networkIDs = []string{"service-001", "ingress-001", "networkpolicy-001"}
 // pending package may be missing; every other package must exist. The task
 // that adds a package removes its ID here (TestNetworkTablesHavePackages
 // fails while an existing package is still listed as pending).
-var networkPending = []string{"networkpolicy-001"}
+var networkPending = []string{}
 
 // networkPoints pins the points of each networking problem.
 var networkPoints = map[string]int{
@@ -52,6 +52,15 @@ var networkCases = map[string]map[string]int{
 		"alternative-default-class": 6,
 		"alternative-port-name":     6,
 	},
+	// Predictions for an enforcing host: not certified (the sandbox kernel
+	// lacks nft_queue, so NetworkPolicy is not enforced here).
+	"networkpolicy-001": {
+		"deny-all":                  3,
+		"allow-all-ingress":         5,
+		"batch-relabeled":           7,
+		"missing-egress":            7,
+		"alternative-single-policy": 8,
+	},
 }
 
 // networkCapabilities and networkInitialScores pin each package's declared
@@ -65,6 +74,8 @@ var networkCapabilities = map[string][]string{
 var networkInitialScores = map[string]int{
 	"service-001": 3,
 	"ingress-001": 2,
+	// Prediction, not certified: with no policy every denied source connects.
+	"networkpolicy-001": 4,
 }
 
 // networkCompetencies are the three official items of spec section 3.1 that
@@ -900,4 +911,359 @@ func nestedSlice(t *testing.T, o map[string]any, path ...string) []any {
 		t.Fatalf("%v is not a list in %v (%v)", path, o, err)
 	}
 	return s
+}
+
+// ------------------------------------------------------ networkpolicy-001
+
+// npLabels builds a label map from key/value pairs.
+func npLabels(kv ...string) map[string]any {
+	m := map[string]any{}
+	for i := 0; i < len(kv); i += 2 {
+		m[kv[i]] = kv[i+1]
+	}
+	return m
+}
+
+func npSel(kv ...string) map[string]any { return map[string]any{"matchLabels": npLabels(kv...)} }
+
+func npPorts(ps ...[2]any) []any {
+	var out []any
+	for _, p := range ps {
+		out = append(out, map[string]any{"protocol": p[0], "port": p[1]})
+	}
+	return out
+}
+
+// npPolicy renders a NetworkPolicy the way the package files spell it.
+func npPolicy(ns, name string, podSel map[string]any, types []any, ingress, egress []any) map[string]any {
+	spec := map[string]any{"podSelector": podSel, "policyTypes": types}
+	if ingress != nil {
+		spec["ingress"] = ingress
+	}
+	if egress != nil {
+		spec["egress"] = egress
+	}
+	return map[string]any{
+		"apiVersion": "networking.k8s.io/v1", "kind": "NetworkPolicy",
+		"metadata": map[string]any{"name": name, "namespace": ns},
+		"spec":     spec,
+	}
+}
+
+// npSolution renders the three policies of the reference solution:
+// api-from-web, api-from-monitor and web-egress.
+func npSolution(ns string) map[string]map[string]any {
+	mon := map[string]any{"namespaceSelector": npSel("kubernetes.io/metadata.name", ns+"-mon"), "podSelector": npSel("app", "monitor")}
+	return map[string]map[string]any{
+		"api-from-web": npPolicy(ns, "api-from-web", npSel("role", "api"), []any{"Ingress"}, []any{
+			map[string]any{"from": []any{map[string]any{"podSelector": npSel("role", "web")}}, "ports": npPorts([2]any{"TCP", 8080})},
+		}, nil),
+		"api-from-monitor": npPolicy(ns, "api-from-monitor", npSel("role", "api"), []any{"Ingress"}, []any{
+			map[string]any{"from": []any{mon}, "ports": npPorts([2]any{"TCP", 8080})},
+		}, nil),
+		"web-egress": npPolicy(ns, "web-egress", npSel("role", "web"), []any{"Egress"}, nil, []any{
+			map[string]any{"to": []any{map[string]any{"podSelector": npSel("role", "api")}}, "ports": npPorts([2]any{"TCP", 8080})},
+			map[string]any{"to": []any{map[string]any{"namespaceSelector": npSel("kubernetes.io/metadata.name", "kube-system")}}, "ports": npPorts([2]any{"UDP", 53}, [2]any{"TCP", 53})},
+		}),
+	}
+}
+
+func TestNetworkPolicyContracts(t *testing.T) {
+	p := loadGroup(t, []string{"networkpolicy-001"})[0]
+	f, err := problem.Freeze(p, 1)
+	testutil.NoError(t, err)
+	ns := f.Namespace
+	mon := ns + "-mon"
+	q := string(p.Files[problem.QuestionFile])
+	const (
+		image       = "docker.io/library/busybox:1.37.0"
+		sleepScript = "exec sleep 86400"
+	)
+	serveScript := func(marker string) string {
+		return "mkdir -p /www && printf " + marker + " > /www/index.html && exec httpd -f -p 8080 -h /www"
+	}
+
+	testutil.Equal(t, p.Type, "behavioral")
+	testutil.Equal(t, p.Difficulty, "hard")
+	testutil.Equal(t, p.Competencies, []string{"NetworkPolicy"})
+	testutil.Equal(t, p.Capabilities, []string{"network-policy"})
+	testutil.Equal(t, fmt.Sprint(p.Parameters["namespace"]), "[jk-networkpolicy-001-a jk-networkpolicy-001-b]")
+	// The monitor and intruder live in a second namespace that the problem owns.
+	testutil.Equal(t, p.Scope.Namespaces, []string{"${namespace}-mon"})
+	testutil.Equal(t, f.Definition.Scope.Namespaces, []string{mon})
+	testutil.Equal(t, len(p.Scope.ClusterResources), 0)
+
+	// Setup: four workloads and two Services in the problem namespace, two
+	// workloads in the -mon namespace. No NetworkPolicy exists.
+	setup := networkActions(t, p, f, "setup", p.Setup)
+	testutil.Equal(t, setup.order, []string{
+		"Deployment/api", "Service/api", "Deployment/ledger", "Service/ledger", "Deployment/web", "Deployment/batch",
+		"Deployment/monitor", "Deployment/intruder",
+	})
+	testutil.Equal(t, len(setup.deleted), 0)
+	type workload struct {
+		name, ns, key, val, script string
+	}
+	workloads := []workload{
+		{"api", ns, "app", "api", serveScript("api-ok")},
+		{"ledger", ns, "app", "ledger", serveScript("ledger-ok")},
+		{"web", ns, "app", "web", sleepScript},
+		{"batch", ns, "app", "batch", sleepScript},
+		{"monitor", mon, "app", "monitor", sleepScript},
+		{"intruder", mon, "component", "intruder", sleepScript},
+	}
+	for _, w := range workloads {
+		d := setup.objs["Deployment/"+w.name]
+		testutil.Equal(t, nestedString(t, d, "metadata", "namespace"), w.ns)
+		testutil.Equal(t, nestedString(t, d, "spec", "replicas"), "1")
+		sameJSON(t, w.name+" selector", nestedMap(t, d, "spec", "selector")["matchLabels"], npLabels(w.key, w.val))
+		wantLabels := npLabels(w.key, w.val)
+		if w.ns == ns {
+			wantLabels["role"] = w.name // the role label the policies select
+		}
+		sameJSON(t, w.name+" template labels", nestedMap(t, d, "spec", "template", "metadata")["labels"], wantLabels)
+		c := appContainer(t, w.name, d)
+		testutil.Equal(t, c["name"], any(w.name))
+		testutil.Equal(t, c["image"], any(image))
+		testutil.Equal(t, c["imagePullPolicy"], any("Never"))
+		testutil.Equal(t, c["command"], any([]any{"sh", "-c", w.script}))
+		if w.name == "api" || w.name == "ledger" {
+			sameJSON(t, w.name+" ports", c["ports"], []any{map[string]any{"name": "http", "containerPort": 8080}})
+			sameJSON(t, w.name+" readiness", c["readinessProbe"], map[string]any{"tcpSocket": map[string]any{"port": 8080}, "periodSeconds": 2})
+		}
+	}
+	for _, s := range []string{"api", "ledger"} {
+		svc := setup.objs["Service/"+s]
+		testutil.Equal(t, nestedString(t, svc, "metadata", "namespace"), ns)
+		sameJSON(t, s+" Service spec", svc["spec"], map[string]any{
+			"type":     "ClusterIP",
+			"selector": npLabels("app", s),
+			"ports":    []any{map[string]any{"name": "http", "port": 80, "targetPort": 8080, "protocol": "TCP"}},
+		})
+	}
+	// The markers differ, so a dead or wrong backend never answers as the right one.
+	testutil.Equal(t, strings.Contains(serveScript("api-ok"), "api-ok") && !strings.Contains(serveScript("api-ok"), "ledger-ok"), true)
+
+	// Criteria: eight, one point each, in the pinned order and shape.
+	crit := map[string]model.Criterion{}
+	var order []string
+	for _, c := range p.Criteria {
+		crit[c.ID] = c
+		order = append(order, c.ID)
+		testutil.Equal(t, c.Points, 1)
+	}
+	testutil.Equal(t, order, []string{"api-ready", "ledger-ready", "web-reaches-api", "batch-blocked", "monitor-allowed", "unlabeled-blocked", "web-egress-blocked", "workloads-unchanged"})
+	for _, r := range []struct{ id, name string }{{"api-ready", "api"}, {"ledger-ready", "ledger"}} {
+		c := crit[r.id]
+		testutil.Equal(t, c.Kind, model.CriterionReady)
+		testutil.Equal(t, c.Target, model.ObjectRef{APIVersion: "apps/v1", Kind: "Deployment", Namespace: "${namespace}", Name: r.name})
+		testutil.Equal(t, fmt.Sprint(c.Args["replicas"]), "1")
+		testutil.Equal(t, c.Timeout, 90*time.Second)
+	}
+	svcRef := func(name string) model.ObjectRef {
+		return model.ObjectRef{APIVersion: "v1", Kind: "Service", Namespace: "${namespace}", Name: name}
+	}
+	web := map[string]any{"labels": map[string]any{"role": "web"}}
+	batch := map[string]any{"labels": map[string]any{"role": "batch"}}
+	allowAPI := func(name string, source map[string]any) map[string]any {
+		return map[string]any{"name": name, "expect": "allow", "source": source, "port": 80, "http": map[string]any{"path": "/", "body_marker": "api-ok"}}
+	}
+	deny := func(name string, source map[string]any) map[string]any {
+		return map[string]any{"name": name, "expect": "deny", "source": source, "port": 80}
+	}
+	wr := crit["web-reaches-api"]
+	testutil.Equal(t, wr.Kind, model.CriterionHTTP)
+	testutil.Equal(t, wr.Target, svcRef("api"))
+	sameJSON(t, "web-reaches-api args", wr.Args, map[string]any{"source": web, "port": 80, "path": "/", "body_marker": "api-ok"})
+	testutil.Equal(t, wr.Timeout, 60*time.Second)
+	testutil.Equal(t, wr.DependsOn, []string{"api-ready"})
+	for _, r := range []struct {
+		id    string
+		exps  []any
+		dep   string
+		other string
+	}{
+		{"batch-blocked", []any{allowAPI("web-allowed", web), deny("batch-denied", batch)}, "api-ready", "api"},
+		{"monitor-allowed", []any{
+			allowAPI("monitor-allowed", map[string]any{"namespace": "${namespace}-mon", "labels": map[string]any{"app": "monitor"}}),
+			deny("intruder-denied", map[string]any{"namespace": "${namespace}-mon", "labels": map[string]any{"component": "intruder"}}),
+			deny("monitor-lookalike-denied", map[string]any{"labels": map[string]any{"app": "monitor"}}),
+		}, "api-ready", "api"},
+		{"unlabeled-blocked", []any{allowAPI("web-allowed", web), deny("unlabeled-denied", map[string]any{})}, "api-ready", "api"},
+		{"web-egress-blocked", []any{
+			map[string]any{"name": "batch-allowed", "expect": "allow", "source": batch, "port": 80, "http": map[string]any{"path": "/", "body_marker": "ledger-ok"}},
+			deny("web-denied", web),
+		}, "ledger-ready", "ledger"},
+	} {
+		c := crit[r.id]
+		testutil.Equal(t, c.Kind, model.CriterionNetworkPolicy)
+		testutil.Equal(t, c.Target, svcRef(r.other))
+		sameJSON(t, r.id+" args", c.Args, map[string]any{"expectations": r.exps})
+		testutil.Equal(t, c.Timeout, 60*time.Second)
+		testutil.Equal(t, c.DependsOn, []string{r.dep})
+	}
+	wu := crit["workloads-unchanged"]
+	testutil.Equal(t, wu.Kind, model.CriterionField)
+	testutil.Equal(t, wu.Target, model.ObjectRef{APIVersion: "apps/v1", Kind: "Deployment", Namespace: "${namespace}", Name: "batch"})
+	sameJSON(t, "workloads-unchanged args", wu.Args, map[string]any{"fields": []any{
+		map[string]any{"path": "spec.template.metadata.labels.app", "equals": "batch"},
+		map[string]any{"path": "spec.template.metadata.labels.role", "equals": "batch"},
+		map[string]any{"path": "spec.template.spec.containers[name=batch].image", "equals": image},
+		map[string]any{"path": "spec.template.spec.containers[name=batch].command", "equals": []any{"sh", "-c", sleepScript}},
+	}})
+	testutil.Equal(t, len(wu.DependsOn), 0)
+
+	// Solution: one apply of the three policies, in the problem namespace only.
+	solution := networkActions(t, p, f, "solution", p.Solution)
+	testutil.Equal(t, solution.order, []string{"NetworkPolicy/api-from-web", "NetworkPolicy/api-from-monitor", "NetworkPolicy/web-egress"})
+	testutil.Equal(t, len(solution.deleted), 0)
+	if len(p.Solution) != 1 {
+		t.Errorf("the solution must be one apply, got %d actions", len(p.Solution))
+	}
+	sol := npSolution(ns)
+	for name, want := range sol {
+		sameJSON(t, "solution "+name, solution.objs["NetworkPolicy/"+name], want)
+	}
+
+	// Cases: each differs from the solution only in its named mistake.
+	for _, c := range p.Cases {
+		g := networkActions(t, p, f, c.ID, c.Actions)
+		testutil.Equal(t, len(g.deleted), 0)
+		switch c.ID {
+		case "deny-all":
+			testutil.Equal(t, g.order, []string{"NetworkPolicy/default-deny"})
+			sameJSON(t, c.ID+" policy", g.objs["NetworkPolicy/default-deny"],
+				npPolicy(ns, "default-deny", map[string]any{}, []any{"Ingress", "Egress"}, nil, nil))
+		case "allow-all-ingress":
+			// Ingress to api from everywhere, with the correct egress policy.
+			testutil.Equal(t, g.order, []string{"NetworkPolicy/api-allow-all", "NetworkPolicy/web-egress"})
+			sameJSON(t, c.ID+" ingress", g.objs["NetworkPolicy/api-allow-all"],
+				npPolicy(ns, "api-allow-all", npSel("role", "api"), []any{"Ingress"}, []any{map[string]any{}}, nil))
+			sameJSON(t, c.ID+" egress", g.objs["NetworkPolicy/web-egress"], sol["web-egress"])
+		case "batch-relabeled":
+			// The correct policies, and batch Pods that carry role: web. The
+			// probe Pods carry the declared labels, so only workloads-unchanged moves.
+			testutil.Equal(t, g.order, []string{"NetworkPolicy/api-from-web", "NetworkPolicy/api-from-monitor", "NetworkPolicy/web-egress", "Deployment/batch"})
+			for name, want := range sol {
+				sameJSON(t, c.ID+" "+name, g.objs["NetworkPolicy/"+name], want)
+			}
+			want := deepCopyObject(setup.objs["Deployment/batch"])
+			nestedMap(t, want, "spec", "template", "metadata")["labels"] = npLabels("app", "batch", "role", "web")
+			sameJSON(t, c.ID+" Deployment", g.objs["Deployment/batch"], want)
+		case "missing-egress":
+			testutil.Equal(t, g.order, []string{"NetworkPolicy/api-from-web", "NetworkPolicy/api-from-monitor"})
+			for _, name := range g.order {
+				sameJSON(t, c.ID+" "+name, g.objs[name], sol[strings.TrimPrefix(name, "NetworkPolicy/")])
+			}
+		case "alternative-single-policy":
+			// One policy with two from entries (the second ANDs the namespace
+			// and the Pod selector), and a separate egress policy that names
+			// the DNS Pods and the api Pods differently.
+			testutil.Equal(t, g.order, []string{"NetworkPolicy/api-ingress", "NetworkPolicy/web-egress"})
+			sameJSON(t, c.ID+" ingress", g.objs["NetworkPolicy/api-ingress"],
+				npPolicy(ns, "api-ingress", npSel("role", "api"), []any{"Ingress"}, []any{
+					map[string]any{"from": []any{
+						map[string]any{"podSelector": npSel("role", "web")},
+						map[string]any{"namespaceSelector": npSel("kubernetes.io/metadata.name", mon), "podSelector": npSel("app", "monitor")},
+					}, "ports": npPorts([2]any{"TCP", 8080})},
+				}, nil))
+			sameJSON(t, c.ID+" egress", g.objs["NetworkPolicy/web-egress"],
+				npPolicy(ns, "web-egress", npSel("role", "web"), []any{"Egress"}, nil, []any{
+					map[string]any{"to": []any{map[string]any{"podSelector": npSel("app", "api")}}, "ports": npPorts([2]any{"TCP", 8080})},
+					map[string]any{"to": []any{map[string]any{"namespaceSelector": npSel("kubernetes.io/metadata.name", "kube-system"), "podSelector": npSel("k8s-app", "kube-dns")}},
+						"ports": npPorts([2]any{"UDP", 53}, [2]any{"TCP", 53})},
+				}))
+		default:
+			t.Errorf("networkpolicy-001 case %s has no contract", c.ID)
+		}
+		// web, api, ledger, monitor and intruder stay as setup created them in
+		// every case; only batch-relabeled touches batch. No case or solution
+		// touches a Service, and every object stays in the problem namespace.
+		for key, o := range g.objs {
+			testutil.Equal(t, nestedString(t, o, "metadata", "namespace"), ns)
+			switch {
+			case strings.HasPrefix(key, "NetworkPolicy/"):
+			case key == "Deployment/batch" && c.ID == "batch-relabeled":
+			default:
+				t.Errorf("case %s must not apply %s", c.ID, key)
+			}
+		}
+	}
+
+	// Predicted status vectors (enforcing host): the criteria that FAIL in
+	// the untouched environment and in each case; every other one is PASS. The
+	// written trace is in the task report; nothing here was run against an
+	// enforcing cluster.
+	wantFail := map[string][]string{
+		"initial":                        {"batch-blocked", "monitor-allowed", "unlabeled-blocked", "web-egress-blocked"},
+		"case deny-all":                  {"web-reaches-api", "batch-blocked", "monitor-allowed", "unlabeled-blocked", "web-egress-blocked"},
+		"case allow-all-ingress":         {"batch-blocked", "monitor-allowed", "unlabeled-blocked"},
+		"case batch-relabeled":           {"workloads-unchanged"},
+		"case missing-egress":            {"web-egress-blocked"},
+		"case alternative-single-policy": nil,
+	}
+	vectors := map[string]map[string]string{"initial": p.InitialExpected}
+	for _, c := range p.Cases {
+		vectors["case "+c.ID] = c.Expected
+	}
+	testutil.Equal(t, len(vectors), len(wantFail))
+	for name, fails := range wantFail {
+		for _, c := range p.Criteria {
+			want := model.StatusPass
+			if slices.Contains(fails, c.ID) {
+				want = model.StatusFail
+			}
+			if got := vectors[name][c.ID]; got != want {
+				t.Errorf("%s: criterion %s is %s, predicted %s", name, c.ID, got, want)
+			}
+		}
+	}
+
+	// The question states every graded literal, exactly one "do not change"
+	// sentence (about batch, which workloads-unchanged grades), the blocked
+	// definition and the scoring windows.
+	for _, lit := range []string{
+		"`api`", "`ledger`", "`web`", "`batch`", "`monitor`", "`intruder`", "`${namespace}`", "`${namespace}-mon`",
+		"`role: api`", "`role: ledger`", "`role: web`", "`role: batch`", "`app: monitor`", "`component: intruder`",
+		"`api-ok`", "`ledger-ok`", "port `80`", "port `8080`", "`53`", "UDP and TCP", "kube-system", "NetworkPolicies in `${namespace}` only",
+		"Blocked means that the connection times out while an allowed client reaches the same Pod",
+		"Do not change the labels `app: batch` and `role: batch`, the image or the command of the Pod template of Deployment `batch`",
+		"1 Ready replica", "10-second stability window, 90-second observation limit",
+		"60-second limit", "this point needs the first one", "this point needs the second one",
+		"`batch` must keep reaching `ledger`",
+	} {
+		if !strings.Contains(q, lit) {
+			t.Errorf("question must state %q", lit)
+		}
+	}
+	testutil.Equal(t, strings.Count(q, "not change"), 1)
+	for _, ungraded := range []string{"kubectl", "curl", "Ingress ", "port-forward"} {
+		if strings.Contains(q, ungraded) {
+			t.Errorf("the question must not mention %q: nothing grades it", ungraded)
+		}
+	}
+	readme := string(p.Files["setup/provided/README.txt"])
+	for _, lit := range []string{
+		"Deployment api", "Deployment ledger", "Deployment web", "Deployment batch", "Deployment monitor", "Deployment intruder",
+		"role: web", "role: batch", "app: monitor", "api-ok", "ledger-ok", "port 80", "port 8080", "port 53", "kube-system",
+		"Do not change the labels app: batch and role: batch, the image or the command of the Pod template of Deployment batch",
+	} {
+		if !strings.Contains(readme, lit) {
+			t.Errorf("the handout must state %q", lit)
+		}
+	}
+	testutil.Equal(t, strings.Count(readme, "not change"), 1)
+
+	expl := string(p.Files["explanation.ko.md"])
+	for _, lit := range []string{
+		"NetworkPolicy", "podSelector", "namespaceSelector", "policyTypes", "kubernetes.io/metadata.name", "kube-system", "53",
+		"timeout", "kubectl get networkpolicy", "kubectl describe networkpolicy", "kubectl get pods --show-labels",
+		"deny-all", "allow-all-ingress", "batch-relabeled", "missing-egress", "alternative-single-policy",
+		"api-ready", "ledger-ready", "web-reaches-api", "batch-blocked", "monitor-allowed", "unlabeled-blocked", "web-egress-blocked", "workloads-unchanged",
+		"https://kubernetes.io/docs/concepts/services-networking/network-policies/",
+	} {
+		if !strings.Contains(expl, lit) {
+			t.Errorf("the explanation must mention %q", lit)
+		}
+	}
 }

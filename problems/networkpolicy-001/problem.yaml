@@ -1,0 +1,457 @@
+{
+  "schema_version": 1,
+  "id": "networkpolicy-001",
+  "version": "1.0.0",
+  "title": "Restrict ingress to an API and egress of a client with NetworkPolicies",
+  "domain": "networking",
+  "difficulty": "hard",
+  "type": "behavioral",
+  "tags": [
+    "networking",
+    "networkpolicy",
+    "ingress-policy",
+    "egress-policy",
+    "dns"
+  ],
+  "competencies": [
+    "NetworkPolicy"
+  ],
+  "capabilities": [
+    "network-policy"
+  ],
+  "parameters": {
+    "namespace": [
+      "jk-networkpolicy-001-a",
+      "jk-networkpolicy-001-b"
+    ]
+  },
+  "namespace": "${namespace}",
+  "scope": {
+    "namespaces": [
+      "${namespace}-mon"
+    ]
+  },
+  "budget": {
+    "cpu": "700m",
+    "memory": "256Mi"
+  },
+  "criteria": [
+    {
+      "id": "api-ready",
+      "kind": "ready",
+      "points": 1,
+      "feedback": "Deployment api의 replica 1개가 Ready여야 합니다. 제공된 Deployment이므로 정책을 만들기 전에 kubectl get pods로 상태를 확인하세요. Ready가 아니면 kubectl describe pod로 원인을 확인합니다. api에 접속하는 나머지 기준은 이 점수가 있어야 평가됩니다.",
+      "target": {
+        "api_version": "apps/v1",
+        "kind": "Deployment",
+        "namespace": "${namespace}",
+        "name": "api"
+      },
+      "args": {
+        "replicas": 1
+      },
+      "timeout": "90s"
+    },
+    {
+      "id": "ledger-ready",
+      "kind": "ready",
+      "points": 1,
+      "feedback": "Deployment ledger의 replica 1개가 Ready여야 합니다. ledger에 접속하는 web-egress-blocked 기준은 이 점수가 있어야 평가됩니다. Ready가 아니면 kubectl get pods와 kubectl describe pod로 원인을 확인하세요.",
+      "target": {
+        "api_version": "apps/v1",
+        "kind": "Deployment",
+        "namespace": "${namespace}",
+        "name": "ledger"
+      },
+      "args": {
+        "replicas": 1
+      },
+      "timeout": "90s"
+    },
+    {
+      "id": "web-reaches-api",
+      "kind": "http",
+      "points": 1,
+      "feedback": "role=web 라벨을 가진 클라이언트가 Service api의 80번 포트로 요청해 본문 'api-ok'을 받아야 합니다. web의 egress를 제한하면서 api의 8080번 포트(TCP)와 DNS(kube-system으로 UDP/TCP 53번)를 허용하지 않았거나, api의 ingress 정책이 role=web을 허용하지 않으면 실패합니다. DNS를 빠뜨리면 Service 이름을 찾지 못합니다. kubectl describe networkpolicy로 각 정책의 podSelector와 ingress/egress 규칙을 확인하세요.",
+      "target": {
+        "api_version": "v1",
+        "kind": "Service",
+        "namespace": "${namespace}",
+        "name": "api"
+      },
+      "args": {
+        "source": {
+          "labels": {
+            "role": "web"
+          }
+        },
+        "port": 80,
+        "path": "/",
+        "body_marker": "api-ok"
+      },
+      "depends_on": [
+        "api-ready"
+      ],
+      "timeout": "60s"
+    },
+    {
+      "id": "batch-blocked",
+      "kind": "network-policy",
+      "points": 1,
+      "feedback": "api에는 role=web 클라이언트만 접속할 수 있어야 하고 role=batch 클라이언트의 연결은 시간 초과(timeout)로 막혀야 합니다. 막힘은 허용된 클라이언트가 같은 Pod에 접속하는 동안 막힌 클라이언트의 연결만 응답 없이 끊기는 것입니다. api에 ingress 정책이 없거나, 모든 곳에서 오는 ingress를 허용했거나, role=web 허용 규칙이 없어 허용된 쪽까지 막히면 이 점수를 잃습니다. kubectl get pods --show-labels로 라벨을 확인하고 kubectl describe networkpolicy로 podSelector를 확인하세요.",
+      "target": {
+        "api_version": "v1",
+        "kind": "Service",
+        "namespace": "${namespace}",
+        "name": "api"
+      },
+      "args": {
+        "expectations": [
+          {
+            "name": "web-allowed",
+            "expect": "allow",
+            "source": {
+              "labels": {
+                "role": "web"
+              }
+            },
+            "port": 80,
+            "http": {
+              "path": "/",
+              "body_marker": "api-ok"
+            }
+          },
+          {
+            "name": "batch-denied",
+            "expect": "deny",
+            "source": {
+              "labels": {
+                "role": "batch"
+              }
+            },
+            "port": 80
+          }
+        ]
+      },
+      "depends_on": [
+        "api-ready"
+      ],
+      "timeout": "60s"
+    },
+    {
+      "id": "monitor-allowed",
+      "kind": "network-policy",
+      "points": 1,
+      "feedback": "api는 <namespace>-mon 네임스페이스의 app=monitor Pod에서 오는 연결을 받아야 하고, 같은 <namespace>-mon의 다른 Pod(intruder)와 <namespace> 네임스페이스에 있는 app=monitor Pod의 연결은 막아야 합니다. from 항목 하나에 namespaceSelector(kubernetes.io/metadata.name: <namespace>-mon)와 podSelector(app: monitor)를 함께 쓰면 두 조건이 AND로 적용됩니다. 둘을 각각 별도의 from 항목으로 나누면 OR가 되어 <namespace>-mon의 모든 Pod와 <namespace>의 app=monitor Pod까지 허용합니다.",
+      "target": {
+        "api_version": "v1",
+        "kind": "Service",
+        "namespace": "${namespace}",
+        "name": "api"
+      },
+      "args": {
+        "expectations": [
+          {
+            "name": "monitor-allowed",
+            "expect": "allow",
+            "source": {
+              "namespace": "${namespace}-mon",
+              "labels": {
+                "app": "monitor"
+              }
+            },
+            "port": 80,
+            "http": {
+              "path": "/",
+              "body_marker": "api-ok"
+            }
+          },
+          {
+            "name": "intruder-denied",
+            "expect": "deny",
+            "source": {
+              "namespace": "${namespace}-mon",
+              "labels": {
+                "component": "intruder"
+              }
+            },
+            "port": 80
+          },
+          {
+            "name": "monitor-lookalike-denied",
+            "expect": "deny",
+            "source": {
+              "labels": {
+                "app": "monitor"
+              }
+            },
+            "port": 80
+          }
+        ]
+      },
+      "depends_on": [
+        "api-ready"
+      ],
+      "timeout": "60s"
+    },
+    {
+      "id": "unlabeled-blocked",
+      "kind": "network-policy",
+      "points": 1,
+      "feedback": "라벨이 없는 Pod가 <namespace>에서 api에 접속하면 막혀야 하고 role=web 클라이언트는 접속할 수 있어야 합니다. podSelector: {}(모든 Pod 허용)를 from에 쓰거나 ingress: [{}]로 모든 곳을 허용하면 라벨 없는 Pod도 통과해 이 점수를 잃습니다. ingress 규칙은 role=web과 app=monitor(<namespace>-mon)만 허용해야 합니다.",
+      "target": {
+        "api_version": "v1",
+        "kind": "Service",
+        "namespace": "${namespace}",
+        "name": "api"
+      },
+      "args": {
+        "expectations": [
+          {
+            "name": "web-allowed",
+            "expect": "allow",
+            "source": {
+              "labels": {
+                "role": "web"
+              }
+            },
+            "port": 80,
+            "http": {
+              "path": "/",
+              "body_marker": "api-ok"
+            }
+          },
+          {
+            "name": "unlabeled-denied",
+            "expect": "deny",
+            "source": {},
+            "port": 80
+          }
+        ]
+      },
+      "depends_on": [
+        "api-ready"
+      ],
+      "timeout": "60s"
+    },
+    {
+      "id": "web-egress-blocked",
+      "kind": "network-policy",
+      "points": 1,
+      "feedback": "role=web 클라이언트는 ledger에 접속할 수 없어야 하고(연결이 시간 초과로 막힘) role=batch 클라이언트는 계속 ledger에 접속할 수 있어야 합니다. web의 egress를 api의 8080번 포트와 DNS(UDP/TCP 53번)로만 제한하는 정책이 없으면 web이 ledger에 접속해 이 점수를 잃습니다. egress를 제한하는 정책은 policyTypes에 Egress를 넣어야 적용됩니다. 또 모든 Pod를 막는 정책을 쓰면 batch도 ledger에 접속하지 못해 허용 쪽 검사가 실패합니다.",
+      "target": {
+        "api_version": "v1",
+        "kind": "Service",
+        "namespace": "${namespace}",
+        "name": "ledger"
+      },
+      "args": {
+        "expectations": [
+          {
+            "name": "batch-allowed",
+            "expect": "allow",
+            "source": {
+              "labels": {
+                "role": "batch"
+              }
+            },
+            "port": 80,
+            "http": {
+              "path": "/",
+              "body_marker": "ledger-ok"
+            }
+          },
+          {
+            "name": "web-denied",
+            "expect": "deny",
+            "source": {
+              "labels": {
+                "role": "web"
+              }
+            },
+            "port": 80
+          }
+        ]
+      },
+      "depends_on": [
+        "ledger-ready"
+      ],
+      "timeout": "60s"
+    },
+    {
+      "id": "workloads-unchanged",
+      "kind": "field",
+      "points": 1,
+      "feedback": "Deployment batch의 Pod template은 라벨 app=batch, role=batch, 제공된 이미지와 command를 그대로 유지해야 합니다. 채점기의 검사용 Pod는 문제에 적힌 라벨을 직접 달고 실행되므로 Deployment의 라벨을 바꿔도 정책을 우회할 수 없고, 점수만 잃습니다. 막으려는 대상은 NetworkPolicy의 podSelector로 고르세요.",
+      "target": {
+        "api_version": "apps/v1",
+        "kind": "Deployment",
+        "namespace": "${namespace}",
+        "name": "batch"
+      },
+      "args": {
+        "fields": [
+          {
+            "path": "spec.template.metadata.labels.app",
+            "equals": "batch"
+          },
+          {
+            "path": "spec.template.metadata.labels.role",
+            "equals": "batch"
+          },
+          {
+            "path": "spec.template.spec.containers[name=batch].image",
+            "equals": "docker.io/library/busybox:1.37.0"
+          },
+          {
+            "path": "spec.template.spec.containers[name=batch].command",
+            "equals": [
+              "sh",
+              "-c",
+              "exec sleep 86400"
+            ]
+          }
+        ]
+      }
+    }
+  ],
+  "setup": [
+    {
+      "kind": "apply",
+      "args": {
+        "path": "setup/app.yaml"
+      }
+    }
+  ],
+  "solution": [
+    {
+      "kind": "apply",
+      "args": {
+        "path": "solution/policies.yaml"
+      }
+    }
+  ],
+  "initial_expected": {
+    "api-ready": "PASS",
+    "ledger-ready": "PASS",
+    "web-reaches-api": "PASS",
+    "batch-blocked": "FAIL",
+    "monitor-allowed": "FAIL",
+    "unlabeled-blocked": "FAIL",
+    "web-egress-blocked": "FAIL",
+    "workloads-unchanged": "PASS"
+  },
+  "initial_score": 4,
+  "cases": [
+    {
+      "id": "deny-all",
+      "actions": [
+        {
+          "kind": "apply",
+          "args": {
+            "path": "cases/deny-all.yaml"
+          }
+        }
+      ],
+      "expected": {
+        "api-ready": "PASS",
+        "ledger-ready": "PASS",
+        "web-reaches-api": "FAIL",
+        "batch-blocked": "FAIL",
+        "monitor-allowed": "FAIL",
+        "unlabeled-blocked": "FAIL",
+        "web-egress-blocked": "FAIL",
+        "workloads-unchanged": "PASS"
+      },
+      "expected_score": 3
+    },
+    {
+      "id": "allow-all-ingress",
+      "actions": [
+        {
+          "kind": "apply",
+          "args": {
+            "path": "cases/allow-all-ingress.yaml"
+          }
+        }
+      ],
+      "expected": {
+        "api-ready": "PASS",
+        "ledger-ready": "PASS",
+        "web-reaches-api": "PASS",
+        "batch-blocked": "FAIL",
+        "monitor-allowed": "FAIL",
+        "unlabeled-blocked": "FAIL",
+        "web-egress-blocked": "PASS",
+        "workloads-unchanged": "PASS"
+      },
+      "expected_score": 5
+    },
+    {
+      "id": "batch-relabeled",
+      "actions": [
+        {
+          "kind": "apply",
+          "args": {
+            "path": "cases/batch-relabeled.yaml"
+          }
+        }
+      ],
+      "expected": {
+        "api-ready": "PASS",
+        "ledger-ready": "PASS",
+        "web-reaches-api": "PASS",
+        "batch-blocked": "PASS",
+        "monitor-allowed": "PASS",
+        "unlabeled-blocked": "PASS",
+        "web-egress-blocked": "PASS",
+        "workloads-unchanged": "FAIL"
+      },
+      "expected_score": 7
+    },
+    {
+      "id": "missing-egress",
+      "actions": [
+        {
+          "kind": "apply",
+          "args": {
+            "path": "cases/missing-egress.yaml"
+          }
+        }
+      ],
+      "expected": {
+        "api-ready": "PASS",
+        "ledger-ready": "PASS",
+        "web-reaches-api": "PASS",
+        "batch-blocked": "PASS",
+        "monitor-allowed": "PASS",
+        "unlabeled-blocked": "PASS",
+        "web-egress-blocked": "FAIL",
+        "workloads-unchanged": "PASS"
+      },
+      "expected_score": 7
+    },
+    {
+      "id": "alternative-single-policy",
+      "actions": [
+        {
+          "kind": "apply",
+          "args": {
+            "path": "cases/alternative-single-policy.yaml"
+          }
+        }
+      ],
+      "expected": {
+        "api-ready": "PASS",
+        "ledger-ready": "PASS",
+        "web-reaches-api": "PASS",
+        "batch-blocked": "PASS",
+        "monitor-allowed": "PASS",
+        "unlabeled-blocked": "PASS",
+        "web-egress-blocked": "PASS",
+        "workloads-unchanged": "PASS"
+      },
+      "expected_score": 8
+    }
+  ]
+}

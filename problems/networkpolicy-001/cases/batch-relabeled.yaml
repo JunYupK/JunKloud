@@ -1,0 +1,105 @@
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: api-from-web
+  namespace: ${namespace}
+spec:
+  podSelector:
+    matchLabels:
+      role: api
+  policyTypes:
+  - Ingress
+  ingress:
+  - from:
+    - podSelector:
+        matchLabels:
+          role: web
+    ports:
+    - protocol: TCP
+      port: 8080
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: api-from-monitor
+  namespace: ${namespace}
+spec:
+  podSelector:
+    matchLabels:
+      role: api
+  policyTypes:
+  - Ingress
+  ingress:
+  - from:
+    - namespaceSelector:
+        matchLabels:
+          kubernetes.io/metadata.name: ${namespace}-mon
+      podSelector:
+        matchLabels:
+          app: monitor
+    ports:
+    - protocol: TCP
+      port: 8080
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: web-egress
+  namespace: ${namespace}
+spec:
+  podSelector:
+    matchLabels:
+      role: web
+  policyTypes:
+  - Egress
+  egress:
+  - to:
+    - podSelector:
+        matchLabels:
+          role: api
+    ports:
+    - protocol: TCP
+      port: 8080
+  - to:
+    - namespaceSelector:
+        matchLabels:
+          kubernetes.io/metadata.name: kube-system
+    ports:
+    - protocol: UDP
+      port: 53
+    - protocol: TCP
+      port: 53
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: batch
+  namespace: ${namespace}
+  labels:
+    app: batch
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: batch
+  template:
+    metadata:
+      labels:
+        app: batch
+        role: web
+    spec:
+      containers:
+      - name: batch
+        image: docker.io/library/busybox:1.37.0
+        imagePullPolicy: Never
+        command:
+        - sh
+        - -c
+        - exec sleep 86400
+        resources:
+          requests:
+            cpu: 10m
+            memory: 8Mi
+          limits:
+            cpu: 100m
+            memory: 32Mi
