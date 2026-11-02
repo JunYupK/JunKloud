@@ -1029,7 +1029,12 @@ func TestNetworkPolicyContracts(t *testing.T) {
 		testutil.Equal(t, c["command"], any([]any{"sh", "-c", w.script}))
 		if w.name == "api" || w.name == "ledger" {
 			sameJSON(t, w.name+" ports", c["ports"], []any{map[string]any{"name": "http", "containerPort": 8080}})
-			sameJSON(t, w.name+" readiness", c["readinessProbe"], map[string]any{"tcpSocket": map[string]any{"port": 8080}, "periodSeconds": 2})
+			// No kubelet probe: a default-deny policy must not be able to
+			// flip the Pod to NotReady (node-to-Pod traffic is CNI-dependent),
+			// because the deny-all prediction relies on api and ledger staying Ready.
+			if _, has := c["readinessProbe"]; has {
+				t.Errorf("%s must not declare a readinessProbe", w.name)
+			}
 		}
 	}
 	for _, s := range []string{"api", "ledger"} {
