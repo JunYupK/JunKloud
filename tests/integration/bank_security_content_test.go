@@ -254,14 +254,26 @@ func TestSecurityProblems(t *testing.T) {
 					t.Fatalf("wrong case %s earns full credit", id)
 				}
 			}
-			// Full status vectors: every case states every criterion.
+			// Full status vectors: the initial state and every case state
+			// every criterion, and only PASS or FAIL is an acceptable
+			// expectation. A validated stage never ends in ERROR (a learner
+			// mistake that makes a checker ERROR is a grader limitation to
+			// record, never an expected value).
+			vectors := map[string]map[string]string{"initial": p.InitialExpected}
 			for _, c := range p.Cases {
-				testutil.Equal(t, len(c.Expected), len(p.Criteria))
+				m := map[string]string{}
+				for id, st := range c.Expected {
+					m[id] = string(st)
+				}
+				vectors["case "+c.ID] = m
+			}
+			for name, vec := range vectors {
+				testutil.Equal(t, len(vec), len(p.Criteria))
 				for _, crit := range p.Criteria {
-					switch c.Expected[crit.ID] {
-					case model.StatusPass, model.StatusFail, model.StatusError:
+					switch vec[crit.ID] {
+					case string(model.StatusPass), string(model.StatusFail):
 					default:
-						t.Errorf("case %s has no status for criterion %s", c.ID, crit.ID)
+						t.Errorf("%s: expected status of criterion %s is %q, want PASS or FAIL (ERROR is never an expected status)", name, crit.ID, vec[crit.ID])
 					}
 				}
 			}
