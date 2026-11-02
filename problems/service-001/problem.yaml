@@ -84,7 +84,7 @@
       "id": "service-routes",
       "kind": "http",
       "points": 1,
-      "feedback": "Service catalog의 80번 포트로 보낸 요청이 catalog Pod의 8080 포트에 도달해 본문 'catalog-ok'를 받아야 합니다. kubectl get endpointslices -l kubernetes.io/service-name=catalog 가 비어 있으면 selector가 Pod 라벨과 맞지 않는 것이고, 주소가 있는데 연결이 거부되면 targetPort가 앱의 포트(8080 또는 이름 http)와 다른 것입니다.",
+      "feedback": "Service catalog의 80번 포트로 보낸 요청이 catalog Pod의 8080 포트에 도달해 본문 'catalog-ok'를 받아야 합니다. kubectl get endpointslices -l kubernetes.io/service-name=catalog 가 비어 있거나 모두 ready=false이면 selector가 Pod 라벨과 맞지 않는 것이고, 주소가 있는데 연결이 거부되면 targetPort가 앱의 포트(8080 또는 이름 http)와 다른 것입니다.",
       "target": {
         "api_version": "v1",
         "kind": "Service",
@@ -102,10 +102,10 @@
       "timeout": "60s"
     },
     {
-      "id": "service-type",
+      "id": "service-shape",
       "kind": "field",
       "points": 1,
-      "feedback": "Service catalog는 type이 NodePort이고 이름이 http인 포트의 nodePort가 30080이어야 합니다. type만 바꾸면 nodePort가 임의로 할당되므로 nodePort: 30080을 직접 지정하고, 포트 이름 http는 유지하세요.",
+      "feedback": "Service catalog는 selector의 app 값이 catalog(Deployment catalog의 Pod 라벨)이고, type이 NodePort이며, 이름이 http인 포트의 nodePort가 30080이어야 합니다. Pod에 라벨을 직접 붙여 오래된 selector(app=catalog-api)에 맞추는 것은 해결이 아닙니다. Service의 selector를 Pod의 라벨(kubectl get pods --show-labels)에 맞추세요. type만 바꾸면 nodePort가 임의로 할당되므로 nodePort: 30080을 직접 지정하고, 포트 이름 http는 유지하세요.",
       "target": {
         "api_version": "v1",
         "kind": "Service",
@@ -114,6 +114,10 @@
       },
       "args": {
         "fields": [
+          {
+            "path": "spec.selector.app",
+            "equals": "catalog"
+          },
           {
             "path": "spec.type",
             "equals": "NodePort"
@@ -186,7 +190,7 @@
     "catalog-ready": "PASS",
     "workloads-unchanged": "PASS",
     "service-routes": "FAIL",
-    "service-type": "FAIL",
+    "service-shape": "FAIL",
     "frontend-ready": "PASS",
     "frontend-reaches": "FAIL"
   },
@@ -219,7 +223,7 @@
         "catalog-ready": "PASS",
         "workloads-unchanged": "FAIL",
         "service-routes": "FAIL",
-        "service-type": "FAIL",
+        "service-shape": "FAIL",
         "frontend-ready": "PASS",
         "frontend-reaches": "FAIL"
       },
@@ -239,7 +243,7 @@
         "catalog-ready": "PASS",
         "workloads-unchanged": "PASS",
         "service-routes": "FAIL",
-        "service-type": "PASS",
+        "service-shape": "PASS",
         "frontend-ready": "PASS",
         "frontend-reaches": "FAIL"
       },
@@ -259,7 +263,7 @@
         "catalog-ready": "PASS",
         "workloads-unchanged": "PASS",
         "service-routes": "PASS",
-        "service-type": "FAIL",
+        "service-shape": "FAIL",
         "frontend-ready": "PASS",
         "frontend-reaches": "PASS"
       },
@@ -292,11 +296,31 @@
         "catalog-ready": "PASS",
         "workloads-unchanged": "PASS",
         "service-routes": "FAIL",
-        "service-type": "PASS",
+        "service-shape": "FAIL",
         "frontend-ready": "PASS",
         "frontend-reaches": "FAIL"
       },
-      "expected_score": 4
+      "expected_score": 3
+    },
+    {
+      "id": "pods-labelled-directly",
+      "actions": [
+        {
+          "kind": "apply",
+          "args": {
+            "path": "cases/pods-labelled-directly.yaml"
+          }
+        }
+      ],
+      "expected": {
+        "catalog-ready": "PASS",
+        "workloads-unchanged": "PASS",
+        "service-routes": "PASS",
+        "service-shape": "FAIL",
+        "frontend-ready": "PASS",
+        "frontend-reaches": "PASS"
+      },
+      "expected_score": 5
     },
     {
       "id": "alternative-named-target-port",
@@ -312,7 +336,7 @@
         "catalog-ready": "PASS",
         "workloads-unchanged": "PASS",
         "service-routes": "PASS",
-        "service-type": "PASS",
+        "service-shape": "PASS",
         "frontend-ready": "PASS",
         "frontend-reaches": "PASS"
       },

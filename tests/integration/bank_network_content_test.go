@@ -39,7 +39,8 @@ var networkCases = map[string]map[string]int{
 		"pods-relabeled":                2,
 		"wrong-target-port":             4,
 		"clusterip-only":                5,
-		"empty-service":                 4,
+		"empty-service":                 3,
+		"pods-labelled-directly":        5,
 		"alternative-named-target-port": 6,
 	},
 }
@@ -447,7 +448,7 @@ func TestNetworkServiceContracts(t *testing.T) {
 		order = append(order, c.ID)
 		testutil.Equal(t, c.Points, 1)
 	}
-	testutil.Equal(t, order, []string{"catalog-ready", "workloads-unchanged", "service-routes", "service-type", "frontend-ready", "frontend-reaches"})
+	testutil.Equal(t, order, []string{"catalog-ready", "workloads-unchanged", "service-routes", "service-shape", "frontend-ready", "frontend-reaches"})
 	cr := crit["catalog-ready"]
 	testutil.Equal(t, cr.Kind, model.CriterionReady)
 	testutil.Equal(t, cr.Target.APIVersion+" "+cr.Target.Kind+" "+cr.Target.Name, "apps/v1 Deployment catalog")
@@ -468,10 +469,14 @@ func TestNetworkServiceContracts(t *testing.T) {
 	sameJSON(t, "service-routes args", sr.Args, map[string]any{"port": 80, "path": "/", "body_marker": "catalog-ok"})
 	testutil.Equal(t, sr.Timeout, 60*time.Second)
 	testutil.Equal(t, sr.DependsOn, []string{"catalog-ready"})
-	st := crit["service-type"]
+	st := crit["service-shape"]
 	testutil.Equal(t, st.Kind, model.CriterionField)
 	testutil.Equal(t, st.Target, model.ObjectRef{APIVersion: "v1", Kind: "Service", Namespace: "${namespace}", Name: "catalog"})
-	sameJSON(t, "service-type args", st.Args, map[string]any{"fields": []any{
+	// The selector is folded into this criterion: keeping the broken selector
+	// app: catalog-api and labelling Pods by hand must lose a point even
+	// though the orphaned Pods answer the routing check.
+	sameJSON(t, "service-shape args", st.Args, map[string]any{"fields": []any{
+		map[string]any{"path": "spec.selector.app", "equals": "catalog"},
 		map[string]any{"path": "spec.type", "equals": "NodePort"},
 		map[string]any{"path": "spec.ports[name=http].nodePort", "equals": 30080},
 	}})
@@ -546,6 +551,25 @@ func TestNetworkServiceContracts(t *testing.T) {
 			testutil.Equal(t, g.order, []string{"Service/catalog"})
 			want := wantSvc(func(spec map[string]any) { delete(spec, "selector") })
 			sameJSON(t, c.ID+" Service", g.objs["Service/catalog"], want)
+		case "pods-labelled-directly":
+			// The direct-relabel route: two bare Pods outside the Deployment,
+			// labelled with the old selector, built from the catalog Pod
+			// template (same container); the Service keeps the broken selector
+			// and is otherwise the solution. Nothing is deleted, no scope entry
+			// is needed (Pods live in the problem namespace).
+			testutil.Equal(t, len(g.deleted), 0)
+			testutil.Equal(t, g.order, []string{"Pod/catalog-orphan-1", "Pod/catalog-orphan-2", "Service/catalog"})
+			podSpec := nestedMap(t, catalog, "spec", "template", "spec")
+			for _, name := range []string{"catalog-orphan-1", "catalog-orphan-2"} {
+				wantPod := map[string]any{
+					"apiVersion": "v1", "kind": "Pod",
+					"metadata": map[string]any{"name": name, "namespace": ns, "labels": map[string]any{"app": "catalog-api", "tier": "backend"}},
+					"spec":     deepCopyObject(podSpec),
+				}
+				sameJSON(t, c.ID+" "+name, g.objs["Pod/"+name], wantPod)
+			}
+			want := wantSvc(func(spec map[string]any) { spec["selector"] = map[string]any{"app": "catalog-api"} })
+			sameJSON(t, c.ID+" Service", g.objs["Service/catalog"], want)
 		case "alternative-named-target-port":
 			testutil.Equal(t, len(g.deleted), 0)
 			testutil.Equal(t, g.order, []string{"Service/catalog"})
@@ -578,10 +602,12 @@ func TestNetworkServiceContracts(t *testing.T) {
 	for _, lit := range []string{
 		"`catalog`", "`frontend`", "`${namespace}`", "2 replicas", "`8080`", "`http`", "`80`", "`NodePort`", "`30080`",
 		"every 3 seconds", "`frontend fetched catalog-ok`", "`docker.io/library/busybox:1.37.0`", "the provided command",
-		"`app: catalog`", "`tier: backend`", "Do not change the labels, the image or the command of the Pod template of Deployment `catalog`",
+		"`app: catalog`", "`tier: backend`", "Do not change the labels `app: catalog` and `tier: backend`, the image or the command of the Pod template of Deployment `catalog`",
+		"must select the Pods of Deployment `catalog` by their label `app: catalog`", "`selector` key `app` must have the value `catalog`", "labelling Pods by hand to match the old selector is not the fix",
+		"has the `selector` key `app` with the value `catalog`, the type `NodePort`", "any other selector value, type or node port loses the point",
 		"2 Ready replicas", "1 Ready replica", "10-second stability window, 90-second observation limit",
 		"60-second limit", "this point needs the first one, because it judges the Pods of that Deployment",
-		"this point needs the third and the fifth one", "any other node port",
+		"this point needs the third and the fifth one",
 	} {
 		if !strings.Contains(q, lit) {
 			t.Errorf("question must state %q", lit)
@@ -598,7 +624,8 @@ func TestNetworkServiceContracts(t *testing.T) {
 	readme := string(p.Files["setup/provided/README.txt"])
 	for _, lit := range []string{
 		"Deployment catalog", "Service catalog", "Deployment frontend", "port 80", "port 8080", "NodePort", "30080", "named http",
-		"Do not change the labels, the image or the command of the Pod template of Deployment catalog", "frontend fetched catalog-ok",
+		"Do not change the labels app: catalog and tier: backend, the image or the command of the Pod template of Deployment catalog", "frontend fetched catalog-ok",
+		"label app: catalog", "labelling Pods by hand to match the old selector is not the fix",
 	} {
 		if !strings.Contains(readme, lit) {
 			t.Errorf("the handout must state %q", lit)
@@ -611,10 +638,13 @@ func TestNetworkServiceContracts(t *testing.T) {
 		}
 	}
 	expl := string(p.Files["explanation.ko.md"])
+	if strings.Contains(expl, "service-type") || strings.Contains(expl, "kubectl get endpoints catalog") {
+		t.Error("the explanation uses a stale criterion name or the deprecated kubectl get endpoints")
+	}
 	for _, lit := range []string{
 		"EndpointSlice", "selector", "targetPort", "NodePort", "30080", "kubectl get endpointslices", "kubectl get pods --show-labels",
-		"pods-relabeled", "wrong-target-port", "clusterip-only", "empty-service", "alternative-named-target-port",
-		"workloads-unchanged", "service-routes", "service-type", "frontend-reaches", "frontend-ready", "catalog-ready",
+		"pods-relabeled", "wrong-target-port", "clusterip-only", "empty-service", "pods-labelled-directly", "alternative-named-target-port",
+		"workloads-unchanged", "service-routes", "service-shape", "conditions.ready", "kubectl label pods", "frontend-reaches", "frontend-ready", "catalog-ready",
 		"selector를 바꿀 수 없", "https://kubernetes.io/docs/concepts/services-networking/service/",
 	} {
 		if !strings.Contains(expl, lit) {
