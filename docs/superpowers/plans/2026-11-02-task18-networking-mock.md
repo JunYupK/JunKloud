@@ -77,13 +77,13 @@ Package design (pinned):
 - Question:
   - Repair Service `catalog` so port 80 (port name `http`) routes to the catalog Pods' port 8080.
   - Make it type `NodePort` with nodePort `30080`.
-  - Do not change Deployments `catalog` or `frontend` (labels, image, command).
+  - ~~Do not change Deployments `catalog` or `frontend` (labels, image, command).~~ R4/H1: the sentence covers the Pod template of Deployment `catalog` only (labels `app: catalog`, `tier: backend`, image, command), because only that is graded; the question also states that the Service must select by `app: catalog`.
   - `frontend` must log `frontend fetched catalog-ok`.
 - Criteria, 1 point each:
   1. `catalog-ready`: `ready`, 2 replicas.
   2. `workloads-unchanged`: `field` catalog template labels, image and command equal setup.
   3. `service-routes`: `http` Service `catalog` port 80, marker `catalog-ok`; `depends_on` 1.
-  4. `service-type`: `field` `spec.type` equals `NodePort` and `spec.ports[name=http].nodePort` equals 30080.
+  4. ~~`service-type`~~ R4: `service-shape`: `field` `spec.selector.app` equals `catalog`, `spec.type` equals `NodePort` and `spec.ports[name=http].nodePort` equals 30080.
   5. `frontend-ready`: `ready` Deployment `frontend`.
   6. `frontend-reaches`: `logs` Deployment `frontend`, `matches` `frontend fetched catalog-ok`; `depends_on` 3, 5.
 - Initial: 1, 2 and 5 PASS → `initial_score` 3.
@@ -91,7 +91,8 @@ Package design (pinned):
   - `pods-relabeled` (catalog Pod labels changed to `app: catalog-api`, Service port still wrong) → 2.
   - `wrong-target-port` (selector fixed, targetPort 9090) → 4.
   - `clusterip-only` (routes fixed, type ClusterIP) → 5.
-  - `empty-service` (selector removed via delete-owned + apply) → 4.
+  - `empty-service` (selector removed via delete-owned + apply) → ~~4~~ 3 (R4: `service-shape` FAILs too).
+  - `pods-labelled-directly` (R4, added: bare Pods labelled `app: catalog-api` serve `catalog-ok`, the Service keeps the broken selector but has the fixed `targetPort`/NodePort) → 5.
   - `alternative-named-target-port` (`targetPort: http`, selector `app: catalog` only) → 6.
 
 - [ ] **Step 1: RED.** Add the scaffolding and the `service-001` case table. Run `go test ./tests/integration -run 'TestNetworkProblems|TestNetworkBankPreflight' -count=1 -v` → FAIL (the package is missing).
@@ -103,7 +104,7 @@ Package design (pinned):
 
 Package design (pinned):
 - Setup:
-  - Deployments `shop-web` (marker `web-ok` at `/` and `/index.html`) and `shop-api` (marker `api-ok` at `/api/` via `/www/api/index.html`), both busybox httpd on 8080.
+  - Deployments `shop-web` (marker `web-ok` at `/` ~~and `/index.html`~~ and, R5, also at `/api/`, so a wrong backend answers 200 and only the body marker tells) and `shop-api` (marker `api-ok` at `/api/` via `/www/api/index.html` and, R6/I3, also at `/`), both busybox httpd on 8080.
   - Services `shop-web` and `shop-api`, each 80 → 8080.
 - Question: create Ingress `shop` with class `cloud-provider-kind`.
   - Host `shop.${namespace}.example`: path `/` (Prefix) → `shop-web`, path `/api` (Prefix) → `shop-api`.
@@ -114,14 +115,14 @@ Package design (pinned):
   2. `api-ready`: `ready`.
   3. `root-route`: `http` Ingress `shop`, host `shop.${namespace}.example`, path `/`, marker `web-ok`; `depends_on` 1.
   4. `api-path-route`: `http` Ingress, same host, path `/api/`, marker `api-ok`; `depends_on` 2.
-  5. `api-host-route`: `http` Ingress, host `api.${namespace}.example`, path `/api/`, marker `api-ok`; `depends_on` 2.
-  6. `ingress-class`: `field` `spec.ingressClassName` equals `cloud-provider-kind`.
+  5. `api-host-route`: `http` Ingress, host `api.${namespace}.example`, path ~~`/api/`~~ `/` (R6/I3: the question says host `api` sends `/` to `shop-api`), marker `api-ok`; `depends_on` 2.
+  6. ~~`ingress-class`: `field` `spec.ingressClassName` equals `cloud-provider-kind`.~~ R5: `ingress-shape`: `field` class equals `cloud-provider-kind` and a rule exists for each of the hosts `shop.${namespace}.example` and `api.${namespace}.example` (a rule without a host, or a default backend, does not replace a host rule).
 - Initial: 1 and 2 PASS → 2.
 - Cases (expected score):
   - `all-to-web` (every path → shop-web) → 4.
-  - `missing-api-host` → 5.
+  - ~~`missing-api-host` → 5.~~ R5: → 4 (the `ingress-shape` criterion also FAILs).
   - `wrong-backend-port` (api backend port 8080 on the Service) → 4.
-  - `no-class` (class omitted; the default class still serves) → 5.
+  - ~~`no-class` (class omitted; the default class still serves) → 5.~~ R5: renamed `alternative-default-class` → 6 (confirmed live: the API server sets the default class on a class-less Ingress at creation, so the stored Ingress equals the solution). Added `wrong-class` (`ingressClassName: nginx`, nothing serves it) → 2.
   - `alternative-port-name` (backends reference Service port by name; extra annotation) → 6.
 
   Confirm live that `no-class` routes through the default class. If it does not, recompute: it must not be ERROR.
@@ -146,7 +147,7 @@ Package design (pinned):
 - Question:
   - Using NetworkPolicies in `${namespace}` only, allow ingress to `api` on port 8080 from `role: web` Pods and from `app: monitor` Pods in `${namespace}-mon`. Deny all other ingress to `api`.
   - Restrict `web` egress to `api` on 8080 plus DNS (UDP/TCP 53 to kube-system), so `web` cannot reach `ledger`.
-  - Do not relabel or change any Deployment.
+  - ~~Do not relabel or change any Deployment.~~ Shipped: one "do not change" sentence, about the Pod template of Deployment `batch` only (the one thing `workloads-unchanged` grades).
   - State that blocked means "times out while an allowed client reaches the same Pod".
 - Criteria, 1 point each:
   1. `api-ready`: `ready`.
@@ -164,6 +165,7 @@ Package design (pinned):
   - `batch-relabeled` (correct policies, batch Pods relabeled `role=web`) → 7. Only criterion 8 FAILs.
   - `missing-egress` (ingress policies only) → 7.
   - `alternative-single-policy` (one NetworkPolicy with two `from` entries plus a separate egress policy) → 8.
+  - `and-or-split` (R7/J6, added after the review; the monitor peer is two separate `from` entries, `namespaceSelector` OR `podSelector`, instead of one ANDed peer) → 7. Predicted on an enforcing host: only criterion 5 FAILs (the intruder and the lookalike connect). NOT CERTIFIED like the rest.
 - These expected values are predictions until certified on an enforcing host. Record them as such.
 
 - [ ] **Step 1: RED** — add the cases and run `-run 'TestNetworkProblems/networkpolicy-001'`; it must FAIL.

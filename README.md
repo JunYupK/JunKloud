@@ -7,7 +7,7 @@ CKAD(Certified Kubernetes Application Developer) 자격증 공부를 위한 **�
 - 문제·요구사항은 실제 시험처럼 **영어**로, 피드백과 해설은 **한국어**로 제공합니다.
 - 채점은 실제 클러스터 상태를 관찰해 항목별 **PASS / FAIL / ERROR**로 판정합니다. 환경 장애로 판정할 수 없는 항목(ERROR)이 있으면 총점을 확정하지 않습니다.
 
-> 현재 문제은행은 **17문제 / 80점**의 부분 은행입니다. 기본 20문항 모의시험(`mock`)은 아직 제공하지 않으므로 **훈련 모드(`--mode practice`)** 로 사용하세요. 자세한 내용은 [현재 상태와 제한](#현재-상태와-제한)을 참고하세요.
+> 문제은행은 **20문제 / 100점**이고, 기본 모의시험 `mock-01`(20문제, 120분)이 있습니다. 모의시험은 20문제가 모두 출제 가능할 때만 시작합니다. 특히 `networkpolicy-001`은 NetworkPolicy를 실제로 차단하는 호스트(`ckad doctor`의 `network-policy`가 PASS)가 필요합니다. 그렇지 않은 환경에서는 **훈련 모드(`--mode practice`)** 를 사용하세요. 자세한 내용은 [모의시험](#모의시험)과 [현재 상태와 제한](#현재-상태와-제한)을 참고하세요.
 
 ## 목차
 
@@ -15,6 +15,7 @@ CKAD(Certified Kubernetes Application Developer) 자격증 공부를 위한 **�
 2. [빠른 시작](#빠른-시작)
 3. [처음 한 번: 문제 검증](#처음-한-번-문제-검증)
 4. [학습 흐름](#학습-흐름)
+   - [모의시험](#모의시험)
 5. [명령 요약](#명령-요약)
 6. [채점 규칙](#채점-규칙)
 7. [초기화와 복구](#초기화와-복구)
@@ -92,12 +93,14 @@ ckad doctor
 for id in image-001 batch-001 daemonset-001 multicontainer-001 volume-001 \
           rollout-001 release-001 helm-001 kustomize-001 \
           api-migration-001 probes-001 diagnostics-001 \
-          custom-resource-001 access-001 resources-001 configuration-001 security-001; do
+          custom-resource-001 access-001 resources-001 configuration-001 security-001 \
+          service-001 ingress-001 networkpolicy-001; do
   ckad bank validate "$id" || break
 done
 
 ckad list                                  # 출제 가능한 문제 확인
 ckad start --mode practice --count 5       # 5문제 훈련 준비 → yes 입력으로 시작
+ckad start                                 # 기본 모의시험 mock-01 (20문제, 120분, 아래 "모의시험")
 ```
 
 ## 처음 한 번: 문제 검증
@@ -118,6 +121,7 @@ ckad bank validate <problem-id>
 - 문제 하나에 수 분에서 수십 분이 걸립니다. 예를 들어 `probes-001`은 의도적으로 긴 안정성 관찰 때문에 오래 걸립니다.
 - 진행 중인 훈련·시험 세션이 있으면 검증을 거부합니다.
 - `ckad list`로 출제 가능한 문제와 제외된 문제, 그 이유를 확인할 수 있습니다.
+- `networkpolicy-001`은 NetworkPolicy를 실제로 차단하는 호스트에서만 통과합니다. 차단하지 않는 환경(예: 커널에 필요한 모듈이 없는 VM)에서는 이 문제의 검증이 실패하고 출제되지 않으며, 그 앞의 19문제만 검증해도 됩니다. 위 반복문은 첫 실패에서 멈추므로 이 문제를 마지막에 두었습니다.
 
 ## 학습 흐름
 
@@ -129,12 +133,24 @@ ckad start --mode practice --count 5
 
 - 문제 수는 **5~20개**입니다. 검증된 문제 중에서 선택합니다.
 - 필터 옵션
-  - `--domain`: `design-build`, `deployment`, `observability`, `environment-security`, `networking`. `networking`은 아직 문제가 없습니다.
+  - `--domain`: `design-build`, `deployment`, `observability`, `environment-security`, `networking`
   - `--difficulty`, `--tag`
   - `--seed`: 같은 문제 선택을 재현합니다.
 - 준비가 끝나면 `준비 완료: ... 시작하시겠습니까? [yes/no]`가 나옵니다. `yes`를 입력하면 시계가 시작됩니다.
 - 준비 단계에서 끊기거나 `no`를 입력해도 준비 상태는 보존됩니다. `ckad start`로 시작 확인을 다시 할 수 있습니다.
 - 한 영역만 고르면 5문제가 안 될 수 있습니다(예: `observability`는 3문제). 이때는 이유와 가능한 수를 보여 주고 시작하지 않습니다. 부족분을 중복으로 몰래 채우지 않습니다.
+
+### 모의시험
+
+```sh
+ckad start               # 기본 모의시험 mock-01
+ckad start mock-01       # 같은 시험을 ID로 지정
+```
+
+- **구성:** 20문제, 제한 시간 **120분**, 100점입니다. 영역별 점수는 Design & Build 20, Deployment 20, Observability 15, Environment·Configuration·Security 25, Services & Networking 20이고 build·modify·troubleshoot·behavioral 유형을 모두 포함합니다. 문제 순서는 영역이 번갈아 나오고 쉬운 문제가 앞, 어려운 문제가 뒤에 오도록 고정돼 있습니다([`exams/mock-01.yaml`](exams/mock-01.yaml)).
+- **전부 아니면 시작하지 않음:** 20문제 중 하나라도 출제할 수 없으면(검증 기록이 없거나, 필요한 기능이 FAIL이거나) 시험 전체를 거부합니다(종료 코드 3). 다른 문제로 몰래 바꾸거나 빼지 않으며, 세션도 만들지 않습니다. 화면에는 "필요한 환경 capability가 준비되지 않았습니다" 또는 "문제 검증 기록이 없거나 현재 환경과 다릅니다" 같은 일반 메시지가 나오므로, 어느 문제가 왜 제외됐는지는 `ckad list`의 `출제 불가` 줄과 `ckad doctor`로 확인하세요.
+- **NetworkPolicy가 필요합니다:** `networkpolicy-001`은 `network-policy` 기능이 필요합니다. `ckad doctor`에서 `network-policy`가 PASS인 호스트(차단을 실제로 적용하는 CNI)에서만 모의시험을 시작할 수 있습니다. 이 점검은 ingress 차단만 확인하므로, 처음 쓰는 호스트에서는 `networkpolicy-001`의 egress 항목(`web-egress-blocked`)과 전부 차단 정책 사례를 먼저 `ckad bank validate networkpolicy-001`로 확인하세요.
+- 모의시험에서는 문제 하나만 초기화할 수 없고 문제별 채점도 없습니다. `ckad grade`로 전체를 제출합니다. 66% 기준은 참고용입니다.
 
 ### 문제 풀기
 
@@ -287,10 +303,13 @@ docker save --output image.tar junkloud.local/app:practice   # 아카이브가 �
 | `resources-001` | Environment·Configuration·Security | troubleshoot | medium | 5 | ResourceQuota·LimitRange에 맞춘 requests·limits 수정 |
 | `configuration-001` | Environment·Configuration·Security | troubleshoot | easy | 5 | 잘못된 환경 변수를 ConfigMap·Secret 참조로 교체(Secret 값은 결과에 노출되지 않음) |
 | `security-001` | Environment·Configuration·Security | behavioral | hard | 5 | `restricted` Pod Security 정책을 지키면서 워크로드 실행(securityContext) |
+| `service-001` | Services & Networking | troubleshoot | medium | 6 | 끊어진 Service(selector, targetPort, NodePort) 복구 |
+| `ingress-001` | Services & Networking | build | medium | 6 | host·path 규칙으로 두 Service에 요청을 나누는 Ingress |
+| `networkpolicy-001` | Services & Networking | behavioral | hard | 8 | api로 들어오는 연결과 web에서 나가는 연결만 허용하는 NetworkPolicy |
 
-- **영역별 합계:** Design & Build 5문제/20점, Deployment 4문제/20점, Observability 3문제/15점, Environment·Configuration·Security 5문제/25점입니다. 유형은 build·modify·troubleshoot·behavioral을 모두 포함합니다.
+- **영역별 합계:** Design & Build 5문제/20점, Deployment 4문제/20점, Observability 3문제/15점, Environment·Configuration·Security 5문제/25점, Services & Networking 3문제/20점으로 합계 20문제/100점입니다. 유형은 build·modify·troubleshoot·behavioral을 모두 포함합니다.
 - **영역 매핑:** [`curriculum/coverage.yaml`](curriculum/coverage.yaml)에 있습니다.
-- **필요한 기능(capability):** `image-001`은 `image-build`, `volume-001`은 `storage`, `diagnostics-001`은 `metrics`가 필요합니다. 환경이 이 기능을 지원하지 않으면 해당 문제는 출제하지 않습니다.
+- **필요한 기능(capability):** `image-001`은 `image-build`, `volume-001`은 `storage`, `diagnostics-001`은 `metrics`, `ingress-001`은 `ingress`, `networkpolicy-001`은 `network-policy`가 필요합니다. 환경이 이 기능을 지원하지 않으면 해당 문제는 출제하지 않고, 모의시험은 시작하지 않습니다.
 - **변형:** 문제마다 parameter(namespace 등)가 seed에 따라 바뀝니다.
 
 ### 문제 패키지 구조
@@ -355,7 +374,7 @@ go test -tags=integration ./tests/integration -run '^TestObservabilityBank$' -co
 
 | 증상 | 확인할 것 |
 | --- | --- |
-| `ckad start`가 모의시험을 찾지 못함 | 아직 제품 모의시험이 없습니다. `--mode practice`를 붙이세요. |
+| `ckad start`가 모의시험을 거부함(종료 코드 3) | 20문제가 모두 출제 가능해야 합니다. `ckad list`의 `출제 불가` 줄로 제외된 문제를 확인하세요. `networkpolicy-001`이면서 `ckad doctor`의 `network-policy`가 FAIL이면 이 호스트가 NetworkPolicy를 차단하지 않는 것이므로 `--mode practice`를 쓰거나 차단하는 호스트로 옮기세요. 검증 기록이 없는 문제는 `ckad bank validate <id>`를 실행하세요. |
 | `ckad list`에 문제가 없거나 제외됨 | `ckad bank validate <id>`로 현재 환경에서 검증했는지, `ckad doctor`에서 필요한 기능이 PASS인지 확인하세요. 채점기나 환경 버전이 바뀌면 다시 검증해야 합니다. |
 | 훈련 시작 시 "문제 수 부족" | 훈련은 최소 5문제입니다. 필터(`--domain` 등)를 줄이거나 검증된 문제를 늘리세요. |
 | 채점 결과가 ERROR | `ckad doctor`로 클러스터와 기능 상태를 확인한 뒤, 답안을 고치지 않았다면 `ckad grade --retry`를 실행하세요. |
@@ -366,7 +385,8 @@ go test -tags=integration ./tests/integration -run '^TestObservabilityBank$' -co
 
 ## 현재 상태와 제한
 
-- **문제은행:** 17문제 / 80점입니다. 남은 영역은 Services & Networking(20점)이고, 기본 20문항 모의시험(`mock-01`)은 이 문제들이 추가된 뒤 제공됩니다.
+- **문제은행:** 20문제 / 100점이고 기본 모의시험 `mock-01`이 있습니다. 구성(20문제, 120분, 100점, 영역별 점수)은 테스트로 고정돼 있습니다.
+- **`networkpolicy-001`과 모의시험의 실행 검증:** `networkpolicy-001`의 정답·대표 오답 점수는 설계값이며, 이를 실제 차단하는 호스트에서 `ckad bank validate`로 확인한 기록은 아직 없습니다(개발 샌드박스 커널은 NetworkPolicy를 적용하지 않습니다). 그래서 모의시험을 실제로 끝까지 시작·채점한 실행도 아직 하지 않았고(차단하는 호스트가 필요합니다), 샌드박스에서는 모의시험이 거부되는 것까지만 확인했습니다.
 - **검증한 환경:** Linux(amd64) 샌드박스입니다. M2(ARM64) 8GB에 4GiB Docker VM, Windows 16GB 같은 실제 목표 기기 검증은 아직 하지 않았습니다.
 - **작업 컨테이너 도구:** 설계상 제공할 도구 중 `wget`과 man pages는 아직 이미지에 없습니다(`curl`은 있습니다).
 - **범위 밖:** 실제 시험의 SSH 진입·복귀, 다중 클러스터 전환, 시험 감독, 브라우저 제한은 재현하지 않습니다.
