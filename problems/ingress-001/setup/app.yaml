@@ -77,7 +77,7 @@ spec:
         command:
         - sh
         - -c
-        - mkdir -p /www/api && printf api-ok > /www/api/index.html && exec httpd -f -p 8080 -h /www
+        - mkdir -p /www/api && printf api-ok > /www/index.html && printf api-ok > /www/api/index.html && exec httpd -f -p 8080 -h /www
         ports:
         - name: http
           containerPort: 8080

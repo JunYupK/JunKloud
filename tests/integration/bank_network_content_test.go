@@ -716,7 +716,7 @@ func TestNetworkIngressContracts(t *testing.T) {
 	const (
 		image     = "docker.io/library/busybox:1.37.0"
 		webScript = "mkdir -p /www/api && printf web-ok > /www/index.html && printf web-ok > /www/api/index.html && exec httpd -f -p 8080 -h /www"
-		apiScript = "mkdir -p /www/api && printf api-ok > /www/api/index.html && exec httpd -f -p 8080 -h /www"
+		apiScript = "mkdir -p /www/api && printf api-ok > /www/index.html && printf api-ok > /www/api/index.html && exec httpd -f -p 8080 -h /www"
 		class     = "cloud-provider-kind"
 	)
 	shopHost := "shop." + ns + ".example"
@@ -754,9 +754,8 @@ func TestNetworkIngressContracts(t *testing.T) {
 		})
 	}
 	// The markers differ, so a wrong backend that answers 200 loses the point:
-	// shop-web answers web-ok on / and on /api/, shop-api answers api-ok on /api/.
-	testutil.Equal(t, strings.Contains(webScript, "web-ok") && !strings.Contains(webScript, "api-ok"), true)
-	testutil.Equal(t, strings.Contains(apiScript, "api-ok") && !strings.Contains(apiScript, "web-ok"), true)
+	// both backends answer 200 on / and on /api/, each with its own marker
+	// (the pinned scripts above serve web-ok / api-ok on both paths).
 
 	// Criteria: six, one point each, in the pinned order and shape.
 	crit := map[string]model.Criterion{}
@@ -780,7 +779,7 @@ func TestNetworkIngressContracts(t *testing.T) {
 	}{
 		{"root-route", "shop.${namespace}.example", "/", "web-ok", "web-ready"},
 		{"api-path-route", "shop.${namespace}.example", "/api/", "api-ok", "api-ready"},
-		{"api-host-route", "api.${namespace}.example", "/api/", "api-ok", "api-ready"},
+		{"api-host-route", "api.${namespace}.example", "/", "api-ok", "api-ready"},
 	} {
 		c := crit[r.id]
 		testutil.Equal(t, c.Kind, model.CriterionHTTP)
@@ -867,6 +866,8 @@ func TestNetworkIngressContracts(t *testing.T) {
 		"60-second limit", "this point needs the first one", "this point needs the second one",
 		"a rule for each of the hosts", "HTTP 200",
 		"default IngressClass of the cluster is `cloud-provider-kind`", "any other class is not served",
+		"created without a class", "an update never fills in a class", "each on both of the paths `/` and `/api/`",
+		"and the path `/` returns HTTP 200 with a body containing `api-ok`",
 	} {
 		if !strings.Contains(q, lit) {
 			t.Errorf("question must state %q", lit)
@@ -893,7 +894,7 @@ func TestNetworkIngressContracts(t *testing.T) {
 	for _, lit := range []string{
 		"IngressClass", "ingressClassName", "pathType", "Prefix", "Host", "kubectl get ingress", "kubectl describe ingress", "ADDRESS",
 		"all-to-web", "missing-api-host", "wrong-backend-port", "wrong-class", "alternative-default-class", "alternative-port-name",
-		"is-default-class", "admission",
+		"is-default-class", "admission", "만들 때", "수정(update)", "<error: ...>", "<none>", "Linux Docker 호스트",
 		"root-route", "api-path-route", "api-host-route", "ingress-shape", "web-ready", "api-ready", "web-ok", "api-ok",
 		"https://kubernetes.io/docs/concepts/services-networking/ingress/",
 	} {
