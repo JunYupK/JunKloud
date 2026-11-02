@@ -45,11 +45,12 @@ var networkCases = map[string]map[string]int{
 		"alternative-named-target-port": 6,
 	},
 	"ingress-001": {
-		"all-to-web":            4,
-		"missing-api-host":      4,
-		"wrong-backend-port":    4,
-		"no-class":              5,
-		"alternative-port-name": 6,
+		"all-to-web":                4,
+		"missing-api-host":          4,
+		"wrong-backend-port":        4,
+		"wrong-class":               2,
+		"alternative-default-class": 6,
+		"alternative-port-name":     6,
 	},
 }
 
@@ -827,7 +828,13 @@ func TestNetworkIngressContracts(t *testing.T) {
 					}
 				}
 			}
-		case "no-class":
+		case "wrong-class":
+			// A class no controller of this environment serves: nothing
+			// answers, the Ingress never gets an address.
+			want = buildIngress(ns, "nginx", shopRules, map[string]any{"number": 80})
+		case "alternative-default-class":
+			// The cluster's default IngressClass (cloud-provider-kind) is
+			// set by admission, so omitting the class ends in the same object.
 			want = buildIngress(ns, "", shopRules, map[string]any{"number": 80})
 		case "alternative-port-name":
 			want = buildIngress(ns, class, shopRules, map[string]any{"name": "http"})
@@ -848,6 +855,7 @@ func TestNetworkIngressContracts(t *testing.T) {
 		"1 Ready replica", "10-second stability window, 90-second observation limit",
 		"60-second limit", "this point needs the first one", "this point needs the second one",
 		"a rule for each of the hosts", "HTTP 200",
+		"default IngressClass of the cluster is `cloud-provider-kind`", "any other class is not served",
 	} {
 		if !strings.Contains(q, lit) {
 			t.Errorf("question must state %q", lit)
@@ -873,7 +881,8 @@ func TestNetworkIngressContracts(t *testing.T) {
 	expl := string(p.Files["explanation.ko.md"])
 	for _, lit := range []string{
 		"IngressClass", "ingressClassName", "pathType", "Prefix", "Host", "kubectl get ingress", "kubectl describe ingress", "ADDRESS",
-		"all-to-web", "missing-api-host", "wrong-backend-port", "no-class", "alternative-port-name",
+		"all-to-web", "missing-api-host", "wrong-backend-port", "wrong-class", "alternative-default-class", "alternative-port-name",
+		"is-default-class", "admission",
 		"root-route", "api-path-route", "api-host-route", "ingress-shape", "web-ready", "api-ready", "web-ok", "api-ok",
 		"https://kubernetes.io/docs/concepts/services-networking/ingress/",
 	} {

@@ -241,12 +241,32 @@
       "expected_score": 4
     },
     {
-      "id": "no-class",
+      "id": "wrong-class",
       "actions": [
         {
           "kind": "apply",
           "args": {
-            "path": "cases/no-class.yaml"
+            "path": "cases/wrong-class.yaml"
+          }
+        }
+      ],
+      "expected": {
+        "web-ready": "PASS",
+        "api-ready": "PASS",
+        "root-route": "FAIL",
+        "api-path-route": "FAIL",
+        "api-host-route": "FAIL",
+        "ingress-shape": "FAIL"
+      },
+      "expected_score": 2
+    },
+    {
+      "id": "alternative-default-class",
+      "actions": [
+        {
+          "kind": "apply",
+          "args": {
+            "path": "cases/alternative-default-class.yaml"
           }
         }
       ],
@@ -256,9 +276,9 @@
         "root-route": "PASS",
         "api-path-route": "PASS",
         "api-host-route": "PASS",
-        "ingress-shape": "FAIL"
+        "ingress-shape": "PASS"
       },
-      "expected_score": 5
+      "expected_score": 6
     },
     {
       "id": "alternative-port-name",

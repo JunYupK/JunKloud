@@ -1,5 +1,5 @@
 Deployment shop-web, Deployment shop-api, Service shop-web and Service shop-api exist in ${namespace}. Each Service has the port 80 and forwards it to port 8080 of the Pods of the Deployment with the same name. shop-web answers web-ok and shop-api answers api-ok, both on the path /api/ (and shop-web also on /). Nothing exposes them through an Ingress yet.
-Create Ingress shop in ${namespace} with the IngressClass cloud-provider-kind (spec.ingressClassName). Every path uses the pathType Prefix and a backend on port 80 of the Service.
+Create Ingress shop in ${namespace} with the IngressClass cloud-provider-kind (spec.ingressClassName). The default IngressClass of the cluster is cloud-provider-kind, which the API server sets on an Ingress that names no class; any other class is not served by a controller of this environment. Every path uses the pathType Prefix and a backend on port 80 of the Service.
 - Host shop.${namespace}.example: the path / goes to Service shop-web and the path /api goes to Service shop-api.
 - Host api.${namespace}.example: the path / goes to Service shop-api.
 The host names resolve nowhere: the checks put them in the Host header of their requests.
