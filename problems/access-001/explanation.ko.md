@@ -6,18 +6,18 @@ Kubernetes에서 Pod는 ServiceAccount의 신원으로 API 서버를 호출합�
 ## 진단 순서
 1. `kubectl get deploy reporter -o jsonpath='{.spec.template.spec.serviceAccountName}'`으로 현재 Pod가 어떤 ServiceAccount로 실행되는지 확인합니다 (비어 있으면 `default`).
 2. `kubectl create serviceaccount report-reader`로 ServiceAccount를 만들고 `kubectl create role`, `kubectl create rolebinding`으로 권한을 부여합니다.
-3. `kubectl auth can-i get pods --as=system:serviceaccount:<namespace>:report-reader`처럼 허용해야 하는 동작과 허용하면 안 되는 동작(`delete pods`, `get secrets`, `create deployments`, `list pods -A`, `list pods -n kube-system`, `get configmap other`)을 모두 확인합니다.
+3. `kubectl auth can-i get pods --as=system:serviceaccount:<namespace>:report-reader`처럼 허용해야 하는 동작과 허용하면 안 되는 동작(`delete pods`, `get secrets`, `create deployments`, `list pods -A`, `list pods -n kube-system`, `get configmap other`, `list configmaps`, `watch configmaps`)을 모두 확인합니다.
 4. `kubectl set serviceaccount deployment/reporter report-reader`(또는 manifest의 `spec.template.spec.serviceAccountName`)로 Deployment를 바꾸고 `kubectl rollout status deployment/reporter`로 새 Pod가 Ready가 되는지 봅니다.
 
 ## 해결
 - ServiceAccount `report-reader`를 만듭니다.
-- Role에 두 규칙을 둡니다: `pods`에 `get`, `list`, `watch`; `configmaps`에 `resourceNames: ["report-config"]`와 `get`. 이 Role을 RoleBinding으로 `report-reader`에 묶습니다. Role 두 개와 RoleBinding 두 개로 나누어도 같은 권한이므로 정답입니다.
+- Role에 두 규칙을 둡니다: `pods`에 `get`, `list`, `watch`; `configmaps`에 `resourceNames: ["report-config"]`와 `get`만 (resourceNames 없이 `list`/`watch`를 주면 모든 ConfigMap을 읽을 수 있으므로 `least-privilege`에서 감점됩니다). 이 Role을 RoleBinding으로 `report-reader`에 묶습니다. Role 두 개와 RoleBinding 두 개로 나누어도 같은 권한이므로 정답입니다.
 - Deployment `reporter`의 Pod template에 `serviceAccountName: report-reader`를 지정합니다. 토큰 마운트를 끄지 않습니다.
 - `default` ServiceAccount는 건드리지 않습니다.
 
 ## 오답 피드백
 - Role을 `default` ServiceAccount에 묶으면 앱은 그대로 동작하는 것처럼 보이지만 `report-reader`가 없고 `default`가 권한을 얻으므로 이 문제의 요구와 반대입니다 (Ready 1점만 얻습니다).
-- 내장 ClusterRole `edit`을 RoleBinding으로 묶으면 `can-read`와 `runs-as-sa`는 통과하지만, Pod 삭제·Secret 읽기·Deployment 생성·다른 ConfigMap 읽기가 허용되어 `least-privilege`에서 감점됩니다. 앱이 정상 동작해도 과한 권한은 점수를 잃습니다.
+- 내장 ClusterRole `edit`을 RoleBinding으로 묶으면 `can-read`와 `runs-as-sa`는 통과하지만, Pod 삭제·Secret 읽기·Deployment 생성·다른 ConfigMap 읽기 및 ConfigMap list/watch가 허용되어 `least-privilege`에서 감점됩니다. 앱이 정상 동작해도 과한 권한은 점수를 잃습니다.
 - ClusterRoleBinding으로 같은 규칙을 묶으면 모든 네임스페이스와 `kube-system`의 Pod를 list할 수 있어 `least-privilege`에서 감점됩니다. 이렇게 만든 클러스터 범위 객체는 reset으로 지워지지 않습니다.
 - RBAC만 맞추고 Deployment가 계속 `default`로 실행되면 `runs-as-sa`에서 감점됩니다.
 

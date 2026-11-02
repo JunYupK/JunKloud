@@ -658,6 +658,8 @@ func TestSecurityAccessContracts(t *testing.T) {
 		{accessCheck{Verb: "list", Resource: "pods", ClusterScope: true}, "list Pods in all namespaces"},
 		{accessCheck{Verb: "list", Resource: "pods", Namespace: "kube-system"}, "list Pods in the namespace `kube-system`"},
 		{accessCheck{Verb: "get", Resource: "configmaps", Name: "other"}, "get any other ConfigMap (for example one named `other`)"},
+		{accessCheck{Verb: "list", Resource: "configmaps"}, "or list or watch ConfigMaps"},
+		{accessCheck{Verb: "watch", Resource: "configmaps"}, "or list or watch ConfigMaps"},
 	})
 	assertPinned("default-sa-unchanged", []pinned{
 		{accessCheck{Verb: "get", Resource: "pods"}, "it must still not be able to get or list Pods or to get the ConfigMap `report-config`"},

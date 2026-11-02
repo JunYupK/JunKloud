@@ -3,7 +3,7 @@ ConfigMap `report-config` and Deployment `reporter` (one Pod, container `reporte
 Create the ServiceAccount `report-reader` in `${namespace}` and give it only the access that a reporting job needs. Use namespaced RBAC objects in `${namespace}` only (a Role and a RoleBinding): a cluster-scoped object that you create, such as a ClusterRole or a ClusterRoleBinding, is not removed when the problem is reset.
 
 - `report-reader` must be able to get, list and watch Pods in `${namespace}`, and to get the ConfigMap `report-config` in `${namespace}`.
-- `report-reader` must NOT be able to: delete Pods, get or list Secrets, create Deployments, list Pods in all namespaces, list Pods in the namespace `kube-system`, or get any other ConfigMap (for example one named `other`).
+- `report-reader` must NOT be able to: delete Pods, get or list Secrets, create Deployments, list Pods in all namespaces, list Pods in the namespace `kube-system`, get any other ConfigMap (for example one named `other`), or list or watch ConfigMaps (a rule without `resourceNames` would let it read every ConfigMap).
 - The `default` ServiceAccount of `${namespace}` must not gain any of these rights: it must still not be able to get or list Pods or to get the ConfigMap `report-config`.
 
 Then run Deployment `reporter` as `report-reader`, with the ServiceAccount token mounted. The grader reads the token inside container `reporter` with `cat` and has the cluster authenticate it, so the container must keep a `cat` command (the provided `docker.io/library/busybox:1.37.0` image has one) and the token must stay mounted: do not set `automountServiceAccountToken: false`.
