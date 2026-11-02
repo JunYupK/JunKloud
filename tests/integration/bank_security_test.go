@@ -33,7 +33,7 @@ func TestSecurityBank(t *testing.T) {
 	if len(ids) == 0 {
 		t.Skip("no environment-security package yet")
 	}
-	validateGroupAfterSmoke(t, loadGroup(t, ids), false)
+	validateGroupGuarded(t, loadGroup(t, ids), false, securityForbidden)
 }
 
 // custom-resource-001 owns a cluster-scoped CRD through its scope. Reset

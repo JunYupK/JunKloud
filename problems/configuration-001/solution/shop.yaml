@@ -1,0 +1,45 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: shop
+  namespace: ${namespace}
+  labels:
+    app: shop
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: shop
+  template:
+    metadata:
+      labels:
+        app: shop
+    spec:
+      containers:
+      - name: app
+        image: docker.io/library/busybox:1.37.0
+        imagePullPolicy: Never
+        command:
+        - sh
+        - -c
+        - 'h=$(printf %s "$API_TOKEN" | sha256sum | cut -d" " -f1); if [ "$h" = bbf7ad6ef79f113b44631b7cca6d826acd7692c0f2b9fb6e5ed727c7a3459f19 ]; then t=ok; else t=bad; fi; mkdir -p /www; printf "shop currency=%s token=%s" "$CURRENCY" "$t" > /www/index.html; echo "shop started currency=$CURRENCY"; exec httpd -f -p 8080 -h /www'
+        ports:
+        - containerPort: 8080
+        resources:
+          requests:
+            cpu: 10m
+            memory: 8Mi
+          limits:
+            cpu: 100m
+            memory: 32Mi
+        env:
+        - name: CURRENCY
+          valueFrom:
+            configMapKeyRef:
+              name: shop-config
+              key: currency
+        - name: API_TOKEN
+          valueFrom:
+            secretKeyRef:
+              name: shop-secret
+              key: api-token

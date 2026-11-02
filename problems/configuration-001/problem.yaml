@@ -1,0 +1,310 @@
+{
+  "schema_version": 1,
+  "id": "configuration-001",
+  "version": "1.0.0",
+  "title": "Feed an application from a ConfigMap and a Secret instead of broken environment values",
+  "domain": "environment-security",
+  "difficulty": "easy",
+  "type": "troubleshoot",
+  "tags": [
+    "environment-security",
+    "configmap",
+    "secret"
+  ],
+  "competencies": [
+    "ConfigMap",
+    "Secret"
+  ],
+  "capabilities": [],
+  "parameters": {
+    "namespace": [
+      "jk-configuration-001-a",
+      "jk-configuration-001-b"
+    ]
+  },
+  "namespace": "${namespace}",
+  "budget": {
+    "cpu": "500m",
+    "memory": "192Mi"
+  },
+  "criteria": [
+    {
+      "id": "currency-ref",
+      "kind": "field",
+      "points": 1,
+      "feedback": "\ucee8\ud14c\uc774\ub108 app\uc758 \ud658\uacbd\ubcc0\uc218 CURRENCY\ub294 literal value\uac00 \uc544\ub2c8\ub77c ConfigMap shop-config\uc758 \ud0a4 currency\ub97c configMapKeyRef\ub85c \ucc38\uc870\ud574\uc57c \ud569\ub2c8\ub2e4. name\uacfc key \ucca0\uc790\ub97c \ud655\uc778\ud558\uc138\uc694(\ud0a4\ub294 \ub300\uc18c\ubb38\uc790\ub97c \uad6c\ubd84\ud569\ub2c8\ub2e4: currency). kubectl get configmap shop-config -o yaml \ub85c \ud0a4 \uc774\ub984\uc744 \ud655\uc778\ud558\uace0 kubectl edit deployment shop \uc73c\ub85c env\ub97c \uace0\uce58\uc138\uc694.",
+      "target": {
+        "api_version": "apps/v1",
+        "kind": "Deployment",
+        "namespace": "${namespace}",
+        "name": "shop"
+      },
+      "args": {
+        "fields": [
+          {
+            "path": "spec.template.spec.containers[name=app].env[name=CURRENCY].valueFrom.configMapKeyRef.name",
+            "equals": "shop-config"
+          },
+          {
+            "path": "spec.template.spec.containers[name=app].env[name=CURRENCY].valueFrom.configMapKeyRef.key",
+            "equals": "currency"
+          }
+        ]
+      }
+    },
+    {
+      "id": "token-ref",
+      "kind": "field",
+      "points": 1,
+      "feedback": "\ucee8\ud14c\uc774\ub108 app\uc758 \ud658\uacbd\ubcc0\uc218 API_TOKEN\uc740 \ud1a0\ud070\uc744 Deployment\uc5d0 \uc9c1\uc811 \uc801\uc9c0 \ub9d0\uace0 Secret shop-secret\uc758 \ud0a4 api-token\uc744 secretKeyRef\ub85c \ucc38\uc870\ud574\uc57c \ud569\ub2c8\ub2e4. \ud0a4 \uc774\ub984\uc740 api-token(\ud558\uc774\ud508)\uc785\ub2c8\ub2e4. kubectl describe secret shop-secret \uc73c\ub85c \ud0a4 \uc774\ub984\uc744 \ud655\uc778\ud558\uc138\uc694(\uac12\uc740 \ucd9c\ub825\ub418\uc9c0 \uc54a\uc2b5\ub2c8\ub2e4).",
+      "target": {
+        "api_version": "apps/v1",
+        "kind": "Deployment",
+        "namespace": "${namespace}",
+        "name": "shop"
+      },
+      "args": {
+        "fields": [
+          {
+            "path": "spec.template.spec.containers[name=app].env[name=API_TOKEN].valueFrom.secretKeyRef.name",
+            "equals": "shop-secret"
+          },
+          {
+            "path": "spec.template.spec.containers[name=app].env[name=API_TOKEN].valueFrom.secretKeyRef.key",
+            "equals": "api-token"
+          }
+        ]
+      }
+    },
+    {
+      "id": "shop-ready",
+      "kind": "ready",
+      "points": 1,
+      "feedback": "Deployment shop\uc758 replica 1\uac1c\uac00 Ready\uc5ec\uc57c \ud569\ub2c8\ub2e4. \uc874\uc7ac\ud558\uc9c0 \uc54a\ub294 ConfigMap \ud0a4\ub098 Secret \ud0a4\ub97c \ucc38\uc870\ud558\uba74 \ucee8\ud14c\uc774\ub108\uac00 \uc2dc\uc791\ub418\uc9c0 \uc54a\uace0 Pod\uac00 CreateContainerConfigError \uc0c1\ud0dc\uac00 \ub429\ub2c8\ub2e4. kubectl describe pod \uc758 Events\uc5d0\uc11c \uc5b4\ub5a4 \ud0a4\uac00 \uc5c6\ub294\uc9c0 \ud655\uc778\ud558\uc138\uc694.",
+      "target": {
+        "api_version": "apps/v1",
+        "kind": "Deployment",
+        "namespace": "${namespace}",
+        "name": "shop"
+      },
+      "args": {
+        "replicas": 1
+      },
+      "timeout": "90s"
+    },
+    {
+      "id": "shop-serves",
+      "kind": "http",
+      "points": 1,
+      "feedback": "Service shop(80\ubc88 \ud3ec\ud2b8)\uc774 'shop currency=EUR token=ok'\ub97c \ubc18\ud658\ud574\uc57c \ud569\ub2c8\ub2e4. currency\ub294 ConfigMap \uac12, token=ok\ub294 Secret\uc758 \uac12\uc774 \uc62c\ubc14\ub974\uac8c \uc804\ub2ec\ub418\uc5c8\ub2e4\ub294 \ub73b\uc785\ub2c8\ub2e4. token=bad \uc774\uba74 API_TOKEN\uc758 \ud0a4\uac00 \ud2c0\ub838\uac70\ub098 \uac12\uc774 \ub2e4\ub978 \uac83\uc774\uace0, currency\uac00 EUR\uc774 \uc544\ub2c8\uba74 CURRENCY\uac00 ConfigMap\uc5d0\uc11c \uc624\uc9c0 \uc54a\ub294 \uac83\uc785\ub2c8\ub2e4.",
+      "target": {
+        "api_version": "v1",
+        "kind": "Service",
+        "namespace": "${namespace}",
+        "name": "shop"
+      },
+      "args": {
+        "port": 80,
+        "path": "/",
+        "body_marker": "shop currency=EUR token=ok"
+      },
+      "depends_on": [
+        "shop-ready"
+      ],
+      "timeout": "60s"
+    },
+    {
+      "id": "inputs-unchanged",
+      "kind": "field",
+      "points": 1,
+      "feedback": "ConfigMap shop-config\uc758 currency \uac12\uc740 EUR \uadf8\ub300\ub85c\uc5ec\uc57c \ud569\ub2c8\ub2e4. \uac12\uc744 \ubc14\uafd4\uc11c \ucd9c\ub825\uc744 \ub9de\ucd94\ub294 \uac83\uc740 \ud574\ubc95\uc774 \uc544\ub2d9\ub2c8\ub2e4. \uc124\uc815\uc744 \uace0\uce58\ub294 \uacf3\uc740 Deployment\uc758 env \ucc38\uc870\uc785\ub2c8\ub2e4.",
+      "target": {
+        "api_version": "v1",
+        "kind": "ConfigMap",
+        "namespace": "${namespace}",
+        "name": "shop-config"
+      },
+      "args": {
+        "fields": [
+          {
+            "path": "data.currency",
+            "equals": "EUR"
+          }
+        ]
+      }
+    }
+  ],
+  "setup": [
+    {
+      "kind": "apply",
+      "args": {
+        "path": "setup/app.yaml"
+      }
+    }
+  ],
+  "solution": [
+    {
+      "kind": "delete-owned",
+      "args": {
+        "targets": [
+          {
+            "api_version": "apps/v1",
+            "kind": "Deployment",
+            "namespace": "${namespace}",
+            "name": "shop"
+          }
+        ]
+      }
+    },
+    {
+      "kind": "apply",
+      "args": {
+        "path": "solution/shop.yaml"
+      }
+    }
+  ],
+  "initial_expected": {
+    "currency-ref": "FAIL",
+    "token-ref": "FAIL",
+    "shop-ready": "FAIL",
+    "shop-serves": "FAIL",
+    "inputs-unchanged": "PASS"
+  },
+  "initial_score": 1,
+  "cases": [
+    {
+      "id": "hardcoded-values",
+      "actions": [
+        {
+          "kind": "delete-owned",
+          "args": {
+            "targets": [
+              {
+                "api_version": "apps/v1",
+                "kind": "Deployment",
+                "namespace": "${namespace}",
+                "name": "shop"
+              }
+            ]
+          }
+        },
+        {
+          "kind": "apply",
+          "args": {
+            "path": "cases/hardcoded-values.yaml"
+          }
+        }
+      ],
+      "expected": {
+        "currency-ref": "FAIL",
+        "token-ref": "FAIL",
+        "shop-ready": "PASS",
+        "shop-serves": "PASS",
+        "inputs-unchanged": "PASS"
+      },
+      "expected_score": 3
+    },
+    {
+      "id": "wrong-configmap-key",
+      "actions": [
+        {
+          "kind": "delete-owned",
+          "args": {
+            "targets": [
+              {
+                "api_version": "apps/v1",
+                "kind": "Deployment",
+                "namespace": "${namespace}",
+                "name": "shop"
+              }
+            ]
+          }
+        },
+        {
+          "kind": "apply",
+          "args": {
+            "path": "cases/wrong-configmap-key.yaml"
+          }
+        }
+      ],
+      "expected": {
+        "currency-ref": "FAIL",
+        "token-ref": "PASS",
+        "shop-ready": "FAIL",
+        "shop-serves": "FAIL",
+        "inputs-unchanged": "PASS"
+      },
+      "expected_score": 2
+    },
+    {
+      "id": "configmap-edited",
+      "actions": [
+        {
+          "kind": "apply",
+          "args": {
+            "path": "cases/configmap-edited.yaml"
+          }
+        },
+        {
+          "kind": "delete-owned",
+          "args": {
+            "targets": [
+              {
+                "api_version": "apps/v1",
+                "kind": "Deployment",
+                "namespace": "${namespace}",
+                "name": "shop"
+              }
+            ]
+          }
+        },
+        {
+          "kind": "apply",
+          "args": {
+            "path": "solution/shop.yaml"
+          }
+        }
+      ],
+      "expected": {
+        "currency-ref": "PASS",
+        "token-ref": "PASS",
+        "shop-ready": "PASS",
+        "shop-serves": "FAIL",
+        "inputs-unchanged": "FAIL"
+      },
+      "expected_score": 3
+    },
+    {
+      "id": "alternative-optional-false",
+      "actions": [
+        {
+          "kind": "delete-owned",
+          "args": {
+            "targets": [
+              {
+                "api_version": "apps/v1",
+                "kind": "Deployment",
+                "namespace": "${namespace}",
+                "name": "shop"
+              }
+            ]
+          }
+        },
+        {
+          "kind": "apply",
+          "args": {
+            "path": "cases/alternative-optional-false.yaml"
+          }
+        }
+      ],
+      "expected": {
+        "currency-ref": "PASS",
+        "token-ref": "PASS",
+        "shop-ready": "PASS",
+        "shop-serves": "PASS",
+        "inputs-unchanged": "PASS"
+      },
+      "expected_score": 5
+    }
+  ]
+}

@@ -3,6 +3,10 @@
 package integration
 
 import (
+	"crypto/sha256"
+	"encoding/base64"
+	"encoding/hex"
+	"encoding/json"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -47,6 +51,12 @@ var securityCases = map[string]map[string]int{
 		"limitrange-missing":             4,
 		"alternative-decimal-quantities": 5,
 	},
+	"configuration-001": {
+		"hardcoded-values":           3,
+		"wrong-configmap-key":        2,
+		"configmap-edited":           3,
+		"alternative-optional-false": 5,
+	},
 }
 
 // securityCapabilities and securityInitialScores pin each package's declared
@@ -55,12 +65,21 @@ var securityCapabilities = map[string][]string{
 	"custom-resource-001": nil,
 	"access-001":          nil,
 	"resources-001":       nil,
+	"configuration-001":   nil,
 }
 
 var securityInitialScores = map[string]int{
 	"custom-resource-001": 0,
 	"access-001":          2,
 	"resources-001":       1,
+	"configuration-001":   1,
+}
+
+// securityForbidden lists, per problem, strings that no evaluation may ever
+// contain: the Secret values the problem plants. TestSecurityBank hands them
+// to the leak guard of bankProgress.
+var securityForbidden = map[string][]string{
+	"configuration-001": {"jk-canary-7f3c9a2e"},
 }
 
 // presentSecurityIDs returns the security IDs whose package exists, so the
@@ -1181,6 +1200,299 @@ func TestSecurityResourcesContracts(t *testing.T) {
 
 	// The explanation covers the trap and the wrong answers in Korean.
 	for _, lit := range []string{"FailedCreate", "ERROR", "team-quota"} {
+		if !strings.Contains(string(p.Files["explanation.ko.md"]), lit) {
+			t.Errorf("the explanation must mention %q", lit)
+		}
+	}
+}
+
+// ------------------------------------------------------------- leak guard
+
+func TestSecurityLeakGuard(t *testing.T) {
+	const canary = "jk-canary-7f3c9a2e"
+	forbidden := []string{canary}
+	score := 1
+	eval := func(res model.CheckResult) model.Evaluation {
+		return model.Evaluation{Results: []model.CheckResult{{CriterionID: "other", Status: model.StatusPass, Points: 1}, res}, Score: &score, MaxScore: 2, Complete: true}
+	}
+	clean := eval(model.CheckResult{CriterionID: "token-ref", Status: model.StatusFail, Reason: "env[name=API_TOKEN].valueFrom.secretKeyRef.name: field not present",
+		Evidence: model.Evidence{Expected: map[string]any{"p": "shop-secret"}, Actual: map[string]any{"p": "<absent>"}}})
+	if got := evaluationLeaks(clean, forbidden); len(got) != 0 {
+		t.Errorf("a clean evaluation was reported as leaking: %v", got)
+	}
+	if got := evaluationLeaks(eval(model.CheckResult{CriterionID: "x", Status: model.StatusFail}), nil); len(got) != 0 {
+		t.Errorf("no forbidden string must never report a leak: %v", got)
+	}
+	cases := map[string]model.CheckResult{
+		"reason":          {CriterionID: "x", Status: model.StatusFail, Reason: "value " + canary + " differs"},
+		"nested actual":   {CriterionID: "x", Status: model.StatusFail, Evidence: model.Evidence{Actual: map[string]any{"env": []any{map[string]any{"value": canary}}}}},
+		"expected":        {CriterionID: "x", Status: model.StatusFail, Evidence: model.Evidence{Expected: canary}},
+		"base64 form":     {CriterionID: "x", Status: model.StatusFail, Reason: "data " + base64.StdEncoding.EncodeToString([]byte(canary))},
+		"on a PASS check": {CriterionID: "x", Status: model.StatusPass, Evidence: model.Evidence{Actual: canary}},
+	}
+	for name, res := range cases {
+		got := evaluationLeaks(eval(res), forbidden)
+		if len(got) == 0 {
+			t.Errorf("%s: the canary was not detected", name)
+		}
+		// A finding names the place, never the value.
+		for _, f := range got {
+			if strings.Contains(f, canary) || strings.Contains(f, base64.StdEncoding.EncodeToString([]byte(canary))) {
+				t.Errorf("%s: a finding echoes the forbidden value: %q", name, f)
+			}
+		}
+	}
+	// The leak must be found in the CLI text as well as in the JSON.
+	if got := evaluationLeaks(eval(cases["reason"]), forbidden); len(got) < 2 {
+		t.Errorf("a leak in the reason must be reported for the JSON and the CLI text, got %v", got)
+	}
+	// The planted canary is what the guard is wired to.
+	testutil.Equal(t, securityForbidden["configuration-001"], []string{canary})
+}
+
+// ------------------------------------------------------- configuration-001
+
+func appContainer(t *testing.T, label string, deploy map[string]any) map[string]any {
+	t.Helper()
+	cs, ok := nestedMap(t, deploy, "spec", "template", "spec")["containers"].([]any)
+	if !ok || len(cs) != 1 {
+		t.Fatalf("%s: want exactly one container", label)
+	}
+	return cs[0].(map[string]any)
+}
+
+func TestSecurityConfigurationContracts(t *testing.T) {
+	p := loadGroup(t, []string{"configuration-001"})[0]
+	f, err := problem.Freeze(p, 1)
+	testutil.NoError(t, err)
+	ns := f.Namespace
+	q := string(p.Files[problem.QuestionFile])
+	canary := securityForbidden["configuration-001"][0]
+	const wrongKey = "api_token"
+	const image = "docker.io/library/busybox:1.37.0"
+
+	testutil.Equal(t, p.Scope.Namespaces == nil, true)
+	testutil.Equal(t, len(p.Scope.ClusterResources), 0)
+
+	// Setup: the ConfigMap, the Secret with the canary, the broken Deployment, the Service.
+	setup := resourcesActions(t, p, f, "setup", p.Setup)
+	testutil.Equal(t, setup.kinds(), []string{"ConfigMap", "Deployment", "Secret", "Service"})
+	testutil.Equal(t, len(setup.deleted), 0)
+	cm := setup.objs["ConfigMap"]
+	testutil.Equal(t, nestedString(t, cm, "metadata", "name"), "shop-config")
+	testutil.Equal(t, nestedString(t, cm, "data", "currency"), "EUR")
+	sec := setup.objs["Secret"]
+	testutil.Equal(t, nestedString(t, sec, "metadata", "name"), "shop-secret")
+	testutil.Equal(t, nestedString(t, sec, "stringData", "api-token"), canary)
+	deploy := setup.objs["Deployment"]
+	testutil.Equal(t, nestedString(t, deploy, "metadata", "name"), "shop")
+	testutil.Equal(t, nestedString(t, deploy, "spec", "replicas"), "1")
+	c0 := appContainer(t, "setup", deploy)
+	testutil.Equal(t, c0["name"], any("app"))
+	testutil.Equal(t, c0["image"], any(image))
+	cmd, _ := c0["command"].([]any)
+	if len(cmd) != 3 || cmd[0] != "sh" || cmd[1] != "-c" {
+		t.Fatalf("setup command = %v", c0["command"])
+	}
+	script := cmd[2].(string)
+	// The script compares a hash and never prints the token or the canary.
+	sum := sha256.Sum256([]byte(canary))
+	if !strings.Contains(script, hex.EncodeToString(sum[:])) {
+		t.Error("the script must embed the sha256 of the canary")
+	}
+	if strings.Contains(script, canary) {
+		t.Error("the script must not embed the token")
+	}
+	for _, lit := range []string{`printf %s "$API_TOKEN" | sha256sum`, "t=ok", "t=bad", `shop currency=%s token=%s`, `echo "shop started currency=$CURRENCY"`, "httpd -f -p 8080"} {
+		if !strings.Contains(script, lit) {
+			t.Errorf("the script must contain %q", lit)
+		}
+	}
+	for _, printed := range []string{`echo "$API_TOKEN"`, `echo $API_TOKEN`, `printf "$API_TOKEN"`, `printf %s "$API_TOKEN" >`, "cat /proc"} {
+		if strings.Contains(script, printed) {
+			t.Errorf("the script must never print the token: found %q", printed)
+		}
+	}
+	// The broken environment: a literal currency and a secret key that does not exist.
+	envOf := func(c map[string]any) []any { return c["env"].([]any) }
+	wantBroken := []any{
+		map[string]any{"name": "CURRENCY", "value": "USD"},
+		map[string]any{"name": "API_TOKEN", "valueFrom": map[string]any{"secretKeyRef": map[string]any{"name": "shop-secret", "key": wrongKey}}},
+	}
+	testutil.Equal(t, envOf(c0), wantBroken)
+	// The canary lives only in the Secret.
+	deployCopy := deepCopyObject(deploy)
+	if b, _ := json.Marshal(deployCopy); strings.Contains(string(b), canary) {
+		t.Error("the setup Deployment must not contain the canary")
+	}
+
+	// Criteria.
+	crit := map[string]model.Criterion{}
+	var order []string
+	for _, c := range p.Criteria {
+		crit[c.ID] = c
+		order = append(order, c.ID)
+	}
+	testutil.Equal(t, order, []string{"currency-ref", "token-ref", "shop-ready", "shop-serves", "inputs-unchanged"})
+	fieldsOf := func(id string) map[string]string {
+		t.Helper()
+		c := crit[id]
+		testutil.Equal(t, c.Kind, model.CriterionField)
+		out := map[string]string{}
+		for _, fld := range c.Args["fields"].([]any) {
+			m := fld.(map[string]any)
+			out[m["path"].(string)] = fmt.Sprint(m["equals"])
+		}
+		return out
+	}
+	const env = "spec.template.spec.containers[name=app].env[name=%s].valueFrom.%s"
+	testutil.Equal(t, fieldsOf("currency-ref"), map[string]string{
+		fmt.Sprintf(env, "CURRENCY", "configMapKeyRef.name"): "shop-config", fmt.Sprintf(env, "CURRENCY", "configMapKeyRef.key"): "currency"})
+	testutil.Equal(t, fieldsOf("token-ref"), map[string]string{
+		fmt.Sprintf(env, "API_TOKEN", "secretKeyRef.name"): "shop-secret", fmt.Sprintf(env, "API_TOKEN", "secretKeyRef.key"): "api-token"})
+	testutil.Equal(t, fieldsOf("inputs-unchanged"), map[string]string{"data.currency": "EUR"})
+	for _, id := range []string{"currency-ref", "token-ref", "shop-ready"} {
+		testutil.Equal(t, crit[id].Target.APIVersion+" "+crit[id].Target.Kind+" "+crit[id].Target.Name, "apps/v1 Deployment shop")
+	}
+	testutil.Equal(t, crit["inputs-unchanged"].Target.Kind+" "+crit["inputs-unchanged"].Target.Name, "ConfigMap shop-config")
+	testutil.Equal(t, crit["shop-serves"].Target.Kind+" "+crit["shop-serves"].Target.Name, "Service shop")
+	for _, id := range []string{"currency-ref", "token-ref", "inputs-unchanged"} {
+		testutil.Equal(t, crit[id].DependsOn == nil, true)
+	}
+	// No criterion reads the Secret: the canary is protected by never being
+	// part of any evidence, which the bank's leak guard asserts.
+	for _, c := range p.Criteria {
+		testutil.Equal(t, c.Target.Kind == "Secret", false)
+	}
+	ready := crit["shop-ready"]
+	testutil.Equal(t, ready.Kind, model.CriterionReady)
+	testutil.Equal(t, fmt.Sprint(ready.Args["replicas"]), "1")
+	testutil.Equal(t, ready.Timeout, 90*time.Second)
+	// A container that cannot start is a learner-fault FAIL of `ready`, so
+	// no prerequisite is needed.
+	testutil.Equal(t, ready.DependsOn == nil, true)
+	serves := crit["shop-serves"]
+	testutil.Equal(t, serves.Kind, model.CriterionHTTP)
+	testutil.Equal(t, serves.Args["body_marker"], any("shop currency=EUR token=ok"))
+	testutil.Equal(t, fmt.Sprint(serves.Args["port"]), "80")
+	testutil.Equal(t, serves.DependsOn, []string{"shop-ready"})
+
+	// Every pinned literal is stated in the question, and none that is not graded.
+	for _, lit := range []string{
+		"`shop`", "`app`", "port 80, targetPort 8080", "`shop-config`", "`currency`", "`EUR`", "`shop-secret`", "`api-token`",
+		"`CURRENCY`", "`API_TOKEN`", "`configMapKeyRef`", "`secretKeyRef`", "literal `value`",
+		"Do not change the value of `currency` in ConfigMap `shop-config`", "`shop currency=EUR token=ok`",
+		"1 Ready replica", "10-second stability window", "90-second observation limit", "60-second limit", "this point needs the third one",
+		"keeps both the fourth and the fifth point", "`optional` and any other environment variables do not matter",
+	} {
+		if !strings.Contains(q, lit) {
+			t.Errorf("question must state %q", lit)
+		}
+	}
+	for _, ungraded := range []string{"image", "command", "Do not change the Secret", "Do not change the ConfigMap,"} {
+		if strings.Contains(q, ungraded) {
+			t.Errorf("the question must not mention %q: nothing grades it", ungraded)
+		}
+	}
+	if strings.Contains(q, canary) {
+		t.Error("the question must not contain the token")
+	}
+
+	// Solution: delete the broken Deployment, apply the same one with references.
+	sol := resourcesActions(t, p, f, "solution", p.Solution)
+	testutil.Equal(t, sol.kinds(), []string{"Deployment"})
+	wantDel := []model.ObjectRef{{APIVersion: "apps/v1", Kind: "Deployment", Namespace: ns, Name: "shop"}}
+	testutil.Equal(t, sol.deleted, wantDel)
+	solDeploy := sol.objs["Deployment"]
+	solC := appContainer(t, "solution", solDeploy)
+	wantRefs := []any{
+		map[string]any{"name": "CURRENCY", "valueFrom": map[string]any{"configMapKeyRef": map[string]any{"name": "shop-config", "key": "currency"}}},
+		map[string]any{"name": "API_TOKEN", "valueFrom": map[string]any{"secretKeyRef": map[string]any{"name": "shop-secret", "key": "api-token"}}},
+	}
+	testutil.Equal(t, envOf(solC), wantRefs)
+	// Apart from env, the solution is the provided Deployment: same image,
+	// command, resources, labels and Service selector.
+	withEnv := func(d map[string]any, env []any) map[string]any {
+		out := deepCopyObject(d)
+		appContainer(t, "copy", out)["env"] = env
+		return out
+	}
+	testutil.Equal(t, withEnv(solDeploy, wantBroken), deploy)
+	if b, _ := json.Marshal(solDeploy); strings.Contains(string(b), canary) {
+		t.Error("the solution must not contain the token")
+	}
+
+	// Cases: each differs from the solution only in its named mistake.
+	for _, c := range p.Cases {
+		g := resourcesActions(t, p, f, c.ID, c.Actions)
+		switch c.ID {
+		case "hardcoded-values":
+			// The Deployment is recreated with literal values; the app works.
+			testutil.Equal(t, g.deleted, wantDel)
+			testutil.Equal(t, g.kinds(), []string{"Deployment"})
+			literal := []any{map[string]any{"name": "CURRENCY", "value": "EUR"}, map[string]any{"name": "API_TOKEN", "value": canary}}
+			testutil.Equal(t, g.objs["Deployment"], withEnv(solDeploy, literal))
+		case "wrong-configmap-key":
+			testutil.Equal(t, g.deleted, wantDel)
+			testutil.Equal(t, g.kinds(), []string{"Deployment"})
+			wrong := deepCopyObject(solDeploy)
+			envOf(appContainer(t, c.ID, wrong))[0].(map[string]any)["valueFrom"].(map[string]any)["configMapKeyRef"].(map[string]any)["key"] = "Currency"
+			testutil.Equal(t, g.objs["Deployment"], wrong)
+			if _, ok := cm["data"].(map[string]any)["Currency"]; ok {
+				t.Error("the setup ConfigMap must not have the wrong key")
+			}
+		case "configmap-edited":
+			// The ConfigMap value changes, the Deployment is the solution.
+			testutil.Equal(t, g.deleted, wantDel)
+			testutil.Equal(t, g.kinds(), []string{"ConfigMap", "Deployment"})
+			testutil.Equal(t, g.objs["Deployment"], solDeploy)
+			edited := deepCopyObject(cm)
+			nestedMap(t, edited, "data")["currency"] = "GBP"
+			testutil.Equal(t, g.objs["ConfigMap"], edited)
+		case "alternative-optional-false":
+			// optional: false on both references and one more, unrelated, variable.
+			testutil.Equal(t, g.deleted, wantDel)
+			testutil.Equal(t, g.kinds(), []string{"Deployment"})
+			alt := g.objs["Deployment"]
+			envs := envOf(appContainer(t, c.ID, alt))
+			testutil.Equal(t, len(envs), 3)
+			testutil.Equal(t, envs[0], any(map[string]any{"name": "LOG_LEVEL", "value": "info"}))
+			wantAlt := deepCopyObject(solDeploy)
+			refs := envOf(appContainer(t, c.ID, wantAlt))
+			refs[0].(map[string]any)["valueFrom"].(map[string]any)["configMapKeyRef"].(map[string]any)["optional"] = false
+			refs[1].(map[string]any)["valueFrom"].(map[string]any)["secretKeyRef"].(map[string]any)["optional"] = false
+			appContainer(t, c.ID, wantAlt)["env"] = append([]any{map[string]any{"name": "LOG_LEVEL", "value": "info"}}, refs...)
+			testutil.Equal(t, alt, wantAlt)
+		default:
+			t.Errorf("configuration-001 case %s has no contract", c.ID)
+		}
+	}
+
+	// The handout repeats only graded rules and never carries the token.
+	readme := string(p.Files["setup/provided/README.txt"])
+	if strings.Contains(readme, "image or command") || strings.Contains(readme, "do not change the image") {
+		t.Error("the handout must not forbid changing the image or command: nothing grades it")
+	}
+	if !strings.Contains(readme, "Do not change the value of currency in shop-config") {
+		t.Error("the handout must repeat the graded ConfigMap rule")
+	}
+	for name, b := range p.Files {
+		if name != "setup/app.yaml" && !strings.HasPrefix(name, "cases/") && strings.Contains(string(b), canary) {
+			t.Errorf("%s contains the token", name)
+		}
+	}
+	for _, name := range []string{"setup/provided/README.txt", problem.QuestionFile, "explanation.ko.md"} {
+		if strings.Contains(string(p.Files[name]), canary) {
+			t.Errorf("%s shows the token to the learner", name)
+		}
+	}
+	// A hardcoded literal is the one place the canary may sit in a case.
+	for name, b := range p.Files {
+		if strings.HasPrefix(name, "cases/") && strings.Contains(string(b), canary) && name != "cases/hardcoded-values.yaml" {
+			t.Errorf("%s contains the token", name)
+		}
+	}
+	for _, lit := range []string{"CreateContainerConfigError", "ERROR", "api-token", "hardcoded-values", "wrong-configmap-key", "configmap-edited", "optional: false"} {
 		if !strings.Contains(string(p.Files["explanation.ko.md"]), lit) {
 			t.Errorf("the explanation must mention %q", lit)
 		}
