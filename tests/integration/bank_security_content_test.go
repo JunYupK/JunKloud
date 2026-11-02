@@ -1707,7 +1707,7 @@ func TestSecurityGatewayContracts(t *testing.T) {
 	// Deployment exists), carries exactly the two PSA labels, then Deployment
 	// and Service. The Deployment has no securityContext at all.
 	setupObjs := orderedObjects(t, p, f, p.Setup)
-	testutil.Equal(t, objectKinds(setupObjs), []string{"Namespace", "Deployment", "Service"})
+	testutil.Equal(t, objectKinds(setupObjs), []string{"Namespace", "Deployment"})
 	nsObj := setupObjs[0]
 	testutil.Equal(t, nsObj["metadata"], any(map[string]any{"name": ns, "labels": map[string]any{enforce: "restricted", enforceV: "latest"}}))
 	deploy := setupObjs[1]
@@ -1729,15 +1729,14 @@ func TestSecurityGatewayContracts(t *testing.T) {
 	sameJSON(t, "ports", c0["ports"], []any{map[string]any{"containerPort": 8080}})
 	testutil.Equal(t, c0["volumeMounts"], any([]any{map[string]any{"name": "www", "mountPath": "/www"}}))
 	testutil.Equal(t, podSpec["volumes"], any([]any{map[string]any{"name": "www", "emptyDir": map[string]any{}}}))
-	// Port 80 is not bound by the application: Service 80 -> 8080.
-	svc := setupObjs[2]
-	testutil.Equal(t, nestedString(t, svc, "metadata", "name"), "gateway")
-	sameJSON(t, "service spec", svc["spec"], map[string]any{
-		"selector": map[string]any{"app": "gateway"},
-		"ports":    []any{map[string]any{"name": "http", "port": 80, "targetPort": 8080, "protocol": "TCP"}},
-	})
-	if strings.Contains(script, "80 ") && strings.Contains(script, "-p 80 ") {
+	// No Service: nothing grades one, and the application binds port 8080.
+	if strings.Contains(script, "-p 80 ") {
 		t.Error("the application must not bind port 80")
+	}
+	for _, o := range setupObjs {
+		if o["kind"] == "Service" {
+			t.Error("setup must not contain a Service: nothing grades it")
+		}
 	}
 
 	// Criteria.
@@ -1748,7 +1747,7 @@ func TestSecurityGatewayContracts(t *testing.T) {
 		order = append(order, c.ID)
 		testutil.Equal(t, c.Points, 1)
 	}
-	testutil.Equal(t, order, []string{"policy-enforced", "workload-unchanged", "declared-context", "runtime-context", "serves-port-80"})
+	testutil.Equal(t, order, []string{"policy-enforced", "workload-unchanged", "declared-context", "gateway-ready", "runtime-context"})
 	pe := crit["policy-enforced"]
 	testutil.Equal(t, pe.Kind, model.CriterionField)
 	testutil.Equal(t, pe.Target, model.ObjectRef{APIVersion: "v1", Kind: "Namespace", Name: "${namespace}"})
@@ -1771,35 +1770,41 @@ func TestSecurityGatewayContracts(t *testing.T) {
 	testutil.Equal(t, rc.Kind, model.CriterionSecurityContext)
 	testutil.Equal(t, rc.Target.Kind+" "+rc.Target.Name, "Deployment gateway")
 	sameJSON(t, "runtime-context args", rc.Args, map[string]any{"behavior": map[string]any{"container": "gateway", "uid": 10001, "no_capabilities": true, "read_only_root": true}})
-	// A Pod the policy rejects does not exist: without this dependency the
-	// criterion would be ERROR "no running pod" instead of FAIL.
-	testutil.Equal(t, rc.DependsOn, []string{"declared-context"})
-	sv := crit["serves-port-80"]
-	testutil.Equal(t, sv.Kind, model.CriterionHTTP)
-	testutil.Equal(t, sv.Target.Kind+" "+sv.Target.Name, "Service gateway")
-	testutil.Equal(t, fmt.Sprint(sv.Args["port"]), "80")
-	testutil.Equal(t, sv.Args["body_marker"], any("gateway-ok"))
-	testutil.Equal(t, sv.DependsOn, []string{"runtime-context"})
-	testutil.Equal(t, sv.Timeout, 60*time.Second)
-	// No ready or log criterion could meet "no Pods because admission blocked them".
+	// gateway-ready needs declared-context: a Pod the policy rejects does not
+	// exist, and `ready` would be ERROR ("the controller created no pods")
+	// instead of FAIL. runtime-context needs gateway-ready: the behaviour
+	// check does not wait and a Pending Pod is insufficient evidence (ERROR),
+	// while `ready` waits for a Running, stable Pod.
+	gr := crit["gateway-ready"]
+	testutil.Equal(t, gr.Kind, model.CriterionReady)
+	testutil.Equal(t, gr.Target.APIVersion+" "+gr.Target.Kind+" "+gr.Target.Name, "apps/v1 Deployment gateway")
+	testutil.Equal(t, fmt.Sprint(gr.Args["replicas"]), "1")
+	testutil.Equal(t, gr.Timeout, 90*time.Second)
+	testutil.Equal(t, gr.DependsOn, []string{"declared-context"})
+	testutil.Equal(t, rc.DependsOn, []string{"gateway-ready"})
+	// Only field, security-context and one ready criterion: no http or log
+	// criterion exists, so nothing meets a Pod-less workload undeclared.
 	for _, c := range p.Criteria {
-		if c.Kind == model.CriterionReady || c.Kind == model.CriterionLogs {
-			t.Errorf("criterion %s would meet a Pod-less workload", c.ID)
+		switch c.Kind {
+		case model.CriterionField, model.CriterionSecurityContext, model.CriterionReady:
+		default:
+			t.Errorf("criterion %s has unexpected kind %s", c.ID, c.Kind)
 		}
 	}
 
 	// Every pinned literal is stated in the question; nothing ungraded is forbidden.
 	for _, lit := range []string{
-		"`gateway`", "port 80, targetPort 8080", "`restricted`", "`" + enforce + "`", "`10001`", "`RuntimeDefault`", "`/www`", "`emptyDir`",
-		"`docker.io/library/busybox:1.37.0`", "the provided command", "`gateway-ok`", "port 8080",
+		"`gateway`", "`restricted`", "`" + enforce + "`", "`10001`", "`RuntimeDefault`", "`/www`", "`emptyDir`",
+		"`docker.io/library/busybox:1.37.0`", "the provided command",
 		"removing it or setting another value loses the point", "`runAsUser`", "`runAsNonRoot`", "`allowPrivilegeEscalation`", "`capabilities.drop`", "`readOnlyRootFilesystem`",
-		"a container value overrides the Pod value", "exist only on the container", "grade after the Pod is Running", "this point needs the third one", "60-second limit", "this point needs the fourth one",
+		"a container value overrides the Pod value", "exist only on the container", "1 Ready replica", "10-second stability window, 90-second observation limit",
+		"this point needs the third one, because a workload the policy rejects has no Pod", "this point needs the fourth one", "only examined once it is Ready",
 	} {
 		if !strings.Contains(q, lit) {
 			t.Errorf("question must state %q", lit)
 		}
 	}
-	for _, ungraded := range []string{enforceV, "replicas", "do not change", "Do not change", "NET_BIND_SERVICE"} {
+	for _, ungraded := range []string{enforceV, "replicas", "do not change", "Do not change", "NET_BIND_SERVICE", "Service", "gateway-ok", "port 80", "serve"} {
 		if strings.Contains(q, ungraded) {
 			t.Errorf("the question must not mention %q: nothing grades it", ungraded)
 		}
@@ -1863,17 +1868,17 @@ func TestSecurityGatewayContracts(t *testing.T) {
 
 	// Handout and explanation.
 	readme := string(p.Files["setup/provided/README.txt"])
-	for _, lit := range []string{enforce + "=restricted", "Keep the label at restricted", "keep the image and the command of container gateway", "user ID 10001", "all capabilities dropped", "seccomp RuntimeDefault", "read-only root filesystem", "/www", "gateway-ok"} {
+	for _, lit := range []string{enforce + "=restricted", "Keep the label at restricted", "keep the image and the command of container gateway", "user ID 10001", "all capabilities dropped", "seccomp RuntimeDefault", "read-only root filesystem", "/www", "The Pod must be Ready"} {
 		if !strings.Contains(readme, lit) {
 			t.Errorf("the handout must state %q", lit)
 		}
 	}
-	for _, ungraded := range []string{enforceV, "replicas", "do not change", "Do not change"} {
+	for _, ungraded := range []string{enforceV, "replicas", "do not change", "Do not change", "Service", "gateway-ok", "port 80"} {
 		if strings.Contains(readme, ungraded) {
 			t.Errorf("the handout must not mention %q: nothing grades it", ungraded)
 		}
 	}
-	for _, lit := range []string{"FailedCreate", "violates PodSecurity", "ERROR", "NET_BIND_SERVICE", "8080", "emptyDir", "policy-weakened", "policy-removed-and-hardened", "runs-as-root", "alternative-pod-level-context"} {
+	for _, lit := range []string{"FailedCreate", "violates PodSecurity", "ERROR", "NET_BIND_SERVICE", "8080", "emptyDir", "gateway-ready", "hostPath", "알려진 경계 사례", "policy-weakened", "policy-removed-and-hardened", "runs-as-root", "alternative-pod-level-context"} {
 		if !strings.Contains(string(p.Files["explanation.ko.md"]), lit) {
 			t.Errorf("the explanation must mention %q", lit)
 		}

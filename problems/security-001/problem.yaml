@@ -106,10 +106,29 @@
       }
     },
     {
+      "id": "gateway-ready",
+      "kind": "ready",
+      "points": 1,
+      "feedback": "Deployment gateway의 replica 1개가 Ready여야 합니다. 이 항목은 declared-context가 통과해야 평가됩니다: 정책이 거부한 워크로드에는 Pod가 없기 때문입니다. 읽기 전용 루트 파일시스템에서는 앱이 /www에 파일을 쓸 수 있도록 /www를 emptyDir로 마운트해 두어야 컨테이너가 계속 실행됩니다. kubectl get pods 와 kubectl logs, kubectl describe pod 의 Events를 확인하세요.",
+      "target": {
+        "api_version": "apps/v1",
+        "kind": "Deployment",
+        "namespace": "${namespace}",
+        "name": "gateway"
+      },
+      "args": {
+        "replicas": 1
+      },
+      "depends_on": [
+        "declared-context"
+      ],
+      "timeout": "90s"
+    },
+    {
       "id": "runtime-context",
       "kind": "security-context",
       "points": 1,
-      "feedback": "실행 중인 gateway Pod의 프로세스가 실제로 UID 10001로 돌고, 유효 capability가 없으며, 루트 파일시스템이 읽기 전용이어야 합니다. 선언만으로는 부족하며 채점기가 실행 중인 Pod에서 id, /proc/self/status, /proc/self/mountinfo를 읽습니다. 이 항목은 declared-context를 먼저 통과해야 평가되고, 실행 중인 Pod가 아직 없으면 Pod가 Running이 될 때까지 기다렸다가 다시 채점하세요.",
+      "feedback": "실행 중인 gateway Pod의 프로세스가 실제로 UID 10001로 돌고, 유효 capability가 없으며, 루트 파일시스템이 읽기 전용이어야 합니다. 선언만으로는 부족하며 채점기가 실행 중인 Pod에서 id, /proc/self/status, /proc/self/mountinfo를 읽습니다. 이 항목은 gateway-ready가 통과해야 평가됩니다.",
       "target": {
         "api_version": "apps/v1",
         "kind": "Deployment",
@@ -125,29 +144,8 @@
         }
       },
       "depends_on": [
-        "declared-context"
+        "gateway-ready"
       ]
-    },
-    {
-      "id": "serves-port-80",
-      "kind": "http",
-      "points": 1,
-      "feedback": "Service gateway의 80번 포트가 gateway-ok를 반환해야 합니다. 앱은 8080에서 /www의 파일을 제공하므로 읽기 전용 루트 파일시스템에서도 /www는 emptyDir로 쓰기 가능해야 합니다. Pod 로그와 kubectl get endpoints gateway 를 확인하세요.",
-      "target": {
-        "api_version": "v1",
-        "kind": "Service",
-        "namespace": "${namespace}",
-        "name": "gateway"
-      },
-      "args": {
-        "port": 80,
-        "path": "/",
-        "body_marker": "gateway-ok"
-      },
-      "depends_on": [
-        "runtime-context"
-      ],
-      "timeout": "60s"
     }
   ],
   "setup": [
@@ -171,7 +169,7 @@
     "workload-unchanged": "PASS",
     "declared-context": "FAIL",
     "runtime-context": "FAIL",
-    "serves-port-80": "FAIL"
+    "gateway-ready": "FAIL"
   },
   "initial_score": 2,
   "cases": [
@@ -190,7 +188,7 @@
         "workload-unchanged": "PASS",
         "declared-context": "FAIL",
         "runtime-context": "FAIL",
-        "serves-port-80": "FAIL"
+        "gateway-ready": "FAIL"
       },
       "expected_score": 1
     },
@@ -209,7 +207,7 @@
         "workload-unchanged": "PASS",
         "declared-context": "PASS",
         "runtime-context": "PASS",
-        "serves-port-80": "PASS"
+        "gateway-ready": "PASS"
       },
       "expected_score": 4
     },
@@ -228,7 +226,7 @@
         "workload-unchanged": "PASS",
         "declared-context": "FAIL",
         "runtime-context": "FAIL",
-        "serves-port-80": "FAIL"
+        "gateway-ready": "FAIL"
       },
       "expected_score": 2
     },
@@ -247,7 +245,7 @@
         "workload-unchanged": "PASS",
         "declared-context": "PASS",
         "runtime-context": "PASS",
-        "serves-port-80": "PASS"
+        "gateway-ready": "PASS"
       },
       "expected_score": 5
     }

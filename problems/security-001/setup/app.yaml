@@ -46,17 +46,3 @@ spec:
       volumes:
       - name: www
         emptyDir: {}
----
-apiVersion: v1
-kind: Service
-metadata:
-  name: gateway
-  namespace: ${namespace}
-spec:
-  selector:
-    app: gateway
-  ports:
-  - name: http
-    port: 80
-    targetPort: 8080
-    protocol: TCP
