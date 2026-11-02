@@ -1,0 +1,352 @@
+{
+  "schema_version": 1,
+  "id": "resources-001",
+  "version": "1.0.0",
+  "title": "Fit a Deployment into a ResourceQuota with requests, limits and a LimitRange",
+  "domain": "environment-security",
+  "difficulty": "medium",
+  "type": "troubleshoot",
+  "tags": [
+    "environment-security",
+    "resources",
+    "resourcequota",
+    "limitrange"
+  ],
+  "competencies": [
+    "requests, limits and quotas"
+  ],
+  "capabilities": [],
+  "parameters": {
+    "namespace": [
+      "jk-resources-001-a",
+      "jk-resources-001-b"
+    ]
+  },
+  "namespace": "${namespace}",
+  "budget": {
+    "cpu": "500m",
+    "memory": "256Mi"
+  },
+  "criteria": [
+    {
+      "id": "worker-resources",
+      "kind": "field",
+      "points": 1,
+      "feedback": "Deployment worker\uc758 \ucee8\ud14c\uc774\ub108 worker\uc5d0 requests cpu 100m / memory 64Mi, limits cpu 200m / memory 128Mi\ub97c \uc9c0\uc815\ud558\uc138\uc694. ResourceQuota\uac00 cpu\u00b7memory requests/limits\ub97c \uc694\uad6c\ud558\ubbc0\ub85c \ub9ac\uc18c\uc2a4\uac00 \uc5c6\ub294 Pod\ub294 \uc0dd\uc131\ub418\uc9c0 \uc54a\uc2b5\ub2c8\ub2e4. kubectl describe replicaset \uc758 Events \uc5d0\uc11c 'forbidden: failed quota' \uba54\uc2dc\uc9c0\ub97c \ud655\uc778\ud558\uc138\uc694. kubectl set resources \ub610\ub294 manifest\uc758 resources \ube14\ub85d\uc744 \uc4f0\uba74 \ub429\ub2c8\ub2e4.",
+      "target": {
+        "api_version": "apps/v1",
+        "kind": "Deployment",
+        "namespace": "${namespace}",
+        "name": "worker"
+      },
+      "args": {
+        "fields": [
+          {
+            "path": "spec.template.spec.containers[name=worker].resources.requests.cpu",
+            "equals": "100m"
+          },
+          {
+            "path": "spec.template.spec.containers[name=worker].resources.requests.memory",
+            "equals": "64Mi"
+          },
+          {
+            "path": "spec.template.spec.containers[name=worker].resources.limits.cpu",
+            "equals": "200m"
+          },
+          {
+            "path": "spec.template.spec.containers[name=worker].resources.limits.memory",
+            "equals": "128Mi"
+          }
+        ]
+      }
+    },
+    {
+      "id": "quota-intact",
+      "kind": "field",
+      "points": 1,
+      "feedback": "ResourceQuota team-quota\ub97c \uc9c0\uc6b0\uac70\ub098 \ubc14\uafb8\uba74 \uc548 \ub429\ub2c8\ub2e4. hard \uac12\uc740 requests.cpu 500m, limits.cpu 1, requests.memory 256Mi, limits.memory 512Mi, pods 4 \uadf8\ub300\ub85c\uc5ec\uc57c \ud569\ub2c8\ub2e4. \ucffc\ud130\ub97c \ub298\ub9ac\ub294 \ub300\uc2e0 worker\uc758 \uc694\uccad\ub7c9\uc744 \ucffc\ud130 \uc548\uc5d0 \ub9de\ucd94\uc138\uc694.",
+      "target": {
+        "api_version": "v1",
+        "kind": "ResourceQuota",
+        "namespace": "${namespace}",
+        "name": "team-quota"
+      },
+      "args": {
+        "fields": [
+          {
+            "path": "spec.hard['requests.cpu']",
+            "equals": "500m"
+          },
+          {
+            "path": "spec.hard['limits.cpu']",
+            "equals": "1"
+          },
+          {
+            "path": "spec.hard['requests.memory']",
+            "equals": "256Mi"
+          },
+          {
+            "path": "spec.hard['limits.memory']",
+            "equals": "512Mi"
+          },
+          {
+            "path": "spec.hard.pods",
+            "equals": "4"
+          }
+        ]
+      }
+    },
+    {
+      "id": "worker-ready",
+      "kind": "ready",
+      "points": 1,
+      "feedback": "Deployment worker\uc758 replica 2\uac1c\uac00 Ready\uc5ec\uc57c \ud569\ub2c8\ub2e4. \ub9ac\uc18c\uc2a4 \uac12\uc774 \ub9de\uc9c0 \uc54a\uc73c\uba74 \ucffc\ud130\uac00 Pod \uc0dd\uc131\uc744 \uac70\ubd80\ud569\ub2c8\ub2e4. kubectl rollout status deployment/worker \uc640 kubectl describe resourcequota team-quota \ub85c \uc0ac\uc6a9\ub7c9\uacfc \ub0a8\uc740 \ud55c\ub3c4\ub97c \ud655\uc778\ud558\uc138\uc694.",
+      "target": {
+        "api_version": "apps/v1",
+        "kind": "Deployment",
+        "namespace": "${namespace}",
+        "name": "worker"
+      },
+      "args": {
+        "replicas": 2
+      },
+      "depends_on": [
+        "worker-resources"
+      ],
+      "timeout": "90s"
+    },
+    {
+      "id": "quota-used",
+      "kind": "field",
+      "points": 1,
+      "feedback": "\ucffc\ud130\uac00 \uc9d1\uacc4\ud55c requests.cpu \uc0ac\uc6a9\ub7c9\uc740 Pod 2\uac1c x 100m = 200m\uc774\uc5b4\uc57c \ud569\ub2c8\ub2e4. worker\uac00 Ready\uc774\uace0 ResourceQuota team-quota\uac00 \uadf8\ub300\ub85c\uc77c \ub54c kubectl describe resourcequota team-quota \uc758 Used \uc5f4\uc744 \ud655\uc778\ud558\uc138\uc694.",
+      "target": {
+        "api_version": "v1",
+        "kind": "ResourceQuota",
+        "namespace": "${namespace}",
+        "name": "team-quota"
+      },
+      "args": {
+        "wait": true,
+        "fields": [
+          {
+            "path": "status.used['requests.cpu']",
+            "equals": "200m",
+            "compare": "quantity"
+          }
+        ]
+      },
+      "depends_on": [
+        "worker-ready",
+        "quota-intact"
+      ],
+      "timeout": "60s"
+    },
+    {
+      "id": "limitrange-defaults",
+      "kind": "field",
+      "points": 1,
+      "feedback": "LimitRange defaults\uc758 type Container \ud56d\ubaa9\uc5d0 defaultRequest cpu 50m / memory 32Mi, default(limit) cpu 100m / memory 64Mi\ub97c \uc9c0\uc815\ud558\uc138\uc694. LimitRange\ub294 \ub9ac\uc18c\uc2a4\ub97c \uc801\uc9c0 \uc54a\uc740 \ucee8\ud14c\uc774\ub108\uc5d0 \uae30\ubcf8\uac12\uc744 \ub123\uc5b4 \uc90d\ub2c8\ub2e4. \uc774\ub984\uc740 defaults, \ub124\uc784\uc2a4\ud398\uc774\uc2a4\ub294 \ubb38\uc81c\uc758 \ub124\uc784\uc2a4\ud398\uc774\uc2a4\uc785\ub2c8\ub2e4.",
+      "target": {
+        "api_version": "v1",
+        "kind": "LimitRange",
+        "namespace": "${namespace}",
+        "name": "defaults"
+      },
+      "args": {
+        "fields": [
+          {
+            "path": "spec.limits[type=Container].defaultRequest.cpu",
+            "equals": "50m",
+            "compare": "quantity"
+          },
+          {
+            "path": "spec.limits[type=Container].defaultRequest.memory",
+            "equals": "32Mi",
+            "compare": "quantity"
+          },
+          {
+            "path": "spec.limits[type=Container].default.cpu",
+            "equals": "100m",
+            "compare": "quantity"
+          },
+          {
+            "path": "spec.limits[type=Container].default.memory",
+            "equals": "64Mi",
+            "compare": "quantity"
+          }
+        ]
+      }
+    }
+  ],
+  "setup": [
+    {
+      "kind": "apply",
+      "args": {
+        "path": "setup/app.yaml"
+      }
+    }
+  ],
+  "solution": [
+    {
+      "kind": "apply",
+      "args": {
+        "path": "solution/worker.yaml"
+      }
+    },
+    {
+      "kind": "apply",
+      "args": {
+        "path": "solution/limitrange.yaml"
+      }
+    }
+  ],
+  "initial_expected": {
+    "worker-resources": "FAIL",
+    "quota-intact": "PASS",
+    "worker-ready": "FAIL",
+    "quota-used": "FAIL",
+    "limitrange-defaults": "FAIL"
+  },
+  "initial_score": 1,
+  "cases": [
+    {
+      "id": "quota-deleted",
+      "actions": [
+        {
+          "kind": "delete-owned",
+          "args": {
+            "targets": [
+              {
+                "api_version": "v1",
+                "kind": "ResourceQuota",
+                "namespace": "${namespace}",
+                "name": "team-quota"
+              }
+            ]
+          }
+        },
+        {
+          "kind": "apply",
+          "args": {
+            "path": "solution/worker.yaml"
+          }
+        },
+        {
+          "kind": "apply",
+          "args": {
+            "path": "solution/limitrange.yaml"
+          }
+        }
+      ],
+      "expected": {
+        "worker-resources": "PASS",
+        "quota-intact": "FAIL",
+        "worker-ready": "PASS",
+        "quota-used": "FAIL",
+        "limitrange-defaults": "PASS"
+      },
+      "expected_score": 3
+    },
+    {
+      "id": "quota-raised",
+      "actions": [
+        {
+          "kind": "apply",
+          "args": {
+            "path": "cases/quota-raised.yaml"
+          }
+        },
+        {
+          "kind": "apply",
+          "args": {
+            "path": "solution/worker.yaml"
+          }
+        },
+        {
+          "kind": "apply",
+          "args": {
+            "path": "solution/limitrange.yaml"
+          }
+        }
+      ],
+      "expected": {
+        "worker-resources": "PASS",
+        "quota-intact": "FAIL",
+        "worker-ready": "PASS",
+        "quota-used": "FAIL",
+        "limitrange-defaults": "PASS"
+      },
+      "expected_score": 3
+    },
+    {
+      "id": "oversized-requests",
+      "actions": [
+        {
+          "kind": "apply",
+          "args": {
+            "path": "cases/oversized-requests.yaml"
+          }
+        },
+        {
+          "kind": "apply",
+          "args": {
+            "path": "solution/limitrange.yaml"
+          }
+        }
+      ],
+      "expected": {
+        "worker-resources": "FAIL",
+        "quota-intact": "PASS",
+        "worker-ready": "FAIL",
+        "quota-used": "FAIL",
+        "limitrange-defaults": "PASS"
+      },
+      "expected_score": 2
+    },
+    {
+      "id": "limitrange-missing",
+      "actions": [
+        {
+          "kind": "apply",
+          "args": {
+            "path": "solution/worker.yaml"
+          }
+        }
+      ],
+      "expected": {
+        "worker-resources": "PASS",
+        "quota-intact": "PASS",
+        "worker-ready": "PASS",
+        "quota-used": "PASS",
+        "limitrange-defaults": "FAIL"
+      },
+      "expected_score": 4
+    },
+    {
+      "id": "alternative-decimal-quantities",
+      "actions": [
+        {
+          "kind": "apply",
+          "args": {
+            "path": "cases/alternative-decimal-quantities.yaml"
+          }
+        },
+        {
+          "kind": "apply",
+          "args": {
+            "path": "cases/alternative-limitrange.yaml"
+          }
+        }
+      ],
+      "expected": {
+        "worker-resources": "PASS",
+        "quota-intact": "PASS",
+        "worker-ready": "PASS",
+        "quota-used": "PASS",
+        "limitrange-defaults": "PASS"
+      },
+      "expected_score": 5
+    }
+  ]
+}

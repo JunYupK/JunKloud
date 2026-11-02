@@ -1,0 +1,32 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: worker
+  namespace: ${namespace}
+  labels:
+    app: worker
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app: worker
+  template:
+    metadata:
+      labels:
+        app: worker
+    spec:
+      containers:
+      - name: worker
+        image: docker.io/library/busybox:1.37.0
+        imagePullPolicy: Never
+        command:
+        - sh
+        - -c
+        - sleep 3600
+        resources:
+          requests:
+            cpu: 0.1
+            memory: 67108864
+          limits:
+            cpu: 0.2
+            memory: 134217728

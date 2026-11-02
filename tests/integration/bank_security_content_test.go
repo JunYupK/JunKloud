@@ -7,6 +7,7 @@ import (
 	"os"
 	"path/filepath"
 	"slices"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -15,6 +16,7 @@ import (
 	"github.com/JunYupK/JunKloud/internal/model"
 	"github.com/JunYupK/JunKloud/internal/problem"
 	"github.com/JunYupK/JunKloud/internal/testutil"
+	"k8s.io/apimachinery/pkg/api/resource"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime"
 )
@@ -38,6 +40,13 @@ var securityCases = map[string]map[string]int{
 		"sa-not-used":             4,
 		"alternative-split-roles": 5,
 	},
+	"resources-001": {
+		"quota-deleted":                  3,
+		"quota-raised":                   3,
+		"oversized-requests":             2,
+		"limitrange-missing":             4,
+		"alternative-decimal-quantities": 5,
+	},
 }
 
 // securityCapabilities and securityInitialScores pin each package's declared
@@ -45,11 +54,13 @@ var securityCases = map[string]map[string]int{
 var securityCapabilities = map[string][]string{
 	"custom-resource-001": nil,
 	"access-001":          nil,
+	"resources-001":       nil,
 }
 
 var securityInitialScores = map[string]int{
 	"custom-resource-001": 0,
 	"access-001":          2,
+	"resources-001":       1,
 }
 
 // presentSecurityIDs returns the security IDs whose package exists, so the
@@ -773,5 +784,392 @@ func TestSecurityAccessContracts(t *testing.T) {
 	}
 	if strings.Contains(q, "automountServiceAccountToken: true") {
 		t.Error("the question must not demand an explicit automount value")
+	}
+}
+
+// ---------------------------------------------------------- resources-001
+
+// resourcesGroup is what a group of actions does: the objects it applies,
+// keyed by kind (at most one per kind), and the objects it deletes first.
+type resourcesGroup struct {
+	objs    map[string]map[string]any
+	deleted []model.ObjectRef
+}
+
+func resourcesActions(t *testing.T, p model.Problem, f model.FrozenProblem, label string, actions []model.Action) resourcesGroup {
+	t.Helper()
+	built, err := author.BuildActions(p.Files, f.Parameters, actions)
+	testutil.NoError(t, err)
+	g := resourcesGroup{objs: map[string]map[string]any{}}
+	for _, a := range built {
+		switch a.Kind {
+		case model.ActionApply:
+			for _, o := range a.Objects {
+				kind, _ := o["kind"].(string)
+				if _, dup := g.objs[kind]; dup {
+					t.Fatalf("%s: two %s objects", label, kind)
+				}
+				g.objs[kind] = o
+			}
+		case model.ActionDeleteOwned:
+			g.deleted = append(g.deleted, a.Targets...)
+		default:
+			t.Fatalf("%s: resources-001 uses only apply and delete-owned, got %s", label, a.Kind)
+		}
+	}
+	return g
+}
+
+func (g resourcesGroup) kinds() []string {
+	var out []string
+	for k := range g.objs {
+		out = append(out, k)
+	}
+	slices.Sort(out)
+	return out
+}
+
+// workerContainer returns the single container of a worker Deployment.
+func workerContainer(t *testing.T, label string, deploy map[string]any) map[string]any {
+	t.Helper()
+	cs, ok := nestedMap(t, deploy, "spec", "template", "spec")["containers"].([]any)
+	if !ok || len(cs) != 1 {
+		t.Fatalf("%s: want exactly one container", label)
+	}
+	return cs[0].(map[string]any)
+}
+
+// quantityMap parses a {name: quantity} object into semantic quantities.
+func quantityMap(t *testing.T, label string, m map[string]any) map[string]resource.Quantity {
+	t.Helper()
+	out := map[string]resource.Quantity{}
+	for k, v := range m {
+		text := fmt.Sprint(v)
+		if n, isFloat := v.(float64); isFloat {
+			text = strconv.FormatFloat(n, 'f', -1, 64)
+		}
+		q, err := resource.ParseQuantity(text)
+		if err != nil {
+			t.Fatalf("%s: %s = %v is not a quantity: %v", label, k, v, err)
+		}
+		out[k] = q
+	}
+	return out
+}
+
+// quantityStrings renders quantities in one canonical notation (milli-units),
+// so that 64Mi and 67108864 compare equal.
+func quantityStrings(m map[string]resource.Quantity) map[string]string {
+	out := map[string]string{}
+	for k, q := range m {
+		out[k] = strconv.FormatInt(q.MilliValue(), 10)
+	}
+	return out
+}
+
+// canonQuantities canonicalises a {name: "100m"} literal the same way.
+func canonQuantities(t *testing.T, m map[string]string) map[string]string {
+	t.Helper()
+	parsed := map[string]resource.Quantity{}
+	for k, v := range m {
+		parsed[k] = resource.MustParse(v)
+	}
+	return quantityStrings(parsed)
+}
+
+// resources-001: the quota, the Deployment and the LimitRange carry the
+// literals the question and the criteria state, the correct answer fits the
+// quota while the oversized one does not, and each wrong case differs from the
+// solution only in the mistake it is named after.
+func TestSecurityResourcesContracts(t *testing.T) {
+	p := loadGroup(t, []string{"resources-001"})[0]
+	f, err := problem.Freeze(p, 1)
+	testutil.NoError(t, err)
+	ns := f.Namespace
+	q := string(p.Files[problem.QuestionFile])
+
+	// No cluster-scoped object belongs to this problem.
+	testutil.Equal(t, p.Scope.Namespaces == nil, true)
+	testutil.Equal(t, len(p.Scope.ClusterResources), 0)
+
+	// Setup: the quota and the Deployment without resources.
+	setup := resourcesActions(t, p, f, "setup", p.Setup)
+	testutil.Equal(t, setup.kinds(), []string{"Deployment", "ResourceQuota"})
+	quota := setup.objs["ResourceQuota"]
+	testutil.Equal(t, nestedString(t, quota, "metadata", "name"), "team-quota")
+	testutil.Equal(t, nestedString(t, quota, "metadata", "namespace"), ns)
+	hard := map[string]string{"requests.cpu": "500m", "limits.cpu": "1", "requests.memory": "256Mi", "limits.memory": "512Mi", "pods": "4"}
+	testutil.Equal(t, quantityStrings(quantityMap(t, "setup quota", nestedMap(t, quota, "spec", "hard"))), canonQuantities(t, hard))
+	deploy := setup.objs["Deployment"]
+	testutil.Equal(t, nestedString(t, deploy, "metadata", "name"), "worker")
+	testutil.Equal(t, nestedString(t, deploy, "metadata", "namespace"), ns)
+	testutil.Equal(t, nestedString(t, deploy, "spec", "replicas"), "2")
+	c0 := workerContainer(t, "setup", deploy)
+	testutil.Equal(t, c0["name"], any("worker"))
+	testutil.Equal(t, c0["image"], any("docker.io/library/busybox:1.37.0"))
+	testutil.Equal(t, c0["command"], any([]any{"sh", "-c", "sleep 3600"}))
+	if _, ok := c0["resources"]; ok {
+		t.Error("the provided worker must declare no resources: that is what the quota rejects")
+	}
+
+	// Criteria: ids, kinds, dependencies, timeouts.
+	crit := map[string]model.Criterion{}
+	var order []string
+	for _, c := range p.Criteria {
+		crit[c.ID] = c
+		order = append(order, c.ID)
+	}
+	testutil.Equal(t, order, []string{"worker-resources", "quota-intact", "worker-ready", "quota-used", "limitrange-defaults"})
+	fieldsOf := func(id string) map[string]string {
+		t.Helper()
+		c := crit[id]
+		testutil.Equal(t, c.Kind, model.CriterionField)
+		out := map[string]string{}
+		for _, fld := range c.Args["fields"].([]any) {
+			m := fld.(map[string]any)
+			out[m["path"].(string)] = fmt.Sprint(m["equals"])
+		}
+		return out
+	}
+	target := func(id, apiVersion, kind, name string) {
+		t.Helper()
+		c := crit[id]
+		testutil.Equal(t, c.Target.APIVersion, apiVersion)
+		testutil.Equal(t, c.Target.Kind, kind)
+		testutil.Equal(t, c.Target.Name, name)
+		testutil.Equal(t, c.Target.Namespace, "${namespace}")
+	}
+	target("worker-resources", "apps/v1", "Deployment", "worker")
+	target("quota-intact", "v1", "ResourceQuota", "team-quota")
+	target("worker-ready", "apps/v1", "Deployment", "worker")
+	target("quota-used", "v1", "ResourceQuota", "team-quota")
+	target("limitrange-defaults", "v1", "LimitRange", "defaults")
+
+	const cpath = "spec.template.spec.containers[name=worker].resources."
+	wantRes := map[string]string{
+		cpath + "requests.cpu": "100m", cpath + "requests.memory": "64Mi",
+		cpath + "limits.cpu": "200m", cpath + "limits.memory": "128Mi",
+	}
+	testutil.Equal(t, fieldsOf("worker-resources"), wantRes)
+	testutil.Equal(t, crit["worker-resources"].DependsOn == nil, true)
+	testutil.Equal(t, fieldsOf("quota-intact"), map[string]string{
+		"spec.hard['requests.cpu']": "500m", "spec.hard['limits.cpu']": "1",
+		"spec.hard['requests.memory']": "256Mi", "spec.hard['limits.memory']": "512Mi", "spec.hard.pods": "4",
+	})
+	testutil.Equal(t, crit["quota-intact"].DependsOn == nil, true)
+	ready := crit["worker-ready"]
+	testutil.Equal(t, ready.Kind, model.CriterionReady)
+	testutil.Equal(t, fmt.Sprint(ready.Args["replicas"]), "2")
+	testutil.Equal(t, ready.Timeout, 90*time.Second)
+	// A blocked Pod is "no Pods", which `ready` reports as ERROR: the
+	// dependency on the declared resources turns it into a prerequisite FAIL.
+	testutil.Equal(t, ready.DependsOn, []string{"worker-resources"})
+	used := crit["quota-used"]
+	testutil.Equal(t, fieldsOf("quota-used"), map[string]string{"status.used['requests.cpu']": "200m"})
+	testutil.Equal(t, used.Args["wait"], any(true))
+	testutil.Equal(t, used.Timeout, 60*time.Second)
+	testutil.Equal(t, used.DependsOn, []string{"worker-ready", "quota-intact"})
+	// status.used is not an auto-quantity path, so the comparison is explicit.
+	for _, fld := range used.Args["fields"].([]any) {
+		testutil.Equal(t, fld.(map[string]any)["compare"], any("quantity"))
+	}
+	wantLR := map[string]string{
+		"spec.limits[type=Container].defaultRequest.cpu": "50m", "spec.limits[type=Container].defaultRequest.memory": "32Mi",
+		"spec.limits[type=Container].default.cpu": "100m", "spec.limits[type=Container].default.memory": "64Mi",
+	}
+	testutil.Equal(t, fieldsOf("limitrange-defaults"), wantLR)
+	testutil.Equal(t, crit["limitrange-defaults"].DependsOn == nil, true)
+	for _, fld := range crit["limitrange-defaults"].Args["fields"].([]any) {
+		testutil.Equal(t, fld.(map[string]any)["compare"], any("quantity"))
+	}
+
+	// Every pinned literal and dependency is stated in the question.
+	for _, lit := range []string{
+		"`requests.cpu` `500m`", "`limits.cpu` `1`", "`requests.memory` `256Mi`", "`limits.memory` `512Mi`", "`pods` `4`",
+		"requests `cpu: 100m`, `memory: 64Mi`", "limits `cpu: 200m`, `memory: 128Mi`",
+		"LimitRange `defaults`", "`defaultRequest` is `cpu: 50m`, `memory: 32Mi`", "`default` (the default limit) is `cpu: 100m`, `memory: 64Mi`",
+		"Do not delete or change `team-quota`", "its five hard values must stay as they are",
+		"`0.1` for `100m`", "`67108864` for `64Mi`",
+		"2 Ready replicas", "10-second stability window", "90-second observation limit",
+		"this point needs the first one", "`200m`", "up to 60 seconds", "this point needs the third and the second one",
+	} {
+		if !strings.Contains(q, lit) {
+			t.Errorf("question must state %q", lit)
+		}
+	}
+
+	// Solution: the provided Deployment plus the resources, and the LimitRange.
+	sol := resourcesActions(t, p, f, "solution", p.Solution)
+	testutil.Equal(t, sol.kinds(), []string{"Deployment", "LimitRange"})
+	testutil.Equal(t, len(sol.deleted), 0)
+	solDeploy, solLR := sol.objs["Deployment"], sol.objs["LimitRange"]
+	solC := workerContainer(t, "solution", solDeploy)
+	resOf := func(c map[string]any) map[string]any { return c["resources"].(map[string]any) }
+	requests := quantityMap(t, "solution requests", resOf(solC)["requests"].(map[string]any))
+	limits := quantityMap(t, "solution limits", resOf(solC)["limits"].(map[string]any))
+	testutil.Equal(t, quantityStrings(requests), canonQuantities(t, map[string]string{"cpu": "100m", "memory": "64Mi"}))
+	testutil.Equal(t, quantityStrings(limits), canonQuantities(t, map[string]string{"cpu": "200m", "memory": "128Mi"}))
+	withoutRes := deepCopyObject(solDeploy)
+	unstructured.RemoveNestedField(withoutRes, "spec", "template", "spec", "containers")
+	provided := deepCopyObject(deploy)
+	unstructured.RemoveNestedField(provided, "spec", "template", "spec", "containers")
+	testutil.Equal(t, withoutRes, provided)
+	provC := deepCopyObject(c0)
+	solNoRes := deepCopyObject(solC)
+	delete(solNoRes, "resources")
+	testutil.Equal(t, solNoRes, provC)
+
+	// LimitRange: one Container entry with exactly the four defaults.
+	testutil.Equal(t, nestedString(t, solLR, "metadata", "name"), "defaults")
+	testutil.Equal(t, nestedString(t, solLR, "metadata", "namespace"), ns)
+	lrEntries := nestedMap(t, solLR, "spec")["limits"].([]any)
+	testutil.Equal(t, len(lrEntries), 1)
+	lr0 := lrEntries[0].(map[string]any)
+	testutil.Equal(t, lr0["type"], any("Container"))
+	lrOf := func(e map[string]any) map[string]string {
+		out := map[string]string{}
+		for _, key := range []string{"defaultRequest", "default"} {
+			for res, qty := range quantityStrings(quantityMap(t, "LimitRange "+key, e[key].(map[string]any))) {
+				out["spec.limits[type=Container]."+key+"."+res] = qty
+			}
+		}
+		return out
+	}
+	testutil.Equal(t, lrOf(lr0), canonQuantities(t, wantLR))
+	testutil.Equal(t, len(lr0), 3) // type, defaultRequest, default
+
+	// The correct answer fits the quota with the stated stability margin;
+	// the used CPU the criterion expects is replicas x the CPU request.
+	replicas := int64(2)
+	fit := func(label string, rep int64, req, lim map[string]resource.Quantity) bool {
+		t.Helper()
+		ok := true
+		for key, qty := range map[string]resource.Quantity{
+			"requests.cpu": req["cpu"], "requests.memory": req["memory"], "limits.cpu": lim["cpu"], "limits.memory": lim["memory"],
+		} {
+			total := qty.DeepCopy()
+			total.Set(0)
+			for range rep {
+				total.Add(qty)
+			}
+			h := resource.MustParse(hard[key])
+			if total.Cmp(h) > 0 {
+				ok = false
+				t.Logf("%s: %d x %s %s exceeds hard %s", label, rep, key, qty.String(), h.String())
+			}
+		}
+		return ok
+	}
+	if !fit("solution", replicas, requests, limits) {
+		t.Error("the solution must fit the quota")
+	}
+	cpuUsed := requests["cpu"].DeepCopy()
+	cpuUsed.Add(requests["cpu"])
+	wantUsed := resource.MustParse(fieldsOf("quota-used")["status.used['requests.cpu']"])
+	testutil.Equal(t, cpuUsed.Cmp(wantUsed), 0)
+
+	// Cases.
+	resWith := func(label string, mutate func(res map[string]any)) map[string]any {
+		d := deepCopyObject(solDeploy)
+		res := workerContainer(t, label, d)["resources"].(map[string]any)
+		mutate(res)
+		return d
+	}
+	for _, c := range p.Cases {
+		g := resourcesActions(t, p, f, c.ID, c.Actions)
+		switch c.ID {
+		case "quota-deleted":
+			// The setup-created quota is deleted; the rest is the solution.
+			testutil.Equal(t, g.deleted, []model.ObjectRef{{APIVersion: "v1", Kind: "ResourceQuota", Namespace: ns, Name: "team-quota"}})
+			testutil.Equal(t, g.kinds(), []string{"Deployment", "LimitRange"})
+			testutil.Equal(t, g.objs["Deployment"], solDeploy)
+			testutil.Equal(t, g.objs["LimitRange"], solLR)
+		case "quota-raised":
+			// The quota differs from the setup quota only in requests.cpu.
+			testutil.Equal(t, len(g.deleted), 0)
+			testutil.Equal(t, g.kinds(), []string{"Deployment", "LimitRange", "ResourceQuota"})
+			testutil.Equal(t, g.objs["Deployment"], solDeploy)
+			testutil.Equal(t, g.objs["LimitRange"], solLR)
+			raised := deepCopyObject(quota)
+			nestedMap(t, raised, "spec", "hard")["requests.cpu"] = g.objs["ResourceQuota"]["spec"].(map[string]any)["hard"].(map[string]any)["requests.cpu"]
+			testutil.Equal(t, g.objs["ResourceQuota"], raised)
+			rc := resource.MustParse(nestedString(t, g.objs["ResourceQuota"], "spec", "hard", "requests.cpu"))
+			orig := resource.MustParse(hard["requests.cpu"])
+			if rc.Cmp(orig) <= 0 {
+				t.Errorf("quota-raised must raise requests.cpu above %s, got %s", orig.String(), rc.String())
+			}
+		case "oversized-requests":
+			// Only the CPU request grows (the limit follows so that
+			// request <= limit stays valid); two such Pods exceed the quota
+			// while one fits, so which Pod the scheduler admits is irrelevant.
+			testutil.Equal(t, len(g.deleted), 0)
+			testutil.Equal(t, g.kinds(), []string{"Deployment", "LimitRange"})
+			testutil.Equal(t, g.objs["LimitRange"], solLR)
+			co := workerContainer(t, c.ID, g.objs["Deployment"])
+			oreq := quantityMap(t, c.ID+" requests", resOf(co)["requests"].(map[string]any))
+			olim := quantityMap(t, c.ID+" limits", resOf(co)["limits"].(map[string]any))
+			oreqCPU, olimCPU := oreq["cpu"], olim["cpu"]
+			testutil.Equal(t, oreqCPU.String(), "300m")
+			testutil.Equal(t, olimCPU.String(), "300m")
+			want := resWith(c.ID, func(res map[string]any) {
+				res["requests"].(map[string]any)["cpu"] = resOf(co)["requests"].(map[string]any)["cpu"]
+				res["limits"].(map[string]any)["cpu"] = resOf(co)["limits"].(map[string]any)["cpu"]
+			})
+			testutil.Equal(t, g.objs["Deployment"], want)
+			if fit(c.ID, replicas, oreq, olim) {
+				t.Error("two oversized Pods must not fit the quota")
+			}
+			if !fit(c.ID+" (one Pod)", 1, oreq, olim) {
+				t.Error("one oversized Pod must fit the quota, so that the case holds whichever Pod is admitted")
+			}
+		case "limitrange-missing":
+			// Exactly the solution without the LimitRange.
+			testutil.Equal(t, len(g.deleted), 0)
+			testutil.Equal(t, g.kinds(), []string{"Deployment"})
+			testutil.Equal(t, g.objs["Deployment"], solDeploy)
+		case "alternative-decimal-quantities":
+			// Same amounts in other notations, for the Deployment and the
+			// LimitRange; every graded literal is spelled differently.
+			testutil.Equal(t, len(g.deleted), 0)
+			testutil.Equal(t, g.kinds(), []string{"Deployment", "LimitRange"})
+			ac := workerContainer(t, c.ID, g.objs["Deployment"])
+			for _, key := range []string{"requests", "limits"} {
+				got := resOf(ac)[key].(map[string]any)
+				ref := resOf(solC)[key].(map[string]any)
+				testutil.Equal(t, quantityStrings(quantityMap(t, c.ID+" "+key, got)), quantityStrings(quantityMap(t, "solution "+key, ref)))
+				for res, v := range got {
+					if fmt.Sprint(v) == fmt.Sprint(ref[res]) {
+						t.Errorf("%s: %s.%s is written like the solution (%v); the alternative must use another notation", c.ID, key, res, v)
+					}
+				}
+			}
+			same := deepCopyObject(g.objs["Deployment"])
+			workerContainer(t, c.ID, same)["resources"] = resOf(solC)
+			testutil.Equal(t, same, solDeploy)
+			alt := g.objs["LimitRange"]
+			altEntries := nestedMap(t, alt, "spec")["limits"].([]any)
+			testutil.Equal(t, len(altEntries), 1)
+			altE := altEntries[0].(map[string]any)
+			testutil.Equal(t, lrOf(altE), canonQuantities(t, wantLR))
+			for _, key := range []string{"defaultRequest", "default"} {
+				for res, v := range altE[key].(map[string]any) {
+					if fmt.Sprint(v) == fmt.Sprint(lr0[key].(map[string]any)[res]) {
+						t.Errorf("%s: LimitRange %s.%s is written like the solution (%v)", c.ID, key, res, v)
+					}
+				}
+			}
+			delete(alt, "spec")
+			delete(solLR, "spec")
+			testutil.Equal(t, alt, solLR)
+		default:
+			t.Errorf("resources-001 case %s has no contract", c.ID)
+		}
+	}
+
+	// The explanation covers the trap and the wrong answers in Korean.
+	for _, lit := range []string{"FailedCreate", "ERROR", "team-quota"} {
+		if !strings.Contains(string(p.Files["explanation.ko.md"]), lit) {
+			t.Errorf("the explanation must mention %q", lit)
+		}
 	}
 }
