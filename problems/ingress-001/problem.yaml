@@ -66,7 +66,7 @@
       "id": "root-route",
       "kind": "http",
       "points": 1,
-      "feedback": "Host가 shop.<namespace>.example이고 경로가 /인 요청이 Ingress shop을 거쳐 Service shop-web에 도달해 본문 'web-ok'을 받아야 합니다. 200이 아닌 응답이면 그 host의 rule에 경로 /가 없거나 backend의 Service 이름이나 포트가 Service와 맞지 않는 것이고, 본문이 'web-ok'이 아니면 / 경로가 다른 Service로 가고 있습니다. kubectl describe ingress shop의 Rules와 Backends를 확인하세요.",
+      "feedback": "Host가 shop.<namespace>.example이고 경로가 /인 요청이 Ingress shop을 거쳐 Service shop-web에 도달해 본문 'web-ok'를 받아야 합니다. 200이 아닌 응답이면 그 host의 rule에 경로 /가 없거나 backend의 Service 이름이나 포트가 Service와 맞지 않는 것이고, 본문이 'web-ok'이 아니면 / 경로가 다른 Service로 가고 있습니다. kubectl describe ingress shop의 Rules와 Backends를 확인하세요.",
       "target": {
         "api_version": "networking.k8s.io/v1",
         "kind": "Ingress",
@@ -87,7 +87,7 @@
       "id": "api-path-route",
       "kind": "http",
       "points": 1,
-      "feedback": "Host가 shop.<namespace>.example이고 경로가 /api/인 요청이 Ingress shop을 거쳐 Service shop-api에 도달해 본문 'api-ok'을 받아야 합니다. /api 경로(pathType Prefix)를 Service shop-api로 보내야 합니다. shop-web도 /api/에 200으로 응답하지만 본문이 'web-ok'이므로 /api가 shop-web으로 가면 이 점수를 잃습니다. backend의 Service 이름과 포트(80 또는 이름 http)를 확인하세요.",
+      "feedback": "Host가 shop.<namespace>.example이고 경로가 /api/인 요청이 Ingress shop을 거쳐 Service shop-api에 도달해 본문 'api-ok'를 받아야 합니다. /api 경로(pathType Prefix)를 Service shop-api로 보내야 합니다. shop-web도 /api/에 200으로 응답하지만 본문이 'web-ok'이므로 /api가 shop-web으로 가면 이 점수를 잃습니다. backend의 Service 이름과 포트(80 또는 이름 http)를 확인하세요.",
       "target": {
         "api_version": "networking.k8s.io/v1",
         "kind": "Ingress",
@@ -108,7 +108,7 @@
       "id": "api-host-route",
       "kind": "http",
       "points": 1,
-      "feedback": "Host가 api.<namespace>.example이고 경로가 /인 요청이 Ingress shop을 거쳐 Service shop-api에 도달해 본문 'api-ok'을 받아야 합니다. 이 host의 rule(경로 / Prefix)을 만들고 backend를 Service shop-api의 포트 80(또는 이름 http)로 지정하세요. host가 rule에 없으면 Ingress controller가 404를 돌려줍니다. shop-web도 /에 200으로 응답하지만 본문이 'web-ok'이므로 이 host의 /가 shop-web으로 가면 이 점수를 잃습니다.",
+      "feedback": "Host가 api.<namespace>.example이고 경로가 /인 요청이 Ingress shop을 거쳐 Service shop-api에 도달해 본문 'api-ok'를 받아야 합니다. 이 host의 rule(경로 / Prefix)을 만들고 backend를 Service shop-api의 포트 80(또는 이름 http)로 지정하세요. host가 rule에 없으면 Ingress controller가 404를 돌려줍니다. shop-web도 /에 200으로 응답하지만 본문이 'web-ok'이므로 이 host의 /가 shop-web으로 가면 이 점수를 잃습니다.",
       "target": {
         "api_version": "networking.k8s.io/v1",
         "kind": "Ingress",

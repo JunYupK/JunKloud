@@ -72,7 +72,7 @@
       "id": "web-reaches-api",
       "kind": "http",
       "points": 1,
-      "feedback": "role=web 라벨을 가진 클라이언트가 Service api의 80번 포트로 요청해 본문 'api-ok'을 받아야 합니다. web의 egress를 제한하면서 api의 8080번 포트(TCP)와 DNS(kube-system으로 UDP/TCP 53번)를 허용하지 않았거나, api의 ingress 정책이 role=web을 허용하지 않으면 실패합니다. DNS를 빠뜨리면 Service 이름을 찾지 못합니다. kubectl describe networkpolicy로 각 정책의 podSelector와 ingress/egress 규칙을 확인하세요.",
+      "feedback": "role=web 라벨을 가진 클라이언트가 Service api의 80번 포트로 요청해 본문 'api-ok'를 받아야 합니다. web의 egress를 제한하면서 api의 8080번 포트(TCP)와 DNS(kube-system으로 UDP/TCP 53번)를 허용하지 않았거나, api의 ingress 정책이 role=web을 허용하지 않으면 실패합니다. DNS를 빠뜨리면 Service 이름을 찾지 못합니다. kubectl describe networkpolicy로 각 정책의 podSelector와 ingress/egress 규칙을 확인하세요.",
       "target": {
         "api_version": "v1",
         "kind": "Service",
@@ -427,6 +427,28 @@
         "monitor-allowed": "PASS",
         "unlabeled-blocked": "PASS",
         "web-egress-blocked": "FAIL",
+        "workloads-unchanged": "PASS"
+      },
+      "expected_score": 7
+    },
+    {
+      "id": "and-or-split",
+      "actions": [
+        {
+          "kind": "apply",
+          "args": {
+            "path": "cases/and-or-split.yaml"
+          }
+        }
+      ],
+      "expected": {
+        "api-ready": "PASS",
+        "ledger-ready": "PASS",
+        "web-reaches-api": "PASS",
+        "batch-blocked": "PASS",
+        "monitor-allowed": "FAIL",
+        "unlabeled-blocked": "PASS",
+        "web-egress-blocked": "PASS",
         "workloads-unchanged": "PASS"
       },
       "expected_score": 7

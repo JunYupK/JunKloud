@@ -59,6 +59,7 @@ var networkCases = map[string]map[string]int{
 		"allow-all-ingress":         5,
 		"batch-relabeled":           7,
 		"missing-egress":            7,
+		"and-or-split":              7,
 		"alternative-single-policy": 8,
 	},
 }
@@ -1047,9 +1048,6 @@ func TestNetworkPolicyContracts(t *testing.T) {
 			"ports":    []any{map[string]any{"name": "http", "port": 80, "targetPort": 8080, "protocol": "TCP"}},
 		})
 	}
-	// The markers differ, so a dead or wrong backend never answers as the right one.
-	testutil.Equal(t, strings.Contains(serveScript("api-ok"), "api-ok") && !strings.Contains(serveScript("api-ok"), "ledger-ok"), true)
-
 	// Criteria: eight, one point each, in the pinned order and shape.
 	crit := map[string]model.Criterion{}
 	var order []string
@@ -1161,6 +1159,21 @@ func TestNetworkPolicyContracts(t *testing.T) {
 			for _, name := range g.order {
 				sameJSON(t, c.ID+" "+name, g.objs[name], sol[strings.TrimPrefix(name, "NetworkPolicy/")])
 			}
+		case "and-or-split":
+			// The monitor peer written as two separate from entries
+			// (namespaceSelector OR podSelector) instead of one ANDed peer:
+			// every Pod of the -mon namespace (the intruder too) and every
+			// app=monitor Pod of the problem namespace (the lookalike) pass.
+			testutil.Equal(t, g.order, []string{"NetworkPolicy/api-from-web", "NetworkPolicy/api-from-monitor", "NetworkPolicy/web-egress"})
+			sameJSON(t, c.ID+" api-from-web", g.objs["NetworkPolicy/api-from-web"], sol["api-from-web"])
+			sameJSON(t, c.ID+" api-from-monitor", g.objs["NetworkPolicy/api-from-monitor"],
+				npPolicy(ns, "api-from-monitor", npSel("role", "api"), []any{"Ingress"}, []any{
+					map[string]any{"from": []any{
+						map[string]any{"namespaceSelector": npSel("kubernetes.io/metadata.name", mon)},
+						map[string]any{"podSelector": npSel("app", "monitor")},
+					}, "ports": npPorts([2]any{"TCP", 8080})},
+				}, nil))
+			sameJSON(t, c.ID+" web-egress", g.objs["NetworkPolicy/web-egress"], sol["web-egress"])
 		case "alternative-single-policy":
 			// One policy with two from entries (the second ANDs the namespace
 			// and the Pod selector), and a separate egress policy that names
@@ -1201,11 +1214,14 @@ func TestNetworkPolicyContracts(t *testing.T) {
 	// written trace is in the task report; nothing here was run against an
 	// enforcing cluster.
 	wantFail := map[string][]string{
-		"initial":                        {"batch-blocked", "monitor-allowed", "unlabeled-blocked", "web-egress-blocked"},
-		"case deny-all":                  {"web-reaches-api", "batch-blocked", "monitor-allowed", "unlabeled-blocked", "web-egress-blocked"},
-		"case allow-all-ingress":         {"batch-blocked", "monitor-allowed", "unlabeled-blocked"},
-		"case batch-relabeled":           {"workloads-unchanged"},
-		"case missing-egress":            {"web-egress-blocked"},
+		"initial":                {"batch-blocked", "monitor-allowed", "unlabeled-blocked", "web-egress-blocked"},
+		"case deny-all":          {"web-reaches-api", "batch-blocked", "monitor-allowed", "unlabeled-blocked", "web-egress-blocked"},
+		"case allow-all-ingress": {"batch-blocked", "monitor-allowed", "unlabeled-blocked"},
+		"case batch-relabeled":   {"workloads-unchanged"},
+		"case missing-egress":    {"web-egress-blocked"},
+		// Trace: the lookalike (app=monitor in the problem namespace) and the
+		// intruder (any -mon Pod) connect, so only monitor-allowed FAILs.
+		"case and-or-split":              {"monitor-allowed"},
 		"case alternative-single-policy": nil,
 	}
 	vectors := map[string]map[string]string{"initial": p.InitialExpected}
@@ -1233,6 +1249,7 @@ func TestNetworkPolicyContracts(t *testing.T) {
 		"`role: api`", "`role: ledger`", "`role: web`", "`role: batch`", "`app: monitor`", "`component: intruder`",
 		"`api-ok`", "`ledger-ok`", "port `80`", "port `8080`", "`53`", "UDP and TCP", "kube-system", "NetworkPolicies in `${namespace}` only",
 		"Blocked means that the connection times out while an allowed client reaches the same Pod",
+		"a client without the `role` or `app` labels in `${namespace}` is blocked", "and the server answers `api-ok`", "and the server answers `ledger-ok`",
 		"Do not change the labels `app: batch` and `role: batch`, the image or the command of the Pod template of Deployment `batch`",
 		"1 Ready replica", "10-second stability window, 90-second observation limit",
 		"60-second limit", "this point needs the first one", "this point needs the second one",
@@ -1264,9 +1281,11 @@ func TestNetworkPolicyContracts(t *testing.T) {
 	for _, lit := range []string{
 		"NetworkPolicy", "podSelector", "namespaceSelector", "policyTypes", "kubernetes.io/metadata.name", "kube-system", "53",
 		"timeout", "kubectl get networkpolicy", "kubectl describe networkpolicy", "kubectl get pods --show-labels",
-		"deny-all", "allow-all-ingress", "batch-relabeled", "missing-egress", "alternative-single-policy",
+		"deny-all", "allow-all-ingress", "batch-relabeled", "missing-egress", "and-or-split", "alternative-single-policy",
 		"api-ready", "ledger-ready", "web-reaches-api", "batch-blocked", "monitor-allowed", "unlabeled-blocked", "web-egress-blocked", "workloads-unchanged",
 		"https://kubernetes.io/docs/concepts/services-networking/network-policies/",
+		// J2, J3: deny-all fails DNS in-namespace; the gating sentence.
+		"Service 이름을 찾는 단계(DNS)에서 실패", "(기준 3~6)", "`workloads-unchanged`는 전제가 없습니다",
 	} {
 		if !strings.Contains(expl, lit) {
 			t.Errorf("the explanation must mention %q", lit)

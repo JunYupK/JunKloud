@@ -16,7 +16,7 @@ Ingress는 클러스터 밖에서 들어온 HTTP 요청을 `Host` 헤더와 경�
 - 채점은 `Host` 헤더를 각 기준의 host로 바꿔 요청하므로 host 이름은 정확히 맞아야 합니다.
 
 ## 오답 피드백
-- `all-to-web`: 모든 경로를 `shop-web`으로 보내면 `shop.<namespace>.example`의 `/`는 `web-ok`을 받아 통과하지만, `shop-web`도 `/api/`와 `api.<namespace>.example`의 `/`에 200으로 답하기 때문에 상태 코드만 보면 틀린 것을 알 수 없습니다. 채점은 본문을 보므로 `web-ok`을 받은 `api-path-route`와 `api-host-route`를 잃습니다 (4점: `web-ready`, `api-ready`, `root-route`, `ingress-shape`).
+- `all-to-web`: 모든 경로를 `shop-web`으로 보내면 `shop.<namespace>.example`의 `/`는 `web-ok`를 받아 통과하지만, `shop-web`도 `/api/`와 `api.<namespace>.example`의 `/`에 200으로 답하기 때문에 상태 코드만 보면 틀린 것을 알 수 없습니다. 채점은 본문을 보므로 `web-ok`를 받은 `api-path-route`와 `api-host-route`를 잃습니다 (4점: `web-ready`, `api-ready`, `root-route`, `ingress-shape`).
 - `missing-api-host`: host `api.<namespace>.example`의 rule이 없으면 그 host의 요청을 받을 rule이 없어 `api-host-route`를 잃고, rule이 없다는 사실을 `ingress-shape`도 확인하므로 한 점을 더 잃습니다 (4점). host 없는 rule이나 `defaultBackend` 하나로 두 host를 받는 방법도 같은 이유로 `ingress-shape`를 통과하지 못합니다.
 - `wrong-backend-port`: `shop-api`의 backend 포트를 Pod의 포트 8080으로 쓰면 Service에 8080 포트가 없어 `shop.<namespace>.example`의 `/api/`와 `api.<namespace>.example`의 `/` 요청이 `api-ok`에 도달하지 못합니다. `root-route`와 `ingress-shape`는 통과하지만 `api-path-route`와 `api-host-route`를 잃습니다 (4점).
 - `wrong-class`: `ingressClassName: nginx`처럼 이 환경의 controller가 맡지 않는 class를 쓰면 Ingress에 주소가 할당되지 않아 세 요청이 모두 실패하고, `ingress-shape`도 class 값이 달라 잃습니다 (2점: `web-ready`, `api-ready`). `kubectl get ingress`의 `ADDRESS`가 비어 있고 `CLASS`가 `cloud-provider-kind`가 아니면 이 경우입니다.
@@ -24,7 +24,7 @@ Ingress는 클러스터 밖에서 들어온 HTTP 요청을 `Host` 헤더와 경�
 - `alternative-port-name`: backend 포트를 이름 `http`로 지정하고 annotation이 더 붙어도 같은 Service 포트에 도달하므로 만점입니다 (6점).
 
 ## 채점
-6개 기준을 각각 1점으로 채점합니다. `web-ready`와 `api-ready`는 제공된 Deployment의 replica가 Ready여야 하며(10초 안정 구간, 관찰 한도 90초) 각각 `root-route`, 그리고 `api-path-route`와 `api-host-route`가 평가되기 위한 전제입니다. `root-route`, `api-path-route`, `api-host-route`는 채점기가 Ingress `shop`의 주소로 실제 HTTP 요청을 보내며(60초 한도, 주소를 최대 15초 기다림), 각 기준이 자기 `Host` 헤더와 경로를 쓰고 상태 코드 200과 본문 `web-ok` 또는 `api-ok`을 모두 요구합니다. `ingress-shape`는 `spec.ingressClassName`이 `cloud-provider-kind`이고 두 host의 rule이 모두 있는지 확인합니다. 실행한 명령어 이력은 채점하지 않습니다.
+6개 기준을 각각 1점으로 채점합니다. `web-ready`와 `api-ready`는 제공된 Deployment의 replica가 Ready여야 하며(10초 안정 구간, 관찰 한도 90초) 각각 `root-route`, 그리고 `api-path-route`와 `api-host-route`가 평가되기 위한 전제입니다. `root-route`, `api-path-route`, `api-host-route`는 채점기가 Ingress `shop`의 주소로 실제 HTTP 요청을 보내며(60초 한도, 주소를 최대 15초 기다림), 각 기준이 자기 `Host` 헤더와 경로를 쓰고 상태 코드 200과 본문 `web-ok` 또는 `api-ok`를 모두 요구합니다. `ingress-shape`는 `spec.ingressClassName`이 `cloud-provider-kind`이고 두 host의 rule이 모두 있는지 확인합니다. 실행한 명령어 이력은 채점하지 않습니다.
 
 ## 공식 문서
 - [Ingress](https://kubernetes.io/docs/concepts/services-networking/ingress/)
