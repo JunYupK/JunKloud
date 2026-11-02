@@ -46,7 +46,7 @@ func TestMockServing(t *testing.T) {
 	svc := session.New(b.st, b.m, b.rt, bank, b.dir, session.WithWorkspace(t.TempDir()))
 	mock := session.StartOptions{Mode: model.ModeMock, MockID: "mock-01", Seed: 1}
 
-	// Control: the doctor really reports network-policy FAIL, and only it.
+	// Control: the doctor really reports network-policy FAIL.
 	report, err := svc.Doctor(ctx)
 	testutil.NoError(t, err)
 	for _, c := range report.Checks {

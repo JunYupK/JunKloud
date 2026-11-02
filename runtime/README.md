@@ -66,7 +66,8 @@ Deployment 4문제나 Observability 3문제만으로는 일반 훈련의 최소 
 검증된 혼합 은행에서 5개 이상 선택하거나 더 큰 은행을 사용하세요.
 기본 모의시험 `mock-01`은 20문제, 120분, 100점입니다(`exams/mock-01.yaml`). 20문제가
 모두 출제 가능해야만 시작하며, 하나라도 검증 기록이 없거나 필요한 기능이 FAIL이면
-시험 전체를 이유와 함께 거부합니다(종료 코드 3, 세션 없음). `networkpolicy-001`은
+시험 전체를 거부합니다(종료 코드 3, 세션 없음). CLI는 일반 메시지만 출력하므로 어느 문제가 왜
+제외됐는지는 `ckad list`의 `출제 불가` 줄과 `ckad doctor`로 확인하세요. `networkpolicy-001`은
 `network-policy` 기능이 필요하므로 `ckad doctor`에서 `network-policy`가 PASS인
 (NetworkPolicy를 실제로 차단하는) 호스트에서만 모의시험을 시작할 수 있습니다.
 doctor의 이 점검은 ingress 차단만 증명하므로, 그런 호스트에서는 먼저
