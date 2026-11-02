@@ -337,6 +337,10 @@ func TestSecurityCustomResourceContracts(t *testing.T) {
 	// The alternative adds only the optional field the schema declares.
 	alt := customResourceObjects(t, p, f, caseActions(p, "alternative-extra-fields"))["Backup"]
 	testutil.Equal(t, nestedString(t, alt, "spec", "description") != "", true)
+	// Every key the alternative sets, at any depth the schema describes, is
+	// declared in the CRD schema: a strict-decoding error or silent pruning
+	// would otherwise turn the "correct" alternative into a trap.
+	assertDeclared(t, "alternative-extra-fields spec", nestedMap(t, alt, "spec"), spec)
 
 	// Answer files: the written name is the CRD's own <plural>.<group>.
 	answerOf := func(actions []model.Action) string {
@@ -369,6 +373,23 @@ func TestSecurityCustomResourceContracts(t *testing.T) {
 	// The handout ships the answers directory.
 	if _, ok := p.Files["setup/provided/answers/README.txt"]; !ok {
 		t.Error("answers/ must be shipped in setup/provided")
+	}
+}
+
+// assertDeclared fails for every key of value that the object schema does not
+// list under properties, and recurses into nested objects the schema describes.
+func assertDeclared(t *testing.T, where string, value, schema map[string]any) {
+	t.Helper()
+	declared, _ := schema["properties"].(map[string]any)
+	for k, v := range value {
+		sub, ok := declared[k].(map[string]any)
+		if !ok {
+			t.Errorf("%s: key %q is not declared in the CRD schema properties", where, k)
+			continue
+		}
+		if m, isMap := v.(map[string]any); isMap {
+			assertDeclared(t, where+"."+k, m, sub)
+		}
 	}
 }
 

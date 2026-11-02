@@ -51,9 +51,20 @@ func TestSecurityCustomResourceReset(t *testing.T) {
 	owner := environment.Owner{Inventory: model.Inventory{EnvironmentID: b.id.ID, SessionID: author.SessionID, ProblemID: p.ID}, Namespace: f.Namespace, Scope: f.Definition.Scope, CreateNamespaces: true}
 	janitor := environment.ManagedJanitor{Manager: b.m, Identity: b.id}
 	defer func() { testutil.NoError(t, janitor.Cleanup(ctx, owner)) }()
-	kubectl := func(args ...string) string {
-		out, _ := exec.Command("kubectl", append([]string{"--kubeconfig", b.m.KubeconfigPath(), "--context", b.id.Context}, args...)...).CombinedOutput()
-		return strings.TrimSpace(string(out))
+	// kubectl returns the combined output and the command's error: callers that
+	// expect success use mustKubectl so a failure is never hidden by output
+	// that merely mentions the CRD name (a NotFound message contains it too).
+	kubectl := func(args ...string) (string, error) {
+		out, err := exec.Command("kubectl", append([]string{"--kubeconfig", b.m.KubeconfigPath(), "--context", b.id.Context}, args...)...).CombinedOutput()
+		return strings.TrimSpace(string(out)), err
+	}
+	mustKubectl := func(args ...string) string {
+		t.Helper()
+		out, err := kubectl(args...)
+		if err != nil {
+			t.Fatalf("kubectl %s failed: %v\n%s", strings.Join(args, " "), err, out)
+		}
+		return out
 	}
 	executor := bankActionExecutor(t, b)
 	ws, remove, err := author.ScratchWorkspace(b.dir, f)
@@ -64,19 +75,24 @@ func TestSecurityCustomResourceReset(t *testing.T) {
 	owner.CreateNamespaces = false
 	owner.Inventory, err = executor.Execute(ctx, b.id, owner, p, f, ws, p.Solution)
 	testutil.NoError(t, err)
-	before := kubectl("get", "crd", "backups.ops.junkloud.dev")
+	// The CRD must exist: the command has to succeed, not merely print a
+	// message that contains the name.
+	before := mustKubectl("get", "crd", "backups.ops.junkloud.dev")
 	t.Logf("RESET before cleanup: kubectl get crd backups.ops.junkloud.dev:\n%s", before)
-	t.Logf("RESET before cleanup: kubectl get backups -n %s:\n%s", f.Namespace, kubectl("get", "backups", "-n", f.Namespace))
-	if !strings.Contains(before, "backups.ops.junkloud.dev") {
-		t.Fatal("setup did not install the CRD")
+	t.Logf("RESET before cleanup: kubectl get backups -n %s:\n%s", f.Namespace, mustKubectl("get", "backups", "-n", f.Namespace))
+	if !strings.Contains(before, "backups.ops.junkloud.dev") || strings.Contains(before, "NotFound") {
+		t.Fatalf("setup did not install the CRD: %s", before)
 	}
 	testutil.NoError(t, janitor.Cleanup(ctx, owner))
-	after := kubectl("get", "crd", "backups.ops.junkloud.dev")
+	after, afterErr := kubectl("get", "crd", "backups.ops.junkloud.dev")
 	t.Logf("RESET after cleanup: kubectl get crd backups.ops.junkloud.dev:\n%s", after)
-	t.Logf("RESET after cleanup: kubectl get crd:\n%s", kubectl("get", "crd"))
-	t.Logf("RESET after cleanup: kubectl get backups -A:\n%s", kubectl("get", "backups", "-A"))
-	if !strings.Contains(after, "NotFound") {
-		t.Fatalf("the CRD survived the cleanup: %s", after)
+	t.Logf("RESET after cleanup: kubectl get crd:\n%s", mustKubectl("get", "crd"))
+	// With the CRD gone the Backup kind is not served, so this listing is
+	// expected to fail; only its message is of interest.
+	gone, _ := kubectl("get", "backups", "-A")
+	t.Logf("RESET after cleanup: kubectl get backups -A:\n%s", gone)
+	if afterErr == nil || !strings.Contains(after, "NotFound") {
+		t.Fatalf("the CRD survived the cleanup (err=%v): %s", afterErr, after)
 	}
 	// Grade the now unserved Backup kind: a fresh workspace has no answer.
 	fresh, removeFresh, err := author.ScratchWorkspace(b.dir, f)
@@ -100,7 +116,7 @@ func TestSecurityCustomResourceReset(t *testing.T) {
 	owner.Inventory = model.Inventory{EnvironmentID: b.id.ID, SessionID: author.SessionID, ProblemID: p.ID}
 	owner.Inventory, err = executor.Execute(ctx, b.id, owner, p, f, ws, p.Setup)
 	testutil.NoError(t, err)
-	again := kubectl("get", "crd", "backups.ops.junkloud.dev")
+	again := mustKubectl("get", "crd", "backups.ops.junkloud.dev")
 	t.Logf("RESET after re-setup: kubectl get crd backups.ops.junkloud.dev:\n%s", again)
 	if !strings.Contains(again, "backups.ops.junkloud.dev") || strings.Contains(again, "NotFound") {
 		t.Fatalf("the CRD is not installed again: %s", again)
