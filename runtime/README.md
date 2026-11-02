@@ -41,7 +41,9 @@ ckad review --problem Q4 --solution
 제품 은행 루트는 `/src`이며 그 안의 `problems/`에서 패키지를 읽습니다.
 현재 Design & Build 5문제/20점, Deployment 4문제/20점(rollout, release,
 Helm, Kustomize), Observability 3문제/15점(API migration, probes, diagnostics),
-합계 12문제/55점의 부분 은행이 포함되어 있습니다. 먼저 동일
+Environment·Configuration·Security 5문제/25점(custom resource, RBAC 최소 권한,
+quota·limits, ConfigMap·Secret, Pod Security), 합계 17문제/80점의 부분 은행이
+포함되어 있습니다. 먼저 동일
 환경에서 각 패키지를 검증하세요. 이전 grader의 검증 기록은 새 grader에서
 유효하지 않으므로 현재 환경에서 아래 ID별 명령으로 다시 검증해야 합니다.
 
@@ -49,7 +51,8 @@ Helm, Kustomize), Observability 3문제/15점(API migration, probes, diagnostics
 export CKAD_BANK_DIR=/src
 for id in image-001 batch-001 daemonset-001 multicontainer-001 volume-001 \
           rollout-001 release-001 helm-001 kustomize-001 \
-          api-migration-001 probes-001 diagnostics-001; do
+          api-migration-001 probes-001 diagnostics-001 \
+          custom-resource-001 access-001 resources-001 configuration-001 security-001; do
   ckad bank validate "$id" || break
 done
 ckad list

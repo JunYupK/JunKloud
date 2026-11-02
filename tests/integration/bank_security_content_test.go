@@ -25,6 +25,7 @@ import (
 	"k8s.io/apimachinery/pkg/api/resource"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime"
+	"sigs.k8s.io/yaml"
 )
 
 var securityIDs = []string{"custom-resource-001", "access-001", "resources-001", "configuration-001", "security-001"}
@@ -93,36 +94,132 @@ var securityForbidden = map[string][]string{
 	"configuration-001": {"jk-canary-7f3c9a2e"},
 }
 
-// presentSecurityIDs returns the security IDs whose package exists, so the
-// bank tests grow with the packages instead of failing before they are added.
-func presentSecurityIDs(t *testing.T) []string {
-	t.Helper()
-	var out []string
-	for _, id := range securityIDs {
-		_, err := os.Stat(filepath.Join(bankRoot, "problems", id))
-		switch {
-		case err == nil:
-			out = append(out, id)
-		case !os.IsNotExist(err):
-			t.Fatal(err)
-		}
-	}
-	return out
+// securityCompetencies are the 8 official items of spec section 3.1 that the
+// environment-security domain covers, used exactly.
+var securityCompetencies = []string{
+	"CRD and Operator resources",
+	"authentication and authorization",
+	"admission control",
+	"requests, limits and quotas",
+	"ConfigMap",
+	"Secret",
+	"ServiceAccount",
+	"SecurityContext and capabilities",
 }
 
-// A row in the case table without a package is a package that was announced
-// but never authored.
+// Every security package exists: the group is complete and has no
+// present-only guard.
 func TestSecurityTablesHavePackages(t *testing.T) {
-	present := presentSecurityIDs(t)
+	for _, id := range securityIDs {
+		if _, err := os.Stat(filepath.Join(bankRoot, "problems", id)); err != nil {
+			t.Errorf("problems/%s: %v", id, err)
+		}
+	}
 	for id := range securityCases {
-		if !slices.Contains(present, id) {
-			t.Errorf("securityCases has a row for %s but problems/%s does not exist", id, id)
+		if !slices.Contains(securityIDs, id) {
+			t.Errorf("securityCases has a row for %s which is not in securityIDs", id)
+		}
+	}
+	testutil.Equal(t, len(securityCases), len(securityIDs))
+}
+
+// Group totals: five 5-point problems, every ID present. Removing a package
+// or a criterion must fail before spending time on a cluster.
+func TestSecurityBankContent(t *testing.T) {
+	ps := loadGroup(t, securityIDs)
+	testutil.Equal(t, len(ps), 5)
+	testutil.Equal(t, sumPoints(ps), 25)
+	got := map[string]bool{}
+	for _, p := range ps {
+		got[p.ID] = true
+		testutil.Equal(t, p.Domain, model.DomainEnvironmentSecurity)
+	}
+	for _, id := range securityIDs {
+		if !got[id] {
+			t.Errorf("missing %s", id)
+		}
+	}
+}
+
+// coverageGroups reads curriculum/coverage.yaml strictly.
+type coverageGroup struct {
+	ID       string   `json:"id"`
+	Domain   string   `json:"domain"`
+	Count    int      `json:"count"`
+	Points   int      `json:"points"`
+	Problems []string `json:"problems"`
+}
+
+func readCoverageGroups(t *testing.T) []coverageGroup {
+	t.Helper()
+	var cov struct {
+		Groups []coverageGroup `json:"groups"`
+	}
+	b, err := os.ReadFile(filepath.Join(bankRoot, "curriculum", "coverage.yaml"))
+	testutil.NoError(t, err)
+	testutil.NoError(t, yaml.UnmarshalStrict(b, &cov))
+	return cov.Groups
+}
+
+func TestSecurityCoverage(t *testing.T) {
+	found := 0
+	for _, g := range readCoverageGroups(t) {
+		if g.Domain != model.DomainEnvironmentSecurity {
+			continue
+		}
+		found++
+		testutil.Equal(t, g.ID, "environment-security")
+		testutil.Equal(t, g.Count, 5)
+		testutil.Equal(t, g.Points, 25)
+		testutil.Equal(t, g.Problems, securityIDs)
+	}
+	testutil.Equal(t, found, 1)
+}
+
+// Each of the 8 official competency strings is used by at least one package,
+// and no package uses a string outside the list.
+func TestSecurityCompetencies(t *testing.T) {
+	used := map[string][]string{}
+	for _, p := range loadGroup(t, securityIDs) {
+		for _, c := range p.Competencies {
+			if !slices.Contains(securityCompetencies, c) {
+				t.Errorf("%s uses competency %q which is not one of the 8 official items", p.ID, c)
+			}
+			used[c] = append(used[c], p.ID)
+		}
+	}
+	for _, c := range securityCompetencies {
+		if len(used[c]) == 0 {
+			t.Errorf("competency %q is used by no environment-security package", c)
+		}
+	}
+}
+
+// The practice bank (every coverage group) mixes all four problem types of
+// spec section 7.2, and covers every difficulty.
+func TestBankCoversAllProblemTypes(t *testing.T) {
+	types := map[string]int{}
+	difficulties := map[string]int{}
+	for _, g := range readCoverageGroups(t) {
+		for _, p := range loadGroup(t, g.Problems) {
+			types[p.Type]++
+			difficulties[p.Difficulty]++
+		}
+	}
+	for _, ty := range []string{"build", "modify", "troubleshoot", "behavioral"} {
+		if types[ty] == 0 {
+			t.Errorf("the bank has no %s problem (types: %v)", ty, types)
+		}
+	}
+	for _, d := range []string{"easy", "medium", "hard"} {
+		if difficulties[d] == 0 {
+			t.Errorf("the bank has no %s problem (difficulties: %v)", d, difficulties)
 		}
 	}
 }
 
 func TestSecurityProblems(t *testing.T) {
-	for _, p := range loadGroup(t, presentSecurityIDs(t)) {
+	for _, p := range loadGroup(t, securityIDs) {
 		t.Run(p.ID, func(t *testing.T) {
 			testutil.Equal(t, p.Domain, model.DomainEnvironmentSecurity)
 			testutil.Equal(t, sumPoints([]model.Problem{p}), 5)
@@ -200,11 +297,7 @@ func TestSecurityProblems(t *testing.T) {
 }
 
 func TestSecurityBankPreflight(t *testing.T) {
-	ids := presentSecurityIDs(t)
-	if len(ids) == 0 {
-		t.Skip("no environment-security package yet")
-	}
-	preflightBank(t, loadGroup(t, ids))
+	preflightBank(t, loadGroup(t, securityIDs))
 }
 
 // customResourceObjects renders the Backup objects (and the ConfigMaps) a

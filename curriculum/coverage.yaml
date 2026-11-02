@@ -35,6 +35,19 @@
         "probes-001",
         "diagnostics-001"
       ]
+    },
+    {
+      "id": "environment-security",
+      "domain": "environment-security",
+      "count": 5,
+      "points": 25,
+      "problems": [
+        "custom-resource-001",
+        "access-001",
+        "resources-001",
+        "configuration-001",
+        "security-001"
+      ]
     }
   ]
 }
