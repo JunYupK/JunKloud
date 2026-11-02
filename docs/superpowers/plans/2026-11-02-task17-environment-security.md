@@ -203,19 +203,20 @@ Package design (pinned):
   - Service `shop` 80 → 8080.
 - Question:
   - Fix `shop` so `CURRENCY` comes from ConfigMap `shop-config` key `currency` and `API_TOKEN` comes from Secret `shop-secret` key `api-token`, both as environment variables (`configMapKeyRef` / `secretKeyRef`).
-  - Do not change the ConfigMap, the Secret, the image or the command.
+  - ~~Do not change the ConfigMap, the Secret, the image or the command.~~ (R8) Only "Do not change Secret `shop-secret`" is stated and graded; the ConfigMap, image and command sentences were dropped because nothing graded them.
   - The Service must return `shop currency=EUR token=ok`.
 - Criteria, 1 point each:
   1. `currency-ref`: `field` `env[name=CURRENCY].valueFrom.configMapKeyRef.name/key`.
   2. `token-ref`: `field` `env[name=API_TOKEN].valueFrom.secretKeyRef.name/key`.
   3. `shop-ready`: `ready`, replicas 1.
   4. `shop-serves`: `http` marker `shop currency=EUR token=ok`, `depends_on` `shop-ready`.
-  5. `inputs-unchanged`: `field` on ConfigMap `shop-config` `data.currency` equals `EUR`, and the container image and command equal the setup literals. This criterion carries no dependencies, so the Secret-reading criteria stay independent and the redactor always learns the namespace Secrets.
-- Initial: `inputs-unchanged` PASS → 1.
+  5. ~~`inputs-unchanged`: `field` on ConfigMap `shop-config` `data.currency` equals `EUR`, and the container image and command equal the setup literals. This criterion carries no dependencies, so the Secret-reading criteria stay independent and the redactor always learns the namespace Secrets.~~ **Superseded by controller ruling R8 (see "Package design corrections"):** `secret-unchanged`: `field` on Secret `shop-secret` `data['api-token']` equals the canary (compared decoded, shown as `[REDACTED]`), no `depends_on`. A single `field` criterion has one target, so the ConfigMap could not be graded together with the Secret, and no criterion read a Secret, so the redactor never learned `shop-secret`.
+- Initial: ~~`inputs-unchanged` PASS → 1.~~ `secret-unchanged` PASS → 1 (score unchanged).
 - Cases (expected score):
   - `hardcoded-values` (env literals `EUR` and the token) → 3.
   - `wrong-configmap-key` (key `Currency`; the container cannot start) → 2. `shop-ready` must be FAIL with a learner-fault cause. If the live run shows ERROR, give `shop-ready` a `depends_on` on `currency-ref` and recompute the score; never accept ERROR.
-  - `configmap-edited` (ConfigMap value changed to `GBP`, refs correct) → 3.
+  - `configmap-edited` (ConfigMap value changed to `GBP`, refs correct) → ~~3~~ 4 after R8 (only `shop-serves` fails).
+  - `secret-value-as-key` (added by R8: `secretKeyRef.key` is the canary itself, so the kubelet error would echo it unless the Secret is redacted) → 2.
   - `alternative-optional-false` (refs with `optional: false` and an extra unrelated env var) → 5.
 - Leak guard: `TestSecurityBank` sets `forbidden = []string{"jk-canary-7f3c9a2e"}` for this problem. The `hardcoded-values` case must also not leak, even though the literal sits in the Deployment spec.
 
@@ -236,17 +237,18 @@ Package design (pinned):
   - The bundle Namespace with labels `pod-security.kubernetes.io/enforce: restricted` and `pod-security.kubernetes.io/enforce-version: latest`.
   - Deployment `gateway`: replicas 1, busybox, command `mkdir -p /www && echo gateway-ok > /www/index.html && exec httpd -f -p 8080 -h /www`, an `emptyDir` at `/www`, no securityContext. Restricted PSA rejects its Pods, so it never becomes Ready.
   - Service `gateway` 80 → 8080.
-  - Port 8080 is deliberate. A non-root process cannot bind port 80 just because `NET_BIND_SERVICE` is added: Kubernetes sets no ambient capabilities.
+  - Port 8080 is deliberate. ~~A non-root process cannot bind port 80 just because `NET_BIND_SERVICE` is added: Kubernetes sets no ambient capabilities.~~ (R10/F1) Truthful wording: `NET_BIND_SERVICE` in `capabilities.add` does not become effective for a non-root process (no ambient capabilities); whether a low port binds depends on the runtime's `net.ipv4.ip_unprivileged_port_start` sysctl (containerd 2.x may set it to 0), so the task uses 8080.
+  - ~~Service `gateway` 80 → 8080.~~ (R9) The Service was removed: nothing grades it.
 - Question:
   - Make `gateway` admissible under the namespace's restricted Pod Security policy without changing the policy, the image or the command: run as non-root UID `10001`, no privilege escalation, drop all capabilities, seccomp `RuntimeDefault`, read-only root filesystem.
-  - It must serve `gateway-ok` on Service port 80.
-  - State the observation window.
+  - ~~It must serve `gateway-ok` on Service port 80.~~ (R9) No serving sentence; the Pod must be Ready and run with the requested context.
+  - State the observation window (10-second stability, 90-second limit).
 - Criteria, 1 point each:
   1. `policy-enforced`: `field` on `v1 Namespace ${namespace}` `metadata.labels['pod-security.kubernetes.io/enforce']` equals `restricted`.
   2. `workload-unchanged`: `field` on Deployment `gateway` container image and command equal the setup literals.
   3. `declared-context`: `security-context` declared; container `gateway` with `run_as_user` 10001, `run_as_non_root` true, `allow_privilege_escalation` false, `capabilities {drop: [ALL]}`, `seccomp` `RuntimeDefault`, `read_only_root_filesystem` true.
-  4. `runtime-context`: `security-context` `behavior` (`uid` 10001, `non_root`, `no_capabilities`, `read_only_root`); `depends_on` `declared-context`, so a rejected Pod is FAIL prerequisite, not ERROR.
-  5. `serves-port-80`: `http` Service `gateway` port 80, marker `gateway-ok`; `depends_on` `runtime-context`.
+  4. ~~`runtime-context`: `security-context` `behavior` (`uid` 10001, `non_root`, `no_capabilities`, `read_only_root`); `depends_on` `declared-context`, so a rejected Pod is FAIL prerequisite, not ERROR.~~ **Superseded by controller ruling R9:** `gateway-ready`: `ready` Deployment `gateway`, replicas 1, 90 s, `depends_on` `declared-context` (a rejected Pod is FAIL prerequisite, not ERROR).
+  5. ~~`serves-port-80`: `http` Service `gateway` port 80, marker `gateway-ok`; `depends_on` `runtime-context`.~~ **Superseded by R9:** `runtime-context`: `security-context` `behavior` (`uid` 10001, `no_capabilities`, `read_only_root`; `uid` covers non-root), `depends_on` `gateway-ready`. Reason: the behaviour check execs once and needs a Running Pod, while `http` and `behavior` do not wait; only `ready` waits. A `points: 0` gate is rejected by the schema, and a grader change would bump `GraderVersion`.
 - Initial: `policy-enforced` and `workload-unchanged` PASS → 2.
 - Cases (expected score):
   - `policy-weakened` (label set to `privileged`, workload left insecure; Pods run) → 1.
@@ -277,6 +279,19 @@ Package design (pinned):
   - Tick the original plan's Task 17 and add an 실행 기록 with SHA, durations, seeds, stage counts, NOT RUN items and the 17/80 partial bank.
   - Fill in this plan's Verified evidence, citing local log paths with the `.superpowers/sdd/2026-11-02-task17-environment-security/` prefix marked local-only.
   - Commit `docs: record validated environment-security milestone`.
+
+## Package design corrections
+
+The "Package design (pinned)" bullets above are the text the plan was written with. Controller rulings made during implementation superseded some of it; the original text is kept struck through (or noted) in Tasks 3-6 so the history stays readable. The shipped packages follow the rulings below. Earlier per-package live runs of the affected packages are historical because their content hashes changed.
+
+| Ruling | Package | Correction |
+| --- | --- | --- |
+| R5 | custom-resource-001, access-001 | Review minors B1/B2 (test-only hardening of the CRD reset and schema tests) were folded into Task 3. |
+| R6 | access-001 | `least-privilege` also denies `list configmaps` and `watch configmaps` in the namespace (`allowed: false`): an unnamed `list` rule would let the learner read every ConfigMap and still pass. The question's forbidden list says "or list or watch ConfigMaps", and the Korean feedback and explanation follow. Scores are unchanged: `edit-rolebinding` and `cluster-wide-binding` already failed `least-privilege`, and the solution and `alternative-split-roles` only grant `get configmaps` with `resourceNames: [report-config]` (5/5). Commit `41ffb5f`. |
+| R7 | resources-001 | The handout `README.txt` lost the ungraded "do not change the image or command" clause; the question hint says to count only the two worker Pods; the Korean feedback mentions that a limit must be at least the request. Commit `53a86db`. |
+| R8 | configuration-001 | Criterion 5 is `secret-unchanged` (a `field` on Secret `shop-secret`, `data['api-token']` equals the canary, no `depends_on`), not the pinned `inputs-unchanged`. Reason: one `field` criterion has a single target, and with no Secret-reading criterion the redactor never learned `shop-secret`, so a learner who put the token into `secretKeyRef.key` could make the kubelet error echo it. The pinned sentence "Do not change the ConfigMap, the Secret, the image or the command" became "Do not change Secret `shop-secret`" (only graded points are stated); `configmap-edited` is 4, not 3; new case `secret-value-as-key` scores 2. Commit `99d0bee`. |
+| R9 | security-001 | `serves-port-80` and the Service were dropped; `gateway-ready` (`ready`, replicas 1, `depends_on declared-context`) is criterion 4 and `runtime-context` (`depends_on gateway-ready`) is criterion 5. Reason: the `security-context` behaviour mode execs once and needs a Running Pod, `http` does not wait for endpoints, and only `ready` waits; a 0-point gate is rejected by the schema and a grader change would bump `GraderVersion`. Known edge: a learner who passes `declared-context` but whose Pod is still rejected for another reason (for example `hostPath`) gets ERROR from `gateway-ready`. Commit `fb4b595`. |
+| R10 | access-001, security-001 | See R6 for access-001. security-001: the explanation no longer claims that a UID 10001 process cannot bind port 80 (containerd 2.x may set `ip_unprivileged_port_start=0`); it says `NET_BIND_SERVICE` in `capabilities.add` does not become effective for a non-root process (no ambient capabilities) and that low-port binding depends on the runtime's sysctl, so the task uses 8080. The `runs-as-root` feedback names the declared `runAsUser` 0 (not 10001) as the cause of the `declared-context` FAIL and the rejected Pods as its consequence. Test hygiene: stale comments fixed, a constant-only port check removed, unused `objectOfKind` removed. Commit `64fdfeb`. |
 
 ## Verified evidence
 
