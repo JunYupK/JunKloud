@@ -1,0 +1,125 @@
+# JunKloud CI.
+#
+# Every job runs on a native GitHub runner. There is deliberately no QEMU or
+# binfmt emulation anywhere: an emulated run says nothing about a real M2
+# (arm64) machine, so ARM results come only from the ubuntu-24.04-arm runner.
+#
+# static and image run on every push and pull request. integration-smoke and
+# validate-networkpolicy create real kind clusters and take a long time, so
+# they run only when started by hand (workflow_dispatch). Their results are
+# recorded in docs/validation/acceptance-matrix.md only from the actual run log.
+name: CI
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  static:
+    name: static (unit tests, lint, cross-build)
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+      - name: Unit tests
+        run: go test ./... -count=1
+      - name: Lint (vet for every build tag, gofmt)
+        run: make lint
+      - name: Build ckad for linux/amd64
+        run: GOOS=linux GOARCH=amd64 go build -o /dev/null ./cmd/ckad
+      - name: Build ckad for linux/arm64
+        run: GOOS=linux GOARCH=arm64 go build -o /dev/null ./cmd/ckad
+
+  image:
+    name: image (${{ matrix.runner }})
+    strategy:
+      fail-fast: false
+      matrix:
+        runner: [ubuntu-24.04, ubuntu-24.04-arm]
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build the workspace image natively
+        run: docker build --target workspace --tag junkloud-workspace:ci .
+      - name: Build the dev image natively
+        run: docker build --target dev --tag junkloud-dev:ci .
+      - name: Show the architecture and pinned tools inside the image
+        run: |
+          docker run --rm junkloud-workspace:ci uname -m
+          docker run --rm junkloud-workspace:ci kubectl version --client
+          docker run --rm junkloud-workspace:ci kind version
+
+  integration-smoke:
+    name: integration-smoke (manual)
+    if: github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+      # Versions and SHA-256 values are copied from runtime/versions.lock.yaml.
+      - name: Install kind, kubectl and helm
+        run: |
+          set -eu
+          curl -fsSL -o kind https://github.com/kubernetes-sigs/kind/releases/download/v0.33.0/kind-linux-amd64
+          echo "aee6151561422756b764a4ae28e7f44cda5af5a9eead3cc9985112b1de8d8e0d  kind" | sha256sum -c -
+          curl -fsSL -o kubectl https://dl.k8s.io/release/v1.37.0/bin/linux/amd64/kubectl
+          echo "6129359f4e1f3848a5572ccb0b26cf28b8ca08cef38c95a765b2f64a2c961a2f  kubectl" | sha256sum -c -
+          curl -fsSL -o helm.tgz https://get.helm.sh/helm-v4.3.0-linux-amd64.tar.gz
+          echo "86584a54def73570558f66f5111cc53dfed56689637ae32c1201205d494f54fb  helm.tgz" | sha256sum -c -
+          tar -xzf helm.tgz linux-amd64/helm
+          sudo install -m 0755 kind kubectl linux-amd64/helm /usr/local/bin/
+          kind version
+          kubectl version --client
+          helm version
+      - name: Integration smoke tests
+        run: |
+          set -o pipefail
+          go test -tags=integration ./tests/integration -run 'TestNetworkBankSmoke|TestReadyFailedCreateIsLearnerFault' -count=1 -timeout=60m -v 2>&1 | tee integration-smoke.log
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: integration-smoke-log
+          path: integration-smoke.log
+
+  validate-networkpolicy:
+    name: validate-networkpolicy (manual)
+    if: github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 120
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+      - name: Install kind, kubectl and helm
+        run: |
+          set -eu
+          curl -fsSL -o kind https://github.com/kubernetes-sigs/kind/releases/download/v0.33.0/kind-linux-amd64
+          echo "aee6151561422756b764a4ae28e7f44cda5af5a9eead3cc9985112b1de8d8e0d  kind" | sha256sum -c -
+          curl -fsSL -o kubectl https://dl.k8s.io/release/v1.37.0/bin/linux/amd64/kubectl
+          echo "6129359f4e1f3848a5572ccb0b26cf28b8ca08cef38c95a765b2f64a2c961a2f  kubectl" | sha256sum -c -
+          curl -fsSL -o helm.tgz https://get.helm.sh/helm-v4.3.0-linux-amd64.tar.gz
+          echo "86584a54def73570558f66f5111cc53dfed56689637ae32c1201205d494f54fb  helm.tgz" | sha256sum -c -
+          tar -xzf helm.tgz linux-amd64/helm
+          sudo install -m 0755 kind kubectl linux-amd64/helm /usr/local/bin/
+      # If this runner enforces NetworkPolicy the run can give the first real
+      # certification evidence for networkpolicy-001. Whatever happens, the
+      # result is recorded only from this log, never assumed.
+      - name: Validate networkpolicy-001
+        run: |
+          set -o pipefail
+          go test -tags=integration ./tests/integration -run '^TestNetworkBank$/^networkpolicy-001$' -count=1 -timeout=90m -v 2>&1 | tee validate-networkpolicy.log
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: validate-networkpolicy-log
+          path: validate-networkpolicy.log
