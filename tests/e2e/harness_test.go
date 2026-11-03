@@ -11,7 +11,6 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
-	"runtime"
 	"strings"
 	"testing"
 	"time"
@@ -245,6 +244,11 @@ func (h *cliHarness) start(args ...string) *exec.Cmd {
 	if err := cmd.Start(); err != nil {
 		t.Fatalf("start ckad %s: %v", strings.Join(args, " "), err)
 	}
+	t.Cleanup(func() {
+		if cmd.ProcessState == nil { // never waited: still running or unreaped
+			cmd.Process.Kill()
+		}
+	})
 	t.Logf("started ckad %s (pid %d)", strings.Join(args, " "), cmd.Process.Pid)
 	return cmd
 }
@@ -403,20 +407,9 @@ func (h *cliHarness) solveCurrent(ctx context.Context) {
 			path, _ := args["path"].(string)
 			switch args["operation"] {
 			case "build":
-				if record.State == model.StateRunning {
-					h.run("", 0, "image", "build", "--problem", fmt.Sprintf("Q%d", i+1), "--context", path, "--tag", reference)
-					continue
-				}
-				// A submitted session no longer accepts `ckad image build`
-				// (session.BuildImage requires RUNNING). The learner's other
-				// documented path is ordinary Docker, which leaves an image
-				// the session does not own: reset must preserve it.
-				contextDir := filepath.Join(attempt, path)
-				out, err := exec.CommandContext(ctx, "docker", "build", "--pull=false", "--network=none", "--platform", "linux/"+runtime.GOARCH, "--tag", reference, contextDir).CombinedOutput()
-				if err != nil {
-					t.Fatalf("solve %s: docker build: %v\n%s", label, err, out)
-				}
-				t.Logf("solve %s: ordinary docker build of %s (session is %s, not RUNNING)", label, reference, record.State)
+				// Managed build: the session owns the image, so reset removes it.
+				// ckad refuses this once the session is no longer RUNNING.
+				h.run("", 0, "image", "build", "--problem", fmt.Sprintf("Q%d", i+1), "--context", path, "--tag", reference)
 			case "save":
 				output := filepath.Join(attempt, path)
 				if err := os.MkdirAll(filepath.Dir(output), 0o700); err != nil {
@@ -454,13 +447,20 @@ func (h *cliHarness) runNative(ctx context.Context, label, kind string, args map
 			t.Fatalf("solve %s: unsupported helm action %v", label, args)
 		}
 		argv := []string{"install", release, chart}
-		if values, ok := args["values"].([]any); ok {
+		if raw, present := args["values"]; present {
+			values, ok := raw.([]any)
+			if !ok {
+				t.Fatalf("solve %s: helm values must be a list, got %T", label, raw)
+			}
 			for _, v := range values {
 				argv = append(argv, "--values", fmt.Sprint(v))
 			}
 		}
 		argv = append(argv, "--namespace", namespace, "--kubeconfig", h.kubeconfig(), "--kube-context", kubeContext)
 		cmd = exec.CommandContext(ctx, "helm", argv...)
+		// Never touch the learner's real Helm cache, config or data.
+		cmd.Env = append(os.Environ(),
+			"HELM_CACHE_HOME="+t.TempDir(), "HELM_CONFIG_HOME="+t.TempDir(), "HELM_DATA_HOME="+t.TempDir())
 	default:
 		t.Fatalf("solve %s: unsupported native action %s", label, kind)
 	}

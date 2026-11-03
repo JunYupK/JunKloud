@@ -170,8 +170,7 @@ func observeLeftovers(ctx context.Context, t *testing.T, h *cliHarness) ownedLef
 			seen[key] = true
 			items, lerr := k.dyn.Resource(gv.WithResource(r.Name)).List(ctx, metav1.ListOptions{LabelSelector: environment.LabelSessionID})
 			if lerr != nil {
-				t.Logf("cannot list %s: %v", key, lerr)
-				continue
+				t.Fatalf("cannot list %s while looking for leftovers: %v", key, lerr)
 			}
 			for _, item := range items.Items {
 				switch {
@@ -207,7 +206,13 @@ func observeLeftovers(ctx context.Context, t *testing.T, h *cliHarness) ownedLef
 			left.VolumePaths = append(left.VolumePaths, p)
 		}
 	}
-	entries, err := docker(ctx, "exec", node, "sh", "-c", "ls -A "+provisionerRoot+" 2>/dev/null || true")
+	// The provisioner root must exist (the platform installs local-path
+	// storage); a missing directory means the path is wrong and the check
+	// would pass vacuously.
+	if _, err := docker(ctx, "exec", node, "test", "-d", provisionerRoot); err != nil {
+		t.Fatalf("the volume provisioner directory %s is not in the node: %v", provisionerRoot, err)
+	}
+	entries, err := docker(ctx, "exec", node, "ls", "-A", provisionerRoot)
 	if err != nil {
 		t.Fatalf("list the node volume directory: %v", err)
 	}
@@ -243,12 +248,21 @@ func observeLeftovers(ctx context.Context, t *testing.T, h *cliHarness) ownedLef
 			t.Fatalf("list %s operations: %v", kind, err)
 		}
 		for _, op := range ops {
-			if op.Phase != environment.PhaseDone {
+			if !terminalPhase(op.Phase) {
 				left.OpenOperations = append(left.OpenOperations, fmt.Sprintf("%s %s phase=%s", op.Kind, op.ID, op.Phase))
 			}
 		}
 	}
 	return left
+}
+
+// ownedObjectCount is the number of session-labelled objects now in the
+// cluster. After `start` it must be positive, which proves the label selector
+// of observeLeftovers matches what the product creates.
+func ownedObjectCount(ctx context.Context, t *testing.T, h *cliHarness) int {
+	t.Helper()
+	left := observeLeftovers(ctx, t, h)
+	return len(left.Namespaces) + len(left.ClusterObjects)
 }
 
 // foreignSentinel is the state of the objects the product must never touch.
@@ -429,6 +443,9 @@ func (s *memorySampler) Stop() (peakTotalMiB int, peakByContainer map[string]int
 	<-s.done
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	if len(s.byName) == 0 {
+		panic("memory sampler never saw a junkloud container; the peak would be a vacuous zero")
+	}
 	out := make(map[string]int, len(s.byName))
 	for k, v := range s.byName {
 		out[k] = v
@@ -500,4 +517,12 @@ func sha256File(p string) (string, error) {
 func fileExists(p string) bool {
 	_, err := os.Stat(p)
 	return err == nil
+}
+
+// terminalPhase: done, plus the phases of an operation that ended without
+// leaving work open: "superseded" (an interrupted grading that a retry or
+// resubmission replaced) and "failed" (a preparation whose session is
+// SETUP_ERROR).
+func terminalPhase(phase string) bool {
+	return phase == environment.PhaseDone || phase == "superseded" || phase == "failed"
 }

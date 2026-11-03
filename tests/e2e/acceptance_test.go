@@ -47,8 +47,18 @@ type cycleEvidence struct {
 	OOMOrPending []string
 
 	// Further evidence beyond the minimum record.
-	Start            string // "cold" or "warm"
+	// Start labels cycle 1's timing: "warm-after-setup" for every cycle
+	// except cycle 1 of a run that proved cold ("cold") or only claimed it
+	// ("cold (unverified)"). PrepareStart alone is warm-after-setup in
+	// cycle 1; ColdStart (EnvironmentSetup + PrepareStart) is reported only
+	// for a verified cold run.
+	Start            string
 	EnvironmentSetup time.Duration
+	ColdStart        time.Duration
+	InitialScoreFrom string // where InitialScore comes from
+	OwnedObjects     int    // session-labelled objects found right after start (positive control)
+	SolvedGrade      time.Duration
+	OOMAfterStart    []string
 	Certificates     string
 	Problems         int
 	PeakByContainer  map[string]int
@@ -78,7 +88,9 @@ func TestFullMockLifecycle(t *testing.T) {
 		evidenceDir = t.TempDir()
 	}
 	testutil.NoError(t, os.MkdirAll(evidenceDir, 0o755))
-	cold := os.Getenv("JUNKLOUD_ACCEPTANCE_COLD") == "1"
+	coldRequested := os.Getenv("JUNKLOUD_ACCEPTANCE_COLD") == "1"
+	coldVerified := coldRequested && pinnedImagesAbsent(ctx)
+	t.Logf("cold requested=%t, pinned and node images verified absent before setup=%t", coldRequested, coldVerified)
 
 	h := newHarness(t, sel.Bank)
 
@@ -113,11 +125,14 @@ func TestFullMockLifecycle(t *testing.T) {
 
 	for cycle := 1; cycle <= acceptanceCycles; cycle++ {
 		cycle := cycle
-		ev := cycleEvidence{Cycle: cycle, Exam: sel.Label, Certificates: standInCertificates, Problems: len(sel.IDs), Start: "warm"}
+		ev := cycleEvidence{Cycle: cycle, Exam: sel.Label, Certificates: standInCertificates, Problems: len(sel.IDs), Start: "warm-after-setup"}
 		if cycle == 1 {
 			ev.EnvironmentSetup = setup
-			if cold {
+			switch {
+			case coldVerified:
 				ev.Start = "cold"
+			case coldRequested:
+				ev.Start = "cold (unverified)"
 			}
 		}
 		sampler := startMemorySampler(ctx, 5*time.Second)
@@ -125,6 +140,9 @@ func TestFullMockLifecycle(t *testing.T) {
 		started := time.Now()
 		h.run("yes\n", 0, "start", sel.ExamID)
 		ev.PrepareStart = time.Since(started)
+		if ev.Start == "cold" {
+			ev.ColdStart = ev.EnvironmentSetup + ev.PrepareStart
+		}
 
 		sid, frozen := currentSession(ctx, t, h)
 		initialSum, pointsSum := 0, 0
@@ -135,19 +153,26 @@ func TestFullMockLifecycle(t *testing.T) {
 		testutil.Equal(t, len(frozen), len(sel.IDs))
 		testutil.Equal(t, pointsSum, totalWant)
 		testutil.Equal(t, initialSum, initialWant)
+		// A successful start proves the initial vector: prepare's
+		// verifyInitialStates fails the session (SETUP_ERROR) unless every
+		// criterion and each problem's score equal the declared InitialScore.
+		// This number is the sum of the frozen problems' declared scores, not
+		// a learner grade.
+		ev.InitialScore = initialSum
+		ev.InitialScoreFrom = "prepare verification (verifyInitialStates/compareInitial) of the declared InitialScore; not a learner grade"
 
-		// While RUNNING, build one session-owned image so that reset's owned
-		// image cleanup is exercised (a submitted mock no longer accepts
-		// `ckad image build`, so the graded image is built by ordinary Docker
-		// after the first grade; see solveCurrent).
-		probe := buildOwnedProbe(ctx, t, h, frozen)
+		// Positive controls: the owned-object selector matches after start,
+		// and the pods are healthy.
+		ev.OwnedObjects = ownedObjectCount(ctx, t, h)
+		if ev.OwnedObjects == 0 {
+			t.Fatalf("cycle %d: no session-labelled object after start; the leak selector cannot be trusted", cycle)
+		}
+		ev.OOMAfterStart = oomOrPending(ctx, t, h)
 		graded := gradedImages(t, h, frozen)
 		// A failed run must not leave its images for the next run's preflight.
 		t.Cleanup(func() {
-			for _, ref := range append(slices.Clone(graded), probe) {
-				if ref != "" {
-					docker(context.Background(), "image", "rm", ref)
-				}
+			for _, ref := range graded {
+				docker(context.Background(), "image", "rm", ref)
 			}
 		})
 
@@ -158,18 +183,15 @@ func TestFullMockLifecycle(t *testing.T) {
 		writePersonal(t, notes, fmt.Sprintf("cycle %d private notes\n", cycle))
 		expectedPersonal[notes] = personalFiles(t, h.workspace)[notes]
 
-		started = time.Now()
-		initialOut, _ := h.run("", 1, "grade")
-		ev.Grade = time.Since(started)
-		ev.InitialScore, ev.Total = parseScore(t, initialOut)
-		testutil.Equal(t, ev.InitialScore, initialWant)
-		testutil.Equal(t, ev.Total, totalWant)
-
 		h.solveCurrent(ctx)
 
-		solvedOut, _ := h.run("", 0, "grade", "--resubmit")
+		started = time.Now()
+		solvedOut, _ := h.run("", 0, "grade")
+		ev.Grade = time.Since(started)
+		ev.SolvedGrade = ev.Grade
 		var solvedTotal int
 		ev.SolvedScore, solvedTotal = parseScore(t, solvedOut)
+		ev.Total = solvedTotal
 		testutil.Equal(t, solvedTotal, totalWant)
 		if !strings.Contains(solvedOut, fmt.Sprintf("점수: %d/%d", totalWant, totalWant)) {
 			t.Fatalf("cycle %d: full score line missing:\n%s", cycle, solvedOut)
@@ -177,33 +199,27 @@ func TestFullMockLifecycle(t *testing.T) {
 		h.run("", 0, "review")
 
 		// Pods exist and are Ready here: OOM or Pending would show now.
-		ev.OOMOrPending = oomOrPending(ctx, t, h)
-
-		// The graded image was built with ordinary Docker, so the session does
-		// not own it, and reset refuses an image it cannot prove it owns
-		// ("ordinary Docker images require your explicit removal before reset
-		// recovery", image-001's question). The learner removes it first.
+		ev.OOMOrPending = append(slices.Clone(ev.OOMAfterStart), oomOrPending(ctx, t, h)...)
+		// The managed graded image must exist before reset and be removed by it.
 		for _, ref := range graded {
-			if out, err := docker(ctx, "image", "rm", ref); err != nil {
-				t.Fatalf("cycle %d: remove the learner image %s: %v %s", cycle, ref, err, out)
+			if _, err := docker(ctx, "image", "inspect", ref); err != nil {
+				t.Fatalf("cycle %d: the solved image %s is missing before reset: %v", cycle, ref, err)
 			}
 		}
 
 		started = time.Now()
 		h.run(environmentID(ctx, t, h)+"\n", 0, "reset")
 		ev.Reset = time.Since(started)
-
-		// The session-owned probe image is gone with the reset.
-		if probe != "" {
-			if _, err := docker(ctx, "image", "inspect", probe); err == nil {
-				t.Errorf("cycle %d: reset left the owned image %s", cycle, probe)
+		for _, ref := range graded {
+			if _, err := docker(ctx, "image", "inspect", ref); err == nil {
+				t.Errorf("cycle %d: reset left the managed image %s", cycle, ref)
 			}
 		}
 
 		ev.PeakMiB, ev.PeakByContainer = sampler.Stop()
 		ev.Leftovers = observeLeftovers(ctx, t, h)
 		ev.NamespacesAfter, ev.VolumesAfter = clusterCounts(ctx, t, h)
-		ev.Summary = fmt.Sprintf("%s cycle %d (%s): start %s, grade %s, reset %s, score %d->%d/%d, peak %d MiB, leftovers %d, oom/pending %d",
+		ev.Summary = fmt.Sprintf("%s cycle %d (%s): start %s, solved grade %s, reset %s, score %d->%d/%d, peak %d MiB, leftovers %d, oom/pending %d",
 			sel.Label, cycle, ev.Start, ev.PrepareStart.Round(time.Second), ev.Grade.Round(time.Second), ev.Reset.Round(time.Second),
 			ev.InitialScore, ev.SolvedScore, ev.Total, ev.PeakMiB, ev.Leftovers.Count(), len(ev.OOMOrPending))
 		t.Log(ev.Summary)
@@ -218,6 +234,9 @@ func TestFullMockLifecycle(t *testing.T) {
 		solvedScores = append(solvedScores, ev.SolvedScore)
 		allLeftovers = append(allLeftovers, ev.Leftovers)
 		allOOM = append(allOOM, ev.OOMOrPending...)
+		if cycle == acceptanceCycles {
+			allOOM = append(allOOM, oomOrPending(ctx, t, h)...) // after the last reset
+		}
 		nsAfter = append(nsAfter, ev.NamespacesAfter)
 		pvAfter = append(pvAfter, ev.VolumesAfter)
 		evidence = append(evidence, ev)
@@ -389,28 +408,6 @@ func problemPoints(p model.Problem) int {
 	return total
 }
 
-const ownedProbeTag = "junkloud.local/image-001:owned-probe"
-
-// buildOwnedProbe runs `ckad image build` for image-001 (when the exam has
-// it) with the provided, unfinished Dockerfile under a tag no criterion
-// grades, so the initial score is unchanged. It returns the tag, or "".
-func buildOwnedProbe(ctx context.Context, t *testing.T, h *cliHarness, frozen []model.FrozenProblem) string {
-	t.Helper()
-	for i, f := range frozen {
-		if f.Definition.ID != "image-001" {
-			continue
-		}
-		h.run("", 0, "image", "build", "--problem", fmt.Sprintf("Q%d", i+1), "--context", ".", "--tag", ownedProbeTag)
-		out, err := docker(ctx, "image", "inspect", "--format", `{{index .Config.Labels "junkloud.io/session-id"}}`, ownedProbeTag)
-		testutil.NoError(t, err)
-		if strings.TrimSpace(out) == "" {
-			t.Fatalf("the managed build did not label %s with the session", ownedProbeTag)
-		}
-		return ownedProbeTag
-	}
-	return ""
-}
-
 // gradedImages are the image references the model solution builds with
 // ordinary Docker (rendered from the frozen problem's image actions).
 func gradedImages(t *testing.T, h *cliHarness, frozen []model.FrozenProblem) []string {
@@ -432,4 +429,15 @@ func gradedImages(t *testing.T, h *cliHarness, frozen []model.FrozenProblem) []s
 		}
 	}
 	return refs
+}
+
+// pinnedImagesAbsent reports whether none of the node and pinned platform
+// images is in the local Docker store (a cold start's precondition).
+func pinnedImagesAbsent(ctx context.Context) bool {
+	for _, ref := range []string{environment.DefaultNodeImage, environment.CloudProviderKindImage.Ref(), environment.EnvoyProxyImage.Ref(), environment.MetricsServerImage.Ref(), environment.ProbeImage.Ref()} {
+		if _, err := docker(ctx, "image", "inspect", ref); err == nil {
+			return false
+		}
+	}
+	return true
 }
