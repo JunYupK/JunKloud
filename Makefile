@@ -1,4 +1,4 @@
-.PHONY: test test-race test-runtime test-integration test-e2e
+.PHONY: test test-race test-runtime test-integration test-e2e test-acceptance lint
 
 # Unit tests. Run inside the Linux dev container (repo root mounted at /src).
 test:
@@ -26,3 +26,15 @@ test-integration:
 # End-to-end tests of the ckad CLI.
 test-e2e:
 	go test -tags=e2e ./tests/e2e/... -count=1 -timeout=25m
+
+# Release acceptance: the full mock lifecycle (prepare, model solution, grade,
+# reset) three times in a row on a real kind cluster. Takes hours. On a host
+# that lacks a capability list it in JUNKLOUD_TEST_UNSUPPORTED_CAPABILITIES;
+# the run is then labelled PARTIAL and never reported as mock-01. Set
+# JUNKLOUD_ACCEPTANCE_EVIDENCE to keep the per-cycle JSON evidence.
+test-acceptance:
+	go test -tags=acceptance ./tests/e2e/... -count=1 -v -timeout=6h
+
+# Static checks for every build tag, and gofmt.
+lint:
+	go vet ./... && go vet -tags=integration ./... && go vet -tags=e2e ./tests/e2e/ && go vet -tags=acceptance ./tests/e2e/ && test -z "$$(gofmt -l .)"
