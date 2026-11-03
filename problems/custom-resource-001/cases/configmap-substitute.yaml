@@ -1,0 +1,10 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: nightly
+  namespace: ${namespace}
+data:
+  schedule: "0 2 * * *"
+  target-kind: Deployment
+  target-name: ledger
+  retention-days: "7"

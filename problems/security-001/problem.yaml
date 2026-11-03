@@ -1,0 +1,253 @@
+{
+  "schema_version": 1,
+  "id": "security-001",
+  "version": "1.0.0",
+  "title": "Make a workload admissible under a restricted Pod Security policy",
+  "domain": "environment-security",
+  "difficulty": "hard",
+  "type": "behavioral",
+  "tags": [
+    "environment-security",
+    "security-context",
+    "pod-security",
+    "admission"
+  ],
+  "competencies": [
+    "admission control",
+    "SecurityContext and capabilities"
+  ],
+  "capabilities": [],
+  "parameters": {
+    "namespace": [
+      "jk-security-001-a",
+      "jk-security-001-b"
+    ]
+  },
+  "namespace": "${namespace}",
+  "budget": {
+    "cpu": "250m",
+    "memory": "128Mi"
+  },
+  "criteria": [
+    {
+      "id": "policy-enforced",
+      "kind": "field",
+      "points": 1,
+      "feedback": "네임스페이스의 레이블 pod-security.kubernetes.io/enforce는 restricted여야 합니다. 정책을 privileged로 낮추거나 레이블을 지우면 워크로드가 동작해도 이 점수를 잃습니다. 고쳐야 할 것은 정책이 아니라 Deployment gateway의 securityContext입니다. kubectl get namespace 로 레이블을 확인하세요.",
+      "target": {
+        "api_version": "v1",
+        "kind": "Namespace",
+        "name": "${namespace}"
+      },
+      "args": {
+        "fields": [
+          {
+            "path": "metadata.labels['pod-security.kubernetes.io/enforce']",
+            "equals": "restricted"
+          }
+        ]
+      }
+    },
+    {
+      "id": "workload-unchanged",
+      "kind": "field",
+      "points": 1,
+      "feedback": "컨테이너 gateway의 image와 command는 처음 그대로여야 합니다. 이미지나 명령을 바꿔서 정책을 피하려 하지 말고, Deployment에 securityContext를 추가해 정책을 만족시키세요.",
+      "target": {
+        "api_version": "apps/v1",
+        "kind": "Deployment",
+        "namespace": "${namespace}",
+        "name": "gateway"
+      },
+      "args": {
+        "fields": [
+          {
+            "path": "spec.template.spec.containers[name=gateway].image",
+            "equals": "docker.io/library/busybox:1.37.0"
+          },
+          {
+            "path": "spec.template.spec.containers[name=gateway].command",
+            "equals": [
+              "sh",
+              "-c",
+              "mkdir -p /www && echo gateway-ok > /www/index.html && exec httpd -f -p 8080 -h /www"
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "id": "declared-context",
+      "kind": "security-context",
+      "points": 1,
+      "feedback": "컨테이너 gateway의 유효한 securityContext가 runAsUser 10001, runAsNonRoot true, allowPrivilegeEscalation false, capabilities.drop [ALL], seccompProfile RuntimeDefault, readOnlyRootFilesystem true를 모두 만족해야 합니다. runAsUser, runAsNonRoot, seccompProfile은 Pod 수준에도 둘 수 있지만 allowPrivilegeEscalation, capabilities, readOnlyRootFilesystem은 컨테이너 수준에만 있습니다. kubectl get replicaset -n 네임스페이스 와 kubectl describe replicaset 의 이벤트(FailedCreate)에서 정책이 어떤 항목을 거부하는지 읽을 수 있습니다.",
+      "target": {
+        "api_version": "apps/v1",
+        "kind": "Deployment",
+        "namespace": "${namespace}",
+        "name": "gateway"
+      },
+      "args": {
+        "containers": [
+          {
+            "name": "gateway",
+            "run_as_user": 10001,
+            "run_as_non_root": true,
+            "allow_privilege_escalation": false,
+            "capabilities": {
+              "drop": [
+                "ALL"
+              ]
+            },
+            "seccomp": "RuntimeDefault",
+            "read_only_root_filesystem": true
+          }
+        ]
+      }
+    },
+    {
+      "id": "gateway-ready",
+      "kind": "ready",
+      "points": 1,
+      "feedback": "Deployment gateway의 replica 1개가 Ready여야 합니다. 이 항목은 declared-context가 통과해야 평가됩니다: 정책이 거부한 워크로드에는 Pod가 없기 때문입니다. 읽기 전용 루트 파일시스템에서는 앱이 /www에 파일을 쓸 수 있도록 /www를 emptyDir로 마운트해 두어야 컨테이너가 계속 실행됩니다. kubectl get pods 와 kubectl logs, kubectl describe pod 의 Events를 확인하세요.",
+      "target": {
+        "api_version": "apps/v1",
+        "kind": "Deployment",
+        "namespace": "${namespace}",
+        "name": "gateway"
+      },
+      "args": {
+        "replicas": 1
+      },
+      "depends_on": [
+        "declared-context"
+      ],
+      "timeout": "90s"
+    },
+    {
+      "id": "runtime-context",
+      "kind": "security-context",
+      "points": 1,
+      "feedback": "실행 중인 gateway Pod의 프로세스가 실제로 UID 10001로 돌고, 유효 capability가 없으며, 루트 파일시스템이 읽기 전용이어야 합니다. 선언만으로는 부족하며 채점기가 실행 중인 Pod에서 id, /proc/self/status, /proc/self/mountinfo를 읽습니다. 이 항목은 gateway-ready가 통과해야 평가됩니다.",
+      "target": {
+        "api_version": "apps/v1",
+        "kind": "Deployment",
+        "namespace": "${namespace}",
+        "name": "gateway"
+      },
+      "args": {
+        "behavior": {
+          "container": "gateway",
+          "uid": 10001,
+          "no_capabilities": true,
+          "read_only_root": true
+        }
+      },
+      "depends_on": [
+        "gateway-ready"
+      ]
+    }
+  ],
+  "setup": [
+    {
+      "kind": "apply",
+      "args": {
+        "path": "setup/app.yaml"
+      }
+    }
+  ],
+  "solution": [
+    {
+      "kind": "apply",
+      "args": {
+        "path": "solution/gateway.yaml"
+      }
+    }
+  ],
+  "initial_expected": {
+    "policy-enforced": "PASS",
+    "workload-unchanged": "PASS",
+    "declared-context": "FAIL",
+    "runtime-context": "FAIL",
+    "gateway-ready": "FAIL"
+  },
+  "initial_score": 2,
+  "cases": [
+    {
+      "id": "policy-weakened",
+      "actions": [
+        {
+          "kind": "apply",
+          "args": {
+            "path": "cases/policy-weakened.yaml"
+          }
+        }
+      ],
+      "expected": {
+        "policy-enforced": "FAIL",
+        "workload-unchanged": "PASS",
+        "declared-context": "FAIL",
+        "runtime-context": "FAIL",
+        "gateway-ready": "FAIL"
+      },
+      "expected_score": 1
+    },
+    {
+      "id": "policy-removed-and-hardened",
+      "actions": [
+        {
+          "kind": "apply",
+          "args": {
+            "path": "cases/policy-removed-and-hardened.yaml"
+          }
+        }
+      ],
+      "expected": {
+        "policy-enforced": "FAIL",
+        "workload-unchanged": "PASS",
+        "declared-context": "PASS",
+        "runtime-context": "PASS",
+        "gateway-ready": "PASS"
+      },
+      "expected_score": 4
+    },
+    {
+      "id": "runs-as-root",
+      "actions": [
+        {
+          "kind": "apply",
+          "args": {
+            "path": "cases/runs-as-root.yaml"
+          }
+        }
+      ],
+      "expected": {
+        "policy-enforced": "PASS",
+        "workload-unchanged": "PASS",
+        "declared-context": "FAIL",
+        "runtime-context": "FAIL",
+        "gateway-ready": "FAIL"
+      },
+      "expected_score": 2
+    },
+    {
+      "id": "alternative-pod-level-context",
+      "actions": [
+        {
+          "kind": "apply",
+          "args": {
+            "path": "cases/alternative-pod-level-context.yaml"
+          }
+        }
+      ],
+      "expected": {
+        "policy-enforced": "PASS",
+        "workload-unchanged": "PASS",
+        "declared-context": "PASS",
+        "runtime-context": "PASS",
+        "gateway-ready": "PASS"
+      },
+      "expected_score": 5
+    }
+  ]
+}

@@ -1,0 +1,11 @@
+ConfigMap `report-config` and Deployment `reporter` (one Pod, container `reporter`) already exist in `${namespace}`. Today `reporter` runs as the `default` ServiceAccount of the namespace.
+
+Create the ServiceAccount `report-reader` in `${namespace}` and give it only the access that a reporting job needs. Use namespaced RBAC objects in `${namespace}` only (a Role and a RoleBinding): a cluster-scoped object that you create, such as a ClusterRole or a ClusterRoleBinding, is not removed when the problem is reset.
+
+- `report-reader` must be able to get, list and watch Pods in `${namespace}`, and to get the ConfigMap `report-config` in `${namespace}`.
+- `report-reader` must NOT be able to: delete Pods, get or list Secrets, create Deployments, list Pods in all namespaces, list Pods in the namespace `kube-system`, get any other ConfigMap (for example one named `other`), or list or watch ConfigMaps (a rule without `resourceNames` would let it read every ConfigMap).
+- The `default` ServiceAccount of `${namespace}` must not gain any of these rights: it must still not be able to get or list Pods or to get the ConfigMap `report-config`.
+
+Then run Deployment `reporter` as `report-reader`, with the ServiceAccount token mounted. The grader reads the token inside container `reporter` with `cat` and has the cluster authenticate it, so the container must keep a `cat` command (the provided `docker.io/library/busybox:1.37.0` image has one) and the token must stay mounted: do not set `automountServiceAccountToken: false`.
+
+Each of the following earns 1 point: Deployment `reporter` has 1 Ready replica (10-second stability window, 90-second observation limit); `report-reader` is allowed everything in the first bullet; `report-reader` is denied everything in the second bullet; the Pods of `reporter` run as `report-reader` and the token they have mounted authenticates as `report-reader` (this point needs the first one, because it judges the running Pods); and `default` is denied the three actions in the third bullet. Access is checked by asking the cluster which actions each ServiceAccount is allowed, so any Role layout that gives the same rights earns the points: one Role or several, any object names. A binding to a broad ClusterRole such as `edit` allows more than the second bullet and loses its point even if the application still runs.

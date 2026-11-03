@@ -8,6 +8,8 @@ import (
 	"errors"
 	"fmt"
 	"slices"
+	"strings"
+	"time"
 
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
@@ -168,6 +170,12 @@ func (m *Manager) Apply(ctx context.Context, id model.Identity, owner Owner, act
 				}
 				if err := record(r, false); err != nil {
 					return inv, err
+				}
+				if isCRD(p.ref) {
+					// Recorded first, so a CRD that never gets established is still owned.
+					if err := waitCRDEstablished(ctx, cl.dyn, p.ref.Name, crdEstablishTimeout, crdEstablishPoll); err != nil {
+						return inv, err
+					}
 				}
 			case model.ActionDeleteOwned:
 				if err := deleteObject(ctx, cl, owner.Inventory, p); err != nil {
@@ -515,6 +523,75 @@ func applyObject(ctx context.Context, cl *clients, inv model.Inventory, p planne
 		return model.OwnedResource{}, apiError("apply "+what, err)
 	}
 	return model.OwnedResource{Ref: p.ref, UID: string(out.GetUID()), OwnerID: OwnerID(inv)}, nil
+}
+
+const (
+	// crdEstablishTimeout bounds the wait for an applied CRD to be Established.
+	crdEstablishTimeout = 30 * time.Second
+	crdEstablishPoll    = 200 * time.Millisecond
+)
+
+var crdGVR = schema.GroupVersionResource{Group: "apiextensions.k8s.io", Version: "v1", Resource: "customresourcedefinitions"}
+
+func isCRD(ref model.ObjectRef) bool {
+	return ref.APIVersion == "apiextensions.k8s.io/v1" && ref.Kind == "CustomResourceDefinition"
+}
+
+// waitCRDEstablished polls the CRD until its Established condition is True,
+// so a later Apply (which plans against a fresh type mapper) finds the new
+// kind. It gives up after timeout or when ctx ends; the error names the CRD.
+// Every read runs under the same deadline, so a slow GET can neither extend
+// the wait nor turn into a success after it.
+func waitCRDEstablished(ctx context.Context, dyn dynamic.Interface, name string, timeout, poll time.Duration) error {
+	waitCtx, cancel := context.WithTimeout(ctx, timeout)
+	defer cancel()
+	ticker := time.NewTicker(poll)
+	defer ticker.Stop()
+	last := "not read yet"
+	for {
+		crd, err := dyn.Resource(crdGVR).Get(waitCtx, name, metav1.GetOptions{})
+		switch {
+		case err == nil:
+			established, state := crdEstablished(crd)
+			if established {
+				return nil
+			}
+			last = state
+		case waitCtx.Err() == nil:
+			last = err.Error()
+		}
+		select {
+		case <-waitCtx.Done():
+			if ctx.Err() != nil {
+				return fmt.Errorf("environment: wait for CRD %s to be established: %w", name, ctx.Err())
+			}
+			return fmt.Errorf("environment: CRD %s not established within %s (%s)", name, timeout, last)
+		case <-ticker.C:
+		}
+	}
+}
+
+// crdEstablished reports whether the CRD's Established condition is True and
+// otherwise describes the conditions seen.
+func crdEstablished(crd *unstructured.Unstructured) (bool, string) {
+	conds, _, _ := unstructured.NestedSlice(crd.Object, "status", "conditions")
+	var seen []string
+	for _, c := range conds {
+		m, ok := c.(map[string]any)
+		if !ok {
+			continue
+		}
+		typ, _ := m["type"].(string)
+		status, _ := m["status"].(string)
+		if typ == "Established" && status == "True" {
+			return true, ""
+		}
+		seen = append(seen, typ+"="+status)
+	}
+	if len(seen) == 0 {
+		return false, "no conditions yet"
+	}
+	return false, strings.Join(seen, ", ")
 }
 
 // deleteObject deletes an inventory object only if it is still the recorded

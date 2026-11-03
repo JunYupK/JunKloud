@@ -3,10 +3,18 @@
 package environment
 
 import (
+	"context"
+	"strings"
 	"testing"
+	"time"
 
 	"k8s.io/apimachinery/pkg/api/meta"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
+	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/runtime/schema"
+	"k8s.io/client-go/dynamic"
+	dynamicfake "k8s.io/client-go/dynamic/fake"
 
 	"github.com/JunYupK/JunKloud/internal/model"
 	"github.com/JunYupK/JunKloud/internal/testutil"
@@ -216,4 +224,119 @@ func TestRequiredNamespaces(t *testing.T) {
 		namespaceObj("svc-alpha-client"), configMap("svc-alpha-client", "d")}}}, testMapper())
 	testutil.NoError(t, err)
 	testutil.Equal(t, len(requiredNamespaces(owner, explicit)), 0)
+}
+
+func crdWithConditions(name string, conds ...map[string]any) *unstructured.Unstructured {
+	list := make([]any, 0, len(conds))
+	for _, c := range conds {
+		list = append(list, c)
+	}
+	return &unstructured.Unstructured{Object: map[string]any{
+		"apiVersion": "apiextensions.k8s.io/v1", "kind": "CustomResourceDefinition",
+		"metadata": map[string]any{"name": name},
+		"status":   map[string]any{"conditions": list},
+	}}
+}
+
+func TestWaitCRDEstablished(t *testing.T) {
+	const name = "widgets.example.com"
+	cond := func(typ, status string) map[string]any {
+		return map[string]any{"type": typ, "status": status}
+	}
+	cases := []struct {
+		name    string
+		crd     *unstructured.Unstructured // nil: the CRD does not exist
+		wantErr bool
+	}{
+		{"established", crdWithConditions(name, cond("NamesAccepted", "True"), cond("Established", "True")), false},
+		{"names not accepted", crdWithConditions(name, cond("NamesAccepted", "False"), cond("Established", "False")), true},
+		{"established false", crdWithConditions(name, cond("NamesAccepted", "True"), cond("Established", "False")), true},
+		{"no conditions", crdWithConditions(name), true},
+		{"missing", nil, true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			var objs []runtime.Object
+			if tc.crd != nil {
+				objs = append(objs, tc.crd)
+			}
+			dyn := dynamicfake.NewSimpleDynamicClient(runtime.NewScheme(), objs...)
+			err := waitCRDEstablished(context.Background(), dyn, name, 30*time.Millisecond, time.Millisecond)
+			if !tc.wantErr {
+				testutil.NoError(t, err)
+				return
+			}
+			if err == nil || !strings.Contains(err.Error(), name) {
+				t.Fatalf("got error %v, want one naming %s", err, name)
+			}
+		})
+	}
+}
+
+func TestWaitCRDEstablishedBecomesTrue(t *testing.T) {
+	const name = "widgets.example.com"
+	dyn := dynamicfake.NewSimpleDynamicClient(runtime.NewScheme(), crdWithConditions(name))
+	gvr := schema.GroupVersionResource{Group: "apiextensions.k8s.io", Version: "v1", Resource: "customresourcedefinitions"}
+	go func() {
+		time.Sleep(20 * time.Millisecond)
+		_, _ = dyn.Resource(gvr).UpdateStatus(context.Background(), crdWithConditions(name,
+			map[string]any{"type": "Established", "status": "True"}), metav1.UpdateOptions{})
+	}()
+	testutil.NoError(t, waitCRDEstablished(context.Background(), dyn, name, 5*time.Second, 2*time.Millisecond))
+}
+
+func TestWaitCRDEstablishedHonoursContext(t *testing.T) {
+	const name = "widgets.example.com"
+	dyn := dynamicfake.NewSimpleDynamicClient(runtime.NewScheme(), crdWithConditions(name))
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	err := waitCRDEstablished(ctx, dyn, name, time.Minute, time.Millisecond)
+	testutil.ErrorIs(t, err, context.Canceled)
+	if !strings.Contains(err.Error(), name) {
+		t.Fatalf("error %v does not name %s", err, name)
+	}
+}
+
+// slowCRDs answers a CRD GET only after delay (honouring the request
+// context), the way a slow API server does. Unused methods panic via the nil
+// embedded interface.
+type slowCRDs struct {
+	dynamic.NamespaceableResourceInterface
+	delay time.Duration
+	crd   *unstructured.Unstructured
+}
+
+func (s slowCRDs) Get(ctx context.Context, _ string, _ metav1.GetOptions, _ ...string) (*unstructured.Unstructured, error) {
+	select {
+	case <-ctx.Done():
+		return nil, ctx.Err()
+	case <-time.After(s.delay):
+		return s.crd, nil
+	}
+}
+
+type slowDynamic struct {
+	dynamic.Interface
+	crds slowCRDs
+}
+
+func (s slowDynamic) Resource(schema.GroupVersionResource) dynamic.NamespaceableResourceInterface {
+	return s.crds
+}
+
+// An in-flight GET must not outlive the wait's own deadline: a read that
+// only answers after the deadline neither extends the wait nor turns it into
+// a success.
+func TestWaitCRDEstablishedBoundsInFlightReads(t *testing.T) {
+	const name = "widgets.example.com"
+	established := crdWithConditions(name, map[string]any{"type": "Established", "status": "True"})
+	dyn := slowDynamic{crds: slowCRDs{delay: 2 * time.Second, crd: established}}
+	start := time.Now()
+	err := waitCRDEstablished(context.Background(), dyn, name, 50*time.Millisecond, time.Millisecond)
+	if elapsed := time.Since(start); elapsed > time.Second {
+		t.Fatalf("wait took %s, want it bounded by its 50ms deadline", elapsed)
+	}
+	if err == nil || !strings.Contains(err.Error(), name) {
+		t.Fatalf("got error %v, want a timeout naming %s", err, name)
+	}
 }

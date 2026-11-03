@@ -1,0 +1,3 @@
+Deployment gateway (container gateway, image docker.io/library/busybox:1.37.0, imagePullPolicy: Never) exists in ${namespace}. The namespace enforces the restricted Pod Security Standard through the label pod-security.kubernetes.io/enforce=restricted, so the Pods of gateway are rejected.
+Keep the label at restricted and keep the image and the command of container gateway. Give container gateway a security context that runs it as user ID 10001 without privilege escalation, with all capabilities dropped, seccomp RuntimeDefault and a read-only root filesystem. The Pod must be Ready.
+The application writes its page into the emptyDir mounted at /www when it starts.

@@ -7,7 +7,7 @@ CKAD(Certified Kubernetes Application Developer) 자격증 공부를 위한 **�
 - 문제·요구사항은 실제 시험처럼 **영어**로, 피드백과 해설은 **한국어**로 제공합니다.
 - 채점은 실제 클러스터 상태를 관찰해 항목별 **PASS / FAIL / ERROR**로 판정합니다. 환경 장애로 판정할 수 없는 항목(ERROR)이 있으면 총점을 확정하지 않습니다.
 
-> 현재 문제은행은 **12문제 / 55점**의 부분 은행입니다. 기본 20문항 모의시험(`mock`)은 아직 제공하지 않으므로 **훈련 모드(`--mode practice`)** 로 사용하세요. 자세한 내용은 [현재 상태와 제한](#현재-상태와-제한)을 참고하세요.
+> 현재 문제은행은 **17문제 / 80점**의 부분 은행입니다. 기본 20문항 모의시험(`mock`)은 아직 제공하지 않으므로 **훈련 모드(`--mode practice`)** 로 사용하세요. 자세한 내용은 [현재 상태와 제한](#현재-상태와-제한)을 참고하세요.
 
 ## 목차
 
@@ -91,7 +91,8 @@ ckad doctor
 # 처음 한 번 (아래 "처음 한 번: 문제 검증" 참고)
 for id in image-001 batch-001 daemonset-001 multicontainer-001 volume-001 \
           rollout-001 release-001 helm-001 kustomize-001 \
-          api-migration-001 probes-001 diagnostics-001; do
+          api-migration-001 probes-001 diagnostics-001 \
+          custom-resource-001 access-001 resources-001 configuration-001 security-001; do
   ckad bank validate "$id" || break
 done
 
@@ -128,7 +129,7 @@ ckad start --mode practice --count 5
 
 - 문제 수는 **5~20개**입니다. 검증된 문제 중에서 선택합니다.
 - 필터 옵션
-  - `--domain`: `design-build`, `deployment`, `observability`, `environment-security`, `networking`. 뒤의 두 영역은 아직 문제가 없습니다.
+  - `--domain`: `design-build`, `deployment`, `observability`, `environment-security`, `networking`. `networking`은 아직 문제가 없습니다.
   - `--difficulty`, `--tag`
   - `--seed`: 같은 문제 선택을 재현합니다.
 - 준비가 끝나면 `준비 완료: ... 시작하시겠습니까? [yes/no]`가 나옵니다. `yes`를 입력하면 시계가 시작됩니다.
@@ -267,22 +268,27 @@ docker save --output image.tar junkloud.local/app:practice   # 아카이브가 �
 
 ## 문제은행
 
-| ID | 영역 | 유형 | 점수 | 주제 |
-| --- | --- | --- | ---: | --- |
-| `image-001` | Design & Build | build | 4 | 명령을 실행 가능한 이미지로 패키징 |
-| `batch-001` | Design & Build | build | 4 | Job 실행과 CronJob 일정 |
-| `daemonset-001` | Design & Build | build | 4 | DaemonSet으로 노드 에이전트 배치 |
-| `multicontainer-001` | Design & Build | build | 4 | init·sidecar 컨테이너와 임시 볼륨 |
-| `volume-001` | Design & Build | modify | 4 | Pod를 교체해도 데이터 유지(PVC) |
-| `rollout-001` | Deployment | troubleshoot | 5 | 멈춘 rollout 복구 |
-| `release-001` | Deployment | build | 5 | stable·canary 백엔드 구성 |
-| `helm-001` | Deployment | build | 5 | 로컬 Helm chart와 release values |
-| `kustomize-001` | Deployment | build | 5 | base를 건드리지 않는 overlay 배포 |
-| `api-migration-001` | Observability | modify | 5 | 폐기된 API manifest를 제공되는 API로 이전 |
-| `probes-001` | Observability | troubleshoot | 5 | readiness·liveness·startup probe 수정 |
-| `diagnostics-001` | Observability | troubleshoot | 5 | CrashLoop 원인 진단과 CPU 사용량 확인(`kubectl top`) |
+| ID | 영역 | 유형 | 난이도 | 점수 | 주제 |
+| --- | --- | --- | --- | ---: | --- |
+| `image-001` | Design & Build | build | medium | 4 | 명령을 실행 가능한 이미지로 패키징 |
+| `batch-001` | Design & Build | build | medium | 4 | Job 실행과 CronJob 일정 |
+| `daemonset-001` | Design & Build | build | medium | 4 | DaemonSet으로 노드 에이전트 배치 |
+| `multicontainer-001` | Design & Build | build | medium | 4 | init·sidecar 컨테이너와 임시 볼륨 |
+| `volume-001` | Design & Build | modify | medium | 4 | Pod를 교체해도 데이터 유지(PVC) |
+| `rollout-001` | Deployment | troubleshoot | medium | 5 | 멈춘 rollout 복구 |
+| `release-001` | Deployment | build | medium | 5 | stable·canary 백엔드 구성 |
+| `helm-001` | Deployment | build | medium | 5 | 로컬 Helm chart와 release values |
+| `kustomize-001` | Deployment | build | medium | 5 | base를 건드리지 않는 overlay 배포 |
+| `api-migration-001` | Observability | modify | medium | 5 | 폐기된 API manifest를 제공되는 API로 이전 |
+| `probes-001` | Observability | troubleshoot | medium | 5 | readiness·liveness·startup probe 수정 |
+| `diagnostics-001` | Observability | troubleshoot | medium | 5 | CrashLoop 원인 진단과 CPU 사용량 확인(`kubectl top`) |
+| `custom-resource-001` | Environment·Configuration·Security | build | easy | 5 | CRD에서 Backup 리소스 종류를 찾아 사용자 리소스(CR) 생성 |
+| `access-001` | Environment·Configuration·Security | modify | medium | 5 | ServiceAccount와 네임스페이스 RBAC로 최소 권한 부여 |
+| `resources-001` | Environment·Configuration·Security | troubleshoot | medium | 5 | ResourceQuota·LimitRange에 맞춘 requests·limits 수정 |
+| `configuration-001` | Environment·Configuration·Security | troubleshoot | easy | 5 | 잘못된 환경 변수를 ConfigMap·Secret 참조로 교체(Secret 값은 결과에 노출되지 않음) |
+| `security-001` | Environment·Configuration·Security | behavioral | hard | 5 | `restricted` Pod Security 정책을 지키면서 워크로드 실행(securityContext) |
 
-- **영역별 합계:** Design & Build 5문제/20점, Deployment 4문제/20점, Observability 3문제/15점입니다.
+- **영역별 합계:** Design & Build 5문제/20점, Deployment 4문제/20점, Observability 3문제/15점, Environment·Configuration·Security 5문제/25점입니다. 유형은 build·modify·troubleshoot·behavioral을 모두 포함합니다.
 - **영역 매핑:** [`curriculum/coverage.yaml`](curriculum/coverage.yaml)에 있습니다.
 - **필요한 기능(capability):** `image-001`은 `image-build`, `volume-001`은 `storage`, `diagnostics-001`은 `metrics`가 필요합니다. 환경이 이 기능을 지원하지 않으면 해당 문제는 출제하지 않습니다.
 - **변형:** 문제마다 parameter(namespace 등)가 seed에 따라 바뀝니다.
@@ -332,7 +338,7 @@ go test -tags=integration ./tests/integration -run '^TestObservabilityBank$' -co
 # 한 문제만: -run '^TestObservabilityBank$/^probes-001$'
 ```
 
-다른 문제은행 테스트(`TestBuildBank`, `TestDeploymentBank` 등)도 같은 방식으로 실행합니다.
+다른 문제은행 테스트(`TestBuildBank`, `TestDeploymentBank`, `TestSecurityBank` 등)도 같은 방식으로 실행합니다.
 
 호스트가 표준과 다를 때 쓰는 테스트 전용 환경 변수입니다. 제품 기본값을 바꾸지 않습니다.
 
@@ -360,7 +366,7 @@ go test -tags=integration ./tests/integration -run '^TestObservabilityBank$' -co
 
 ## 현재 상태와 제한
 
-- **문제은행:** 12문제 / 55점입니다. 남은 영역은 Environment·Configuration·Security(25점)와 Services & Networking(20점)이고, 기본 20문항 모의시험(`mock-01`)은 이 문제들이 추가된 뒤 제공됩니다.
+- **문제은행:** 17문제 / 80점입니다. 남은 영역은 Services & Networking(20점)이고, 기본 20문항 모의시험(`mock-01`)은 이 문제들이 추가된 뒤 제공됩니다.
 - **검증한 환경:** Linux(amd64) 샌드박스입니다. M2(ARM64) 8GB에 4GiB Docker VM, Windows 16GB 같은 실제 목표 기기 검증은 아직 하지 않았습니다.
 - **작업 컨테이너 도구:** 설계상 제공할 도구 중 `wget`과 man pages는 아직 이미지에 없습니다(`curl`은 있습니다).
 - **범위 밖:** 실제 시험의 SSH 진입·복귀, 다중 클러스터 전환, 시험 감독, 브라우저 제한은 재현하지 않습니다.

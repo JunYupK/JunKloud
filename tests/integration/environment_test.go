@@ -33,6 +33,9 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
+	"k8s.io/apimachinery/pkg/runtime/schema"
+	"k8s.io/client-go/dynamic"
 	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/tools/clientcmd"
 
@@ -716,4 +719,102 @@ func liveMeta(t *testing.T, cs kubernetes.Interface, ref model.ObjectRef) metav1
 	}
 	testutil.NoError(t, err)
 	return meta
+}
+
+// TestApplyWaitsForCRDEstablished applies a CRD in one Apply call and a
+// custom resource of that kind in the very next call. The second call plans
+// against a fresh type mapper, so it only succeeds when the first call
+// returned after the CRD was Established.
+func TestApplyWaitsForCRDEstablished(t *testing.T) {
+	requireTools(t, "docker", "kind")
+	ctx := context.Background()
+	opts := hostCompatOptions(t)
+	t.Setenv("KUBECONFIG", filepath.Join(t.TempDir(), "decoy-kubeconfig"))
+
+	stateDir, st := newEnvironmentDir(t)
+	m := environment.New(stateDir, st, opts...)
+	id, err := m.Ensure(ctx)
+	testutil.NoError(t, err)
+
+	cfg, err := clientcmd.LoadFromFile(m.KubeconfigPath())
+	testutil.NoError(t, err)
+	rc, err := clientcmd.NewNonInteractiveClientConfig(*cfg, id.Context, &clientcmd.ConfigOverrides{}, nil).ClientConfig()
+	testutil.NoError(t, err)
+	dyn, err := dynamic.NewForConfig(rc)
+	testutil.NoError(t, err)
+
+	const group = "jk-crd.example.com"
+	const reps = 5
+	owner := environment.Owner{
+		Inventory:        model.Inventory{EnvironmentID: id.ID, SessionID: "s1", ProblemID: "crd-test"},
+		Namespace:        "jk-crd-a",
+		CreateNamespaces: true,
+	}
+	for i := range reps {
+		owner.Scope.ClusterResources = append(owner.Scope.ClusterResources, model.ObjectRef{
+			APIVersion: "apiextensions.k8s.io/v1", Kind: "CustomResourceDefinition", Name: crdName(i, group)})
+	}
+
+	for i := range reps {
+		plural := crdPlural(i)
+		kind := "Gadget" + strconv.Itoa(i)
+		crd := map[string]any{
+			"apiVersion": "apiextensions.k8s.io/v1", "kind": "CustomResourceDefinition",
+			"metadata": map[string]any{"name": crdName(i, group)},
+			"spec": map[string]any{
+				"group": group, "scope": "Namespaced",
+				"names": map[string]any{"plural": plural, "singular": strings.ToLower(kind), "kind": kind, "listKind": kind + "List"},
+				"versions": []any{map[string]any{
+					"name": "v1", "served": true, "storage": true,
+					"schema": map[string]any{"openAPIV3Schema": map[string]any{
+						"type": "object", "x-kubernetes-preserve-unknown-fields": true}},
+				}},
+			},
+		}
+		cr := map[string]any{
+			"apiVersion": group + "/v1", "kind": kind,
+			"metadata": map[string]any{"name": "g" + strconv.Itoa(i), "namespace": "jk-crd-a"},
+			"spec":     map[string]any{"size": 3},
+		}
+		inv, err := m.Apply(ctx, id, owner, []environment.Action{{Kind: model.ActionApply, Objects: []map[string]any{crd}}})
+		if err != nil {
+			t.Fatalf("rep %d: apply CRD: %v", i, err)
+		}
+		owner.Inventory = inv
+		// The CRD is Established the moment Apply returns, not "soon".
+		live, err := dyn.Resource(crdGVR).Get(ctx, crdName(i, group), metav1.GetOptions{})
+		testutil.NoError(t, err)
+		if !crdIsEstablished(live) {
+			t.Fatalf("rep %d: Apply returned before CRD %s was Established: %v", i, crdName(i, group), live.Object["status"])
+		}
+		owner.CreateNamespaces = false
+		inv, err = m.Apply(ctx, id, owner, []environment.Action{{Kind: model.ActionApply, Objects: []map[string]any{cr}}})
+		if err != nil {
+			t.Fatalf("rep %d: apply %s right after its CRD: %v", i, kind, err)
+		}
+		owner.Inventory = inv
+		got, err := dyn.Resource(schema.GroupVersionResource{Group: group, Version: "v1", Resource: plural}).
+			Namespace("jk-crd-a").Get(ctx, "g"+strconv.Itoa(i), metav1.GetOptions{})
+		if err != nil {
+			t.Fatalf("rep %d: read %s: %v", i, kind, err)
+		}
+		size, _, _ := unstructured.NestedInt64(got.Object, "spec", "size")
+		testutil.Equal(t, size, int64(3))
+	}
+}
+
+func crdPlural(i int) string { return "gadgets" + strconv.Itoa(i) }
+
+func crdName(i int, group string) string { return crdPlural(i) + "." + group }
+
+var crdGVR = schema.GroupVersionResource{Group: "apiextensions.k8s.io", Version: "v1", Resource: "customresourcedefinitions"}
+
+func crdIsEstablished(crd *unstructured.Unstructured) bool {
+	conds, _, _ := unstructured.NestedSlice(crd.Object, "status", "conditions")
+	for _, c := range conds {
+		if m, ok := c.(map[string]any); ok && m["type"] == "Established" && m["status"] == "True" {
+			return true
+		}
+	}
+	return false
 }

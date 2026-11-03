@@ -30,6 +30,10 @@ type bankProgress struct {
 	t      *testing.T
 	stages []string
 	next   map[uint64]int
+	// forbidden lists strings (for example a planted Secret value) that no
+	// observed evaluation may contain, in JSON or in CLI-style text. A match
+	// fails the test without printing the value.
+	forbidden []string
 }
 
 func (p *bankProgress) Evaluate(ctx context.Context, target grader.Target) (model.Evaluation, error) {
@@ -45,6 +49,9 @@ func (p *bankProgress) Evaluate(ctx context.Context, target grader.Target) (mode
 	p.t.Logf("BANK %s seed=%d stage=%s END score=%d/%d complete=%t error=%v", target.Problem.Definition.ID, seed, stage, score, ev.MaxScore, ev.Complete, err)
 	for _, r := range ev.Results {
 		p.t.Logf("  %s %s: %s", r.CriterionID, r.Status, r.Reason)
+	}
+	for _, leak := range evaluationLeaks(ev, p.forbidden) {
+		p.t.Errorf("LEAK %s seed=%d stage=%s: %s", target.Problem.Definition.ID, seed, stage, leak)
 	}
 	return ev, err
 }
@@ -148,7 +155,7 @@ func smokeBank(t *testing.T, b bankRuntime, problems []model.Problem) {
 			// Deployment smoke proves native Helm release/value state and real
 			// stable/canary UID membership + HTTP, in addition to native image
 			// readiness. Preserve the actual criteria's dependency graph/budgets.
-			if p.Domain == model.DomainDeployment {
+			if p.Domain == model.DomainDeployment || p.Domain == model.DomainEnvironmentSecurity {
 				chosen = f.Definition.Criteria
 			}
 			f.Definition.Criteria = chosen
@@ -215,6 +222,13 @@ func validateGroup(t *testing.T, problems []model.Problem) {
 
 func validateGroupAfterSmoke(t *testing.T, problems []model.Problem, smoke bool) {
 	t.Helper()
+	validateGroupGuarded(t, problems, smoke, nil)
+}
+
+// validateGroupGuarded validates a group; forbidden maps a problem ID to the
+// strings none of its evaluations may contain (see bankProgress.forbidden).
+func validateGroupGuarded(t *testing.T, problems []model.Problem, smoke bool, forbidden map[string][]string) {
+	t.Helper()
 	b := openBankRuntime(t)
 	m, id, dir, st, rt, cfg := b.m, b.id, b.dir, b.st, b.rt, b.cfg
 	ctx := context.Background()
@@ -234,7 +248,7 @@ func validateGroupAfterSmoke(t *testing.T, problems []model.Problem, smoke bool)
 				stages = append(stages, author.CaseKey(c.ID))
 			}
 			stages = append(stages, author.KeyReset)
-			progress := &bankProgress{Evaluator: rt.Grader.Engine, t: t, stages: stages, next: map[uint64]int{}}
+			progress := &bankProgress{Evaluator: rt.Grader.Engine, t: t, stages: stages, next: map[uint64]int{}, forbidden: forbidden[p.ID]}
 			names := []string{}
 			for _, img := range cfg.ProvidedImages() {
 				names = append(names, img.Name, img.Ref())
