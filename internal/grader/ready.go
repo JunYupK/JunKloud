@@ -35,7 +35,10 @@ import (
 // or constraints only the pod itself imposes are FAIL (the reason names the
 // cause); cluster capacity, node trouble, a pull failure of an image the
 // environment provides (WithPreloadedImages), a controller that never
-// observed the spec, no pods at all, ready pods not yet observed stable for
+// observed the spec, no pods at all (unless a Deployment or ReplicaSet reports
+// a FailedCreate admission rejection of the learner's own pod spec, "is
+// forbidden:" for quota, ServiceAccount, PodSecurity or LimitRange: FAIL; a
+// webhook or API failure stays ERROR), ready pods not yet observed stable for
 // the whole window, or any cause the pods do not show are ERROR
 // (ErrInsufficientEvidence).
 //
@@ -237,7 +240,7 @@ func (c *ReadyChecker) Check(ctx context.Context, t Target, crit model.Criterion
 	if err != nil {
 		return model.CheckResult{}, err
 	}
-	cause := classifyRollout(pods, obs.v.expectPods || obs.v.unstable && obs.v.wantPods > 0, causeConfig{
+	cause := classifyRollout(pods, obs.v.expectPods || obs.v.unstable && obs.v.wantPods > 0, obs.obj, causeConfig{
 		preloaded: c.set.preloaded, configured: c.set.preloadedSet, pullMessages: msgs})
 	if cause.class != faultLearner {
 		if obs.v.unstable && len(cause.findings) == 0 {

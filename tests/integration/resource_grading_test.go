@@ -382,3 +382,71 @@ func TestResourceGrading(t *testing.T) {
 		testutil.Equal(t, ev.MaxScore, 12)
 	})
 }
+
+// TestReadyFailedCreateIsLearnerFault: a Deployment whose pods the API server
+// refuses to create because of the learner's own spec (a ServiceAccount that
+// does not exist, a Pod over the namespace quota) is the learner's FAIL, not
+// an ERROR (grader-9). The reason carries the API server's message.
+func TestReadyFailedCreateIsLearnerFault(t *testing.T) {
+	requireTools(t, "docker", "kind")
+	ctx := context.Background()
+	m, id := bootEnvironment(t)
+	testutil.NoError(t, m.EnsurePlatform(ctx, id))
+	testutil.NoError(t, m.PreloadImages(ctx, id, environment.ProbeImage))
+
+	opts := []grader.Option{grader.WithRedactor(grader.NewRedactor()), grader.WithPreloadedImages(environment.ProbeImage.Name)}
+	reader, err := grader.NewClusterReader(m.KubeconfigPath(), id.Context)
+	testutil.NoError(t, err)
+	engine := grader.NewEngine(grader.DefaultCheckers(reader, opts...), opts...)
+
+	deploy := func(ns, name string, podSpec map[string]any, resources map[string]any) map[string]any {
+		container := map[string]any{"name": "web", "image": environment.ProbeImage.Name, "command": []any{"sleep", "3600"}}
+		if resources != nil {
+			container["resources"] = resources
+		}
+		podSpec["containers"] = []any{container}
+		return map[string]any{"apiVersion": "apps/v1", "kind": "Deployment",
+			"metadata": map[string]any{"name": name, "namespace": ns},
+			"spec": map[string]any{"replicas": 1,
+				"selector": map[string]any{"matchLabels": map[string]any{"app": name}},
+				"template": map[string]any{"metadata": map[string]any{"labels": map[string]any{"app": name}}, "spec": podSpec}}}
+	}
+	cases := []struct {
+		name, ns, want string
+		objects        []map[string]any
+	}{
+		{"missing-sa", "jk-fc-sa", "serviceaccount",
+			[]map[string]any{deploy("jk-fc-sa", "web", map[string]any{"serviceAccountName": "missing-sa"}, nil)}},
+		{"quota", "jk-fc-quota", "exceeded quota", []map[string]any{
+			{"apiVersion": "v1", "kind": "ResourceQuota", "metadata": map[string]any{"name": "team-quota", "namespace": "jk-fc-quota"},
+				"spec": map[string]any{"hard": map[string]any{"requests.memory": "64Mi"}}},
+			deploy("jk-fc-quota", "web", map[string]any{}, map[string]any{"requests": map[string]any{"memory": "128Mi"}}),
+		}},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			owner := environment.Owner{
+				Inventory:        model.Inventory{EnvironmentID: id.ID, SessionID: "s-" + tc.name, ProblemID: "grade-fc"},
+				Namespace:        tc.ns,
+				CreateNamespaces: true,
+			}
+			_, err := m.Apply(ctx, id, owner, []environment.Action{{Kind: model.ActionApply, Objects: tc.objects}})
+			testutil.NoError(t, err)
+
+			ref := model.ObjectRef{APIVersion: "apps/v1", Kind: "Deployment", Namespace: tc.ns, Name: "web"}
+			crit := model.Criterion{ID: "ready", Kind: model.CriterionReady, Target: ref, Points: 4, Timeout: 30 * time.Second,
+				Args: map[string]any{"replicas": 1}}
+			ev, err := engine.Evaluate(ctx, grader.Target{Identity: id, Problem: model.FrozenProblem{
+				Definition: model.Problem{ID: "grade-fc", Namespace: tc.ns, Criteria: []model.Criterion{crit}},
+				Namespace:  tc.ns,
+			}})
+			testutil.NoError(t, err)
+			testutil.Equal(t, ev.Results[0].Status, "FAIL")
+			if !strings.Contains(strings.ToLower(ev.Results[0].Reason), tc.want) {
+				t.Fatalf("reason lacks %q: %q", tc.want, ev.Results[0].Reason)
+			}
+			t.Logf("reason: %s", ev.Results[0].Reason)
+		})
+	}
+}

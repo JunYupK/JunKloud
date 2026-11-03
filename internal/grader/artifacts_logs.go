@@ -215,7 +215,7 @@ func (c *ArtifactChecker) checkLogs(ctx context.Context, t Target, crit model.Cr
 		if err != nil {
 			return model.CheckResult{}, err
 		}
-		cause := classifyRollout(round.pods, true, causeConfig{preloaded: c.set.preloaded, configured: c.set.preloadedSet, pullMessages: msgs})
+		cause := classifyRollout(round.pods, true, nil, causeConfig{preloaded: c.set.preloaded, configured: c.set.preloadedSet, pullMessages: msgs})
 		if cause.class != faultLearner {
 			return model.CheckResult{}, fmt.Errorf("%w: no container of %s %s has produced a log; %s", ErrInsufficientEvidence, ref.Kind, ref.Name, cause.text)
 		}

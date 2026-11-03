@@ -64,7 +64,9 @@ func (r rolloutCause) summary() []any {
 
 // classifyRollout decides whose fault an incomplete rollout is from the pods
 // the workload owns. expectPods: the workload should have pods by now.
-func classifyRollout(pods []object, expectPods bool, cfg causeConfig) rolloutCause {
+// workload is the observed Deployment or ReplicaSet (nil where there is none):
+// when it created no pods, its ReplicaFailure condition says why.
+func classifyRollout(pods []object, expectPods bool, workload object, cfg causeConfig) rolloutCause {
 	var findings []podFinding
 	for _, p := range pods {
 		if metaOf(p)["deletionTimestamp"] != nil || podReady(p) {
@@ -76,6 +78,13 @@ func classifyRollout(pods []object, expectPods bool, cfg causeConfig) rolloutCau
 
 	switch {
 	case len(pods) == 0 && expectPods:
+		if learner, msg := createFailure(workload); msg != "" {
+			if learner {
+				// The API server rejected the learner's own pod spec.
+				return rolloutCause{class: faultLearner, text: "the controller could not create pods: " + shorten(msg)}
+			}
+			return rolloutCause{class: faultUnknown, text: "the controller created no pods (FailedCreate: " + shorten(msg) + ")"}
+		}
 		return rolloutCause{class: faultUnknown, text: "the controller created no pods (quota, admission or controller trouble is possible)"}
 	case len(findings) == 0:
 		return rolloutCause{class: faultUnknown, text: "every pod is ready yet the rollout counters were not reached"}
@@ -98,6 +107,35 @@ func classifyRollout(pods []object, expectPods bool, cfg causeConfig) rolloutCau
 		}
 	}
 	return rolloutCause{class: faultUnknown, text: "no cause found", findings: findings}
+}
+
+// createFailure reads the ReplicaFailure/FailedCreate condition a Deployment
+// (copied from its ReplicaSet) or a ReplicaSet reports when its pods cannot be
+// created. learner is true only for an admission rejection of the pod spec
+// ("is forbidden:" - quota, missing ServiceAccount, PodSecurity, LimitRange)
+// that is not an infrastructure failure (webhook, timeout, unavailable API).
+// message is empty when there is no such condition.
+func createFailure(obj object) (learner bool, message string) {
+	if kind, _ := obj["kind"].(string); kind != "Deployment" && kind != "ReplicaSet" {
+		return false, "" // StatefulSet and DaemonSet keep their current behaviour
+	}
+	for _, c := range listAt(obj, "status", "conditions") {
+		m, _ := c.(map[string]any)
+		if m["type"] != "ReplicaFailure" || m["status"] != "True" || m["reason"] != "FailedCreate" {
+			continue
+		}
+		message, _ = m["message"].(string)
+		if !strings.Contains(message, "is forbidden:") {
+			return false, message
+		}
+		for _, infra := range []string{"failed calling webhook", "Internal error", "connection refused", "context deadline exceeded", "the server is currently unable"} {
+			if strings.Contains(message, infra) {
+				return false, message
+			}
+		}
+		return true, message
+	}
+	return false, ""
 }
 
 func podReady(p object) bool {
