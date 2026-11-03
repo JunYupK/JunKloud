@@ -449,4 +449,59 @@ func TestReadyFailedCreateIsLearnerFault(t *testing.T) {
 			t.Logf("reason: %s", ev.Results[0].Reason)
 		})
 	}
+
+	// A ServiceAccount created after the failure: the ReplicaSet controller
+	// does not watch ServiceAccounts, backs off, and keeps the old FailedCreate
+	// condition. Grading right after the SA appears must be ERROR, not FAIL
+	// (the condition is stale). Waiting lets the retry back-off grow so the
+	// controller is unlikely to retry inside the short grading window; if it
+	// does, the Deployment turns Ready and this subtest fails rather than pass
+	// silently.
+	t.Run("late-sa-is-stale-error", func(t *testing.T) {
+		const ns = "jk-fc-late"
+		owner := environment.Owner{
+			Inventory:        model.Inventory{EnvironmentID: id.ID, SessionID: "s-late", ProblemID: "grade-fc"},
+			Namespace:        ns,
+			CreateNamespaces: true,
+		}
+		inv, err := m.Apply(ctx, id, owner, []environment.Action{{Kind: model.ActionApply, Objects: []map[string]any{
+			deploy(ns, "web", map[string]any{"serviceAccountName": "late-sa"}, nil)}}})
+		testutil.NoError(t, err)
+		owner.Inventory, owner.CreateNamespaces = inv, false
+		cs := kubeClient(t, m, id)
+		deadline := time.Now().Add(60 * time.Second)
+		for {
+			d, err := cs.AppsV1().Deployments(ns).Get(ctx, "web", metav1.GetOptions{})
+			testutil.NoError(t, err)
+			failed := false
+			for _, c := range d.Status.Conditions {
+				failed = failed || string(c.Type) == "ReplicaFailure" && string(c.Status) == "True"
+			}
+			if failed {
+				break
+			}
+			if time.Now().After(deadline) {
+				t.Fatal("the Deployment never reported ReplicaFailure")
+			}
+			time.Sleep(time.Second)
+		}
+		time.Sleep(45 * time.Second) // let the controller's retry back-off grow
+		_, err = m.Apply(ctx, id, owner, []environment.Action{{Kind: model.ActionApply, Objects: []map[string]any{
+			{"apiVersion": "v1", "kind": "ServiceAccount", "metadata": map[string]any{"name": "late-sa", "namespace": ns}}}}})
+		testutil.NoError(t, err)
+
+		ref := model.ObjectRef{APIVersion: "apps/v1", Kind: "Deployment", Namespace: ns, Name: "web"}
+		crit := model.Criterion{ID: "ready", Kind: model.CriterionReady, Target: ref, Points: 4, Timeout: 4 * time.Second,
+			Args: map[string]any{"replicas": 1, "stable_for": "1s"}}
+		ev, err := engine.Evaluate(ctx, grader.Target{Identity: id, Problem: model.FrozenProblem{
+			Definition: model.Problem{ID: "grade-fc", Namespace: ns, Criteria: []model.Criterion{crit}},
+			Namespace:  ns,
+		}})
+		testutil.NoError(t, err)
+		t.Logf("status %s reason: %s", ev.Results[0].Status, ev.Results[0].Reason)
+		testutil.Equal(t, ev.Results[0].Status, "ERROR")
+		if !strings.Contains(ev.Results[0].Reason, "backing off") {
+			t.Fatalf("reason lacks the stale-condition explanation: %q", ev.Results[0].Reason)
+		}
+	})
 }

@@ -44,6 +44,31 @@ func deploymentWithReplicaFailure(t testing.TB, msg string) map[string]any {
 	return d
 }
 
+// deploymentWithResolvedReplicaFailure carries a ReplicaFailure condition whose
+// status is False: nothing is failing any more.
+func deploymentWithResolvedReplicaFailure(t testing.TB) map[string]any {
+	d := deploymentWithReplicaFailure(t, `pods "web-5f6" is forbidden: exceeded quota: team-quota`)
+	d["status"].(map[string]any)["conditions"].([]any)[0].(map[string]any)["status"] = "False"
+	return d
+}
+
+// serveForFault lists what the cluster has when the Deployment fault rows are
+// graded (the grader re-checks the object a FailedCreate message names).
+var serveForFault = map[string]func(t testing.TB, r *fakeReader){
+	"quota exceeded and the quota still exists (FAIL)": func(t testing.TB, r *fakeReader) {
+		r.put(refOf("v1", "ResourceQuota", "jk-p1", "team-quota"), obj(t, `{"kind":"ResourceQuota","metadata":{"name":"team-quota","namespace":"jk-p1"}}`))
+	},
+	"quota lookup fails": func(t testing.TB, r *fakeReader) {
+		r.put(refOf("v1", "ResourceQuota", "jk-p1", "team-quota"), fmt.Errorf("etcdserver: request timed out"))
+	},
+	"service account exists now, the condition is stale": func(t testing.TB, r *fakeReader) {
+		r.put(refOf("v1", "ServiceAccount", "jk-p1", "report-readr"), obj(t, `{"kind":"ServiceAccount","metadata":{"name":"report-readr","namespace":"jk-p1"}}`))
+	},
+	"service account lookup fails": func(t testing.TB, r *fakeReader) {
+		r.put(refOf("v1", "ServiceAccount", "jk-p1", "report-readr"), fmt.Errorf("etcdserver: request timed out"))
+	},
+}
+
 func readyCrit(timeout time.Duration, args map[string]any) model.Criterion {
 	c := crit("ready", model.CriterionReady, 4, deployRef, args)
 	c.Timeout = timeout
@@ -294,13 +319,20 @@ func TestReadyFaultClassification(t *testing.T) {
 		{"evicted", []map[string]any{pod(t, "p", `{"phase":"Failed","reason":"Evicted","message":"The node was low on resource: memory."}`, "web", "nginx:1")}, nil, "ERROR", "evicted"},
 		// Cause not provable: ERROR.
 		{"no pods were created", nil, nil, "ERROR", "created no pods"},
-		{"quota exceeded", nil, deploymentWithReplicaFailure(t, `pods "web-5f6" is forbidden: exceeded quota: team-quota, requested: requests.memory=512Mi, used: requests.memory=0, limited: requests.memory=256Mi`), "FAIL", "exceeded quota"},
-		{"service account missing", nil, deploymentWithReplicaFailure(t, `pods "web-5f6" is forbidden: error looking up service account shop/report-readr: serviceaccount "report-readr" not found`), "FAIL", "serviceaccount"},
+		{"quota exceeded and the quota still exists (FAIL)", nil, deploymentWithReplicaFailure(t, `pods "web-5f6" is forbidden: exceeded quota: team-quota, requested: requests.memory=512Mi, used: requests.memory=0, limited: requests.memory=256Mi`), "FAIL", "exceeded quota"},
+		{"quota object is gone, the condition is stale", nil, deploymentWithReplicaFailure(t, `pods "web-5f6" is forbidden: exceeded quota: team-quota, requested: requests.memory=512Mi, used: requests.memory=0, limited: requests.memory=256Mi`), "ERROR", "backing off"},
+		{"quota lookup fails", nil, deploymentWithReplicaFailure(t, `pods "web-5f6" is forbidden: exceeded quota: team-quota, requested: requests.memory=512Mi, used: requests.memory=0, limited: requests.memory=256Mi`), "ERROR", "team-quota"},
+		{"service account missing and still missing (FAIL)", nil, deploymentWithReplicaFailure(t, `pods "web-5f6" is forbidden: error looking up service account shop/report-readr: serviceaccount "report-readr" not found`), "FAIL", "serviceaccount"},
+		{"service account exists now, the condition is stale", nil, deploymentWithReplicaFailure(t, `pods "web-5f6" is forbidden: error looking up service account shop/report-readr: serviceaccount "report-readr" not found`), "ERROR", "backing off"},
+		{"service account lookup fails", nil, deploymentWithReplicaFailure(t, `pods "web-5f6" is forbidden: error looking up service account shop/report-readr: serviceaccount "report-readr" not found`), "ERROR", "report-readr"},
+		{"controller RBAC forbids creation", nil, deploymentWithReplicaFailure(t, `pods is forbidden: User "system:serviceaccount:kube-system:replicaset-controller" cannot create resource "pods" in API group "" in the namespace "shop"`), "ERROR", "cannot create resource"},
+		{"namespace is terminating", nil, deploymentWithReplicaFailure(t, `pods "web-5f6" is forbidden: unable to create new content in namespace shop because it is being terminated`), "ERROR", "being terminated"},
+		{"invalid pod spec message", nil, deploymentWithReplicaFailure(t, `Pod "web-5f6" is invalid: spec.containers[0].image: Required value`), "ERROR", "is invalid"},
+		{"ReplicaFailure is False (resolved)", nil, deploymentWithResolvedReplicaFailure(t), "ERROR", "created no pods"},
 		{"pod security", nil, deploymentWithReplicaFailure(t, `pods "web-5f6" is forbidden: violates PodSecurity "restricted:latest": runAsNonRoot != true`), "FAIL", "violates PodSecurity"},
 		{"limit range", nil, deploymentWithReplicaFailure(t, `pods "web-5f6" is forbidden: maximum memory usage per Container is 256Mi, but limit is 512Mi`), "FAIL", "maximum memory"},
 		{"webhook down", nil, deploymentWithReplicaFailure(t, `Internal error occurred: failed calling webhook "x.example": connection refused`), "ERROR", "failed calling webhook"},
 		{"forbidden but the webhook is down", nil, deploymentWithReplicaFailure(t, `pods "web-5f6" is forbidden: failed calling webhook "x.example": context deadline exceeded`), "ERROR", "failed calling webhook"},
-		{"no condition", nil, nil, "ERROR", "created no pods"},
 		{"still creating containers", []map[string]any{pod(t, "p", waiting("ContainerCreating", ""), "web", "nginx:1")}, nil, "ERROR", "ContainerCreating"},
 		{"pending without any explanation", []map[string]any{pod(t, "p", `{"phase":"Pending"}`, "web", "nginx:1")}, nil, "ERROR", "without a container state"},
 		{"every pod ready yet counters short", []map[string]any{pod(t, "p", `{"phase":"Running","conditions":[{"type":"Ready","status":"True"}]}`, "web", "nginx:1")}, nil, "ERROR", "every pod is ready"},
@@ -312,6 +344,9 @@ func TestReadyFaultClassification(t *testing.T) {
 				observed = tc.deploy
 			}
 			r := withPods(t, newReader().put(deployRef, observed), tc.pods...)
+			if serve := serveForFault[tc.name]; serve != nil {
+				serve(t, r)
+			}
 			res, err := runReady(t, r, newClock(), readyCrit(15*time.Second, nil), grader.WithPreloadedImages("docker.io/library/busybox:1.37.0"))
 			switch tc.want {
 			case "FAIL":
@@ -425,6 +460,9 @@ func TestReadyOtherWorkloads(t *testing.T) {
 			testutil.NoError(t, err)
 			if res.Status != tc.want {
 				t.Fatalf("status %s, want %s (%s)", res.Status, tc.want, res.Reason)
+			}
+			if tc.name == "replicaset quota rejection is FAIL" && !strings.Contains(res.Reason, "exceeded quota") {
+				t.Fatalf("reason lacks the API message: %q", res.Reason)
 			}
 		})
 	}

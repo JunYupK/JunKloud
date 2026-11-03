@@ -2,10 +2,13 @@ package grader
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"regexp"
 	"sort"
 	"strings"
+
+	"github.com/JunYupK/JunKloud/internal/model"
 )
 
 // Why is a workload not ready? Spec 8.1 splits the answer: the learner's
@@ -128,7 +131,7 @@ func createFailure(obj object) (learner bool, message string) {
 		if !strings.Contains(message, "is forbidden:") {
 			return false, message
 		}
-		for _, infra := range []string{"failed calling webhook", "Internal error", "connection refused", "context deadline exceeded", "the server is currently unable"} {
+		for _, infra := range []string{"failed calling webhook", "Internal error", "connection refused", "context deadline exceeded", "the server is currently unable", "cannot create resource", "because it is being terminated"} {
 			if strings.Contains(message, infra) {
 				return false, message
 			}
@@ -136,6 +139,52 @@ func createFailure(obj object) (learner bool, message string) {
 		return true, message
 	}
 	return false, ""
+}
+
+var (
+	missingSARe = regexp.MustCompile(`serviceaccount "([^"]+)" not found`)
+	quotaRe     = regexp.MustCompile(`exceeded quota: ([A-Za-z0-9._-]+)`)
+)
+
+// staleCreateFailure re-checks the object a learner-fault FailedCreate message
+// names. The ReplicaSet controller does not watch ServiceAccounts or
+// ResourceQuotas: after a failed create it retries with back-off and the
+// condition keeps its old message until the next successful sync, so a
+// ServiceAccount created since, or a quota deleted since, leaves a stale
+// condition that must not FAIL a correct answer. stale is a human reason; err
+// is a failed lookup (wrapped as insufficient evidence). A quota that still
+// exists but was loosened is not detected.
+func staleCreateFailure(ctx context.Context, r ObjectReader, workload object, msg string) (stale string, err error) {
+	ns := stringAt(workload, "metadata", "namespace")
+	check := func(kind, name string) (bool, error) {
+		_, gerr := r.Get(ctx, model.ObjectRef{APIVersion: "v1", Kind: kind, Namespace: ns, Name: name})
+		switch {
+		case gerr == nil:
+			return true, nil
+		case errors.Is(gerr, ErrNotFound):
+			return false, nil
+		}
+		return false, fmt.Errorf("%w: cannot re-check %s %s behind the FailedCreate (%s): %v", ErrInsufficientEvidence, kind, name, shorten(msg), gerr)
+	}
+	if m := missingSARe.FindStringSubmatch(msg); m != nil {
+		exists, err := check("ServiceAccount", m[1])
+		if err != nil {
+			return "", err
+		}
+		if exists {
+			return fmt.Sprintf("ServiceAccount %s exists now, but the controller is backing off on an old FailedCreate (%s); re-grade shortly or run kubectl rollout restart", m[1], shorten(msg)), nil
+		}
+	}
+	if m := quotaRe.FindStringSubmatch(msg); m != nil {
+		exists, err := check("ResourceQuota", m[1])
+		if err != nil {
+			return "", err
+		}
+		if !exists {
+			return fmt.Sprintf("ResourceQuota %s no longer exists, but the controller is backing off on an old FailedCreate (%s); re-grade shortly or run kubectl rollout restart", m[1], shorten(msg)), nil
+		}
+	}
+	return "", nil
 }
 
 func podReady(p object) bool {

@@ -242,6 +242,18 @@ func (c *ReadyChecker) Check(ctx context.Context, t Target, crit model.Criterion
 	}
 	cause := classifyRollout(pods, obs.v.expectPods || obs.v.unstable && obs.v.wantPods > 0, obs.obj, causeConfig{
 		preloaded: c.set.preloaded, configured: c.set.preloadedSet, pullMessages: msgs})
+	if cause.class == faultLearner && len(pods) == 0 {
+		// The cause is the workload's FailedCreate condition: make sure it is
+		// not a stale one before it becomes a FAIL.
+		_, msg := createFailure(obs.obj)
+		stale, err := staleCreateFailure(ctx, c.reader, obs.obj, msg)
+		if err != nil {
+			return model.CheckResult{}, err
+		}
+		if stale != "" {
+			return model.CheckResult{}, fmt.Errorf("%w: %s; %s", ErrInsufficientEvidence, obs.v.reason, stale)
+		}
+	}
 	if cause.class != faultLearner {
 		if obs.v.unstable && len(cause.findings) == 0 {
 			return model.CheckResult{}, fmt.Errorf("%w: %s (the pods are Ready but were not observed stable for the whole window before the limit)", ErrInsufficientEvidence, res.Reason)
