@@ -1,0 +1,24 @@
+schema_version: 1
+id: mock-01
+duration: 120m
+problems:
+  - configuration-001
+  - service-001
+  - custom-resource-001
+  - batch-001
+  - probes-001
+  - rollout-001
+  - ingress-001
+  - multicontainer-001
+  - diagnostics-001
+  - release-001
+  - access-001
+  - daemonset-001
+  - api-migration-001
+  - kustomize-001
+  - volume-001
+  - resources-001
+  - helm-001
+  - image-001
+  - security-001
+  - networkpolicy-001

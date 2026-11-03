@@ -155,8 +155,20 @@ func smokeBank(t *testing.T, b bankRuntime, problems []model.Problem) {
 			// Deployment smoke proves native Helm release/value state and real
 			// stable/canary UID membership + HTTP, in addition to native image
 			// readiness. Preserve the actual criteria's dependency graph/budgets.
-			if p.Domain == model.DomainDeployment || p.Domain == model.DomainEnvironmentSecurity {
+			if p.Domain == model.DomainDeployment || p.Domain == model.DomainEnvironmentSecurity || p.Domain == model.DomainNetworking {
 				chosen = f.Definition.Criteria
+			}
+			// Networking smoke keeps every criterion, with their dependency
+			// graph and 60-second budgets. Only where the host cannot enforce
+			// NetworkPolicy are the network-policy criteria and their
+			// dependents left out (they cannot pass there): reported, never
+			// counted as a pass.
+			if p.Domain == model.DomainNetworking {
+				var dropped []string
+				chosen, dropped = smokeNetworkCriteria(chosen, unsupportedCapabilities(t)["network-policy"])
+				if len(dropped) > 0 {
+					t.Logf("SMOKE %s NOT RUN: network-policy unenforced; skipped criteria %v", p.ID, dropped)
+				}
 			}
 			f.Definition.Criteria = chosen
 			t.Logf("SMOKE %s seed=%d actual offline readiness START", p.ID, seeds[0])

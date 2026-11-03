@@ -42,7 +42,8 @@ ckad review --problem Q4 --solution
 현재 Design & Build 5문제/20점, Deployment 4문제/20점(rollout, release,
 Helm, Kustomize), Observability 3문제/15점(API migration, probes, diagnostics),
 Environment·Configuration·Security 5문제/25점(custom resource, RBAC 최소 권한,
-quota·limits, ConfigMap·Secret, Pod Security), 합계 17문제/80점의 부분 은행이
+quota·limits, ConfigMap·Secret, Pod Security), Services & Networking 3문제/20점
+(Service 복구, Ingress, NetworkPolicy), 합계 20문제/100점의 은행이
 포함되어 있습니다. 먼저 동일
 환경에서 각 패키지를 검증하세요. 이전 grader의 검증 기록은 새 grader에서
 유효하지 않으므로 현재 환경에서 아래 ID별 명령으로 다시 검증해야 합니다.
@@ -52,17 +53,26 @@ export CKAD_BANK_DIR=/src
 for id in image-001 batch-001 daemonset-001 multicontainer-001 volume-001 \
           rollout-001 release-001 helm-001 kustomize-001 \
           api-migration-001 probes-001 diagnostics-001 \
-          custom-resource-001 access-001 resources-001 configuration-001 security-001; do
+          custom-resource-001 access-001 resources-001 configuration-001 security-001 \
+          service-001 ingress-001 networkpolicy-001; do
   ckad bank validate "$id" || break
 done
 ckad list
 ckad start --mode practice --count 5
+ckad start                 # 기본 모의시험 mock-01 (ckad start mock-01과 같음)
 ```
 
 Deployment 4문제나 Observability 3문제만으로는 일반 훈련의 최소 5문제를 충족하지 않습니다.
 검증된 혼합 은행에서 5개 이상 선택하거나 더 큰 은행을 사용하세요.
-이 구성은 20문제 제품 모의시험을 아직 제공하지 않습니다. 개발 fixture를
-확인하려면 `CKAD_BANK_DIR=/src/tests/fixtures/dev-bank`를 사용하세요.
+기본 모의시험 `mock-01`은 20문제, 120분, 100점입니다(`exams/mock-01.yaml`). 20문제가
+모두 출제 가능해야만 시작하며, 하나라도 검증 기록이 없거나 필요한 기능이 FAIL이면
+시험 전체를 거부합니다(종료 코드 3, 세션 없음). CLI는 일반 메시지만 출력하므로 어느 문제가 왜
+제외됐는지는 `ckad list`의 `출제 불가` 줄과 `ckad doctor`로 확인하세요. `networkpolicy-001`은
+`network-policy` 기능이 필요하므로 `ckad doctor`에서 `network-policy`가 PASS인
+(NetworkPolicy를 실제로 차단하는) 호스트에서만 모의시험을 시작할 수 있습니다.
+doctor의 이 점검은 ingress 차단만 증명하므로, 그런 호스트에서는 먼저
+`ckad bank validate networkpolicy-001`로 정답·대표 오답 점수를 확인하세요.
+개발 fixture를 확인하려면 `CKAD_BANK_DIR=/src/tests/fixtures/dev-bank`를 사용하세요.
 fixture의 `dev-mock`은 제품 모의시험이 아닙니다.
 
 기본 상태 경로는 `$HOME/.local/share/junkloud`, 풀이 경로는 `$HOME/ckad`입니다.
