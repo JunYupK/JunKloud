@@ -449,6 +449,14 @@ func parseMiB(s string) (int, bool) {
 	return int(v + 0.5), true
 }
 
+// Saw reports whether any container was sampled. Callers must fail the test
+// when it is false after Stop, since the peak would be a vacuous zero.
+func (s *memorySampler) Saw() bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return len(s.byName) > 0
+}
+
 // Stop ends the sampling and returns the peak total (the maximum over the
 // samples of the summed usage) and the peak of each container, in MiB.
 func (s *memorySampler) Stop() (peakTotalMiB int, peakByContainer map[string]int) {
@@ -456,9 +464,6 @@ func (s *memorySampler) Stop() (peakTotalMiB int, peakByContainer map[string]int
 	<-s.done
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	if len(s.byName) == 0 {
-		panic("memory sampler never saw a junkloud container; the peak would be a vacuous zero")
-	}
 	out := make(map[string]int, len(s.byName))
 	for k, v := range s.byName {
 		out[k] = v

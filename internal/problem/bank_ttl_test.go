@@ -9,22 +9,29 @@ import (
 	"testing"
 )
 
-// minTTLSeconds: a Job a bank problem creates or provides must outlive a
-// full 19-problem grading (about 5 minutes) with a wide margin. With a
-// ttlSecondsAfterFinished of 300 the TTL controller deleted batch-001's
-// parcel-once Job while `ckad grade` was still running, so a correct answer
-// graded ERROR (!inputs-changed) or, later, FAIL (Job not found).
-const minTTLSeconds = 1800
+// A mock exam lasts 120 minutes and the learner reviews (and may resubmit)
+// after it, so a Job a bank problem provides must still exist well after the
+// whole exam. A correct learner who completes it early and grades or reviews
+// later must not lose it: the TTL controller would turn that into a
+// job-completed FAIL or an !inputs-changed ERROR (batch-001 did, with 300).
+// The floor is the mock duration plus a review margin of the same size; a
+// problem with no TTL at all passes.
+const (
+	mockDurationSeconds = 7200
+	reviewMarginSeconds = 7200
+	minTTLSeconds       = mockDurationSeconds + reviewMarginSeconds // 14400
+)
 
 var ttlLine = regexp.MustCompile(`"?ttlSecondsAfterFinished"?\s*:\s*(\d+)`)
 
 func TestBankJobsOutliveGrading(t *testing.T) {
 	root := filepath.Join("..", "..", "problems")
-	checked := 0
+	checked, scanned := 0, 0
 	err := filepath.WalkDir(root, func(path string, d fs.DirEntry, err error) error {
 		if err != nil || d.IsDir() {
 			return err
 		}
+		scanned++
 		data, err := os.ReadFile(path)
 		if err != nil {
 			return err
@@ -40,7 +47,8 @@ func TestBankJobsOutliveGrading(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if checked == 0 {
-		t.Fatal("no ttlSecondsAfterFinished found; the test would pass vacuously")
+	if scanned == 0 {
+		t.Fatal("no problem file scanned; the test would pass vacuously")
 	}
+	t.Logf("checked %d ttlSecondsAfterFinished values", checked)
 }

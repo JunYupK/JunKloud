@@ -169,6 +169,9 @@ func TestFullMockLifecycle(t *testing.T) {
 		}
 		ev.OOMAfterStart = oomOrPending(ctx, t, h)
 		graded := gradedImages(t, h, frozen)
+		if slices.Contains(sel.IDs, "image-001") && len(graded) == 0 {
+			t.Fatalf("cycle %d: the exam has image-001 but no graded image reference was found; the image assertions would be vacuous", cycle)
+		}
 		// A failed run must not leave its images for the next run's preflight.
 		t.Cleanup(func() {
 			for _, ref := range graded {
@@ -217,6 +220,9 @@ func TestFullMockLifecycle(t *testing.T) {
 		}
 
 		ev.PeakMiB, ev.PeakByContainer = sampler.Stop()
+		if !sampler.Saw() {
+			t.Fatalf("cycle %d: the memory sampler never saw a container; the peak is meaningless", cycle)
+		}
 		ev.Leftovers = observeLeftovers(ctx, t, h)
 		ev.NamespacesAfter, ev.VolumesAfter = clusterCounts(ctx, t, h)
 		ev.Summary = fmt.Sprintf("%s cycle %d (%s): start %s, solved grade %s, reset %s, score %d->%d/%d, peak %d MiB, leftovers %d, oom/pending %d",
