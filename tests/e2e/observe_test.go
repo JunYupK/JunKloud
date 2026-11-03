@@ -206,11 +206,18 @@ func observeLeftovers(ctx context.Context, t *testing.T, h *cliHarness) ownedLef
 			left.VolumePaths = append(left.VolumePaths, p)
 		}
 	}
-	// The provisioner root must exist (the platform installs local-path
-	// storage); a missing directory means the path is wrong and the check
-	// would pass vacuously.
+	// The directory appears with the first volume, so its absence is normal.
+	// What must be right is the path itself: it has to be the one the
+	// provisioner is configured with, or the check would pass vacuously.
+	cfgMap, err := k.cs.CoreV1().ConfigMaps("local-path-storage").Get(ctx, "local-path-config", metav1.GetOptions{})
+	if err != nil {
+		t.Fatalf("read the local-path provisioner configuration: %v", err)
+	}
+	if !strings.Contains(cfgMap.Data["config.json"], `"`+provisionerRoot+`"`) {
+		t.Fatalf("the provisioner is not configured with %s: %s", provisionerRoot, cfgMap.Data["config.json"])
+	}
 	if _, err := docker(ctx, "exec", node, "test", "-d", provisionerRoot); err != nil {
-		t.Fatalf("the volume provisioner directory %s is not in the node: %v", provisionerRoot, err)
+		return finishLeftovers(ctx, t, h, left)
 	}
 	entries, err := docker(ctx, "exec", node, "ls", "-A", provisionerRoot)
 	if err != nil {
@@ -223,6 +230,12 @@ func observeLeftovers(ctx context.Context, t *testing.T, h *cliHarness) ownedLef
 		}
 	}
 
+	return finishLeftovers(ctx, t, h, left)
+}
+
+// finishLeftovers adds the Docker images and open operations.
+func finishLeftovers(ctx context.Context, t *testing.T, h *cliHarness, left ownedLeftovers) ownedLeftovers {
+	t.Helper()
 	// Docker images the sessions built.
 	for _, label := range []string{environment.LabelSessionID, imageBuildLabel} {
 		out, err := docker(ctx, "image", "ls", "--all", "--filter", "label="+label, "--format", "{{.Repository}}:{{.Tag}}@{{.ID}}")
