@@ -8,7 +8,7 @@
   "spec": {
     "suspend": true,
     "backoffLimit": 0,
-    "ttlSecondsAfterFinished": 300,
+    "ttlSecondsAfterFinished": 3600,
     "template": {
       "spec": {
         "restartPolicy": "Never",
@@ -56,7 +56,7 @@
       "spec": {
         "suspend": false,
         "backoffLimit": 0,
-        "ttlSecondsAfterFinished": 300,
+        "ttlSecondsAfterFinished": 3600,
         "template": {
           "spec": {
             "restartPolicy": "Never",
