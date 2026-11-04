@@ -672,7 +672,7 @@ bash runtime/up.sh dev                       # Windows: runtime/up.ps1 -Service 
 docker compose exec dev bash
 ```
 
-컨테이너 안에서:
+호스트 터미널이나 작업 컨테이너 안에서(둘 다 같은 Docker 엔진을 봅니다):
 
 | 명령 | 하는 일 |
 | --- | --- |
@@ -710,7 +710,7 @@ go test -tags=integration ./tests/integration -run '^TestObservabilityBank$' -co
 
 Mac/Windows 실기기에서 수용 시험을 돌리는 절차입니다. **이 시험은 아직 실기기에서 실행하지 않았습니다.**
 
-**0. 먼저 내 JunKloud 클러스터를 멈추세요.** 수용 시험의 메모리 측정은 `junkloud-*`, `kindccm-*`, `envoy` 컨테이너의 사용량을 모두 더합니다. 3장을 따라 만든 내 전용 클러스터가 켜져 있으면 측정이 오염되고, 작은 Docker VM(4GiB) 안에 클러스터가 두 개 올라갑니다. 그래서 스크립트는 그런 컨테이너가 실행 중이면 **시작을 거부**합니다(작업 컨테이너 `junkloud-dev-1`, `junkloud-workspace-1`은 제외). 컨테이너 안에서:
+**0. 먼저 내 JunKloud 클러스터를 멈추세요.** 수용 시험의 메모리 측정은 `junkloud-*`, `kindccm-*`, `envoy` 컨테이너의 사용량을 모두 더합니다. 3장을 따라 만든 내 전용 클러스터가 켜져 있으면 측정이 오염되고, 작은 Docker VM(4GiB) 안에 클러스터가 두 개 올라갑니다. 그래서 스크립트는 그런 컨테이너가 실행 중이면 **시작을 거부**합니다(작업 컨테이너 `junkloud-dev-1`, `junkloud-workspace-1`은 제외). 호스트 터미널이나 작업 컨테이너 안에서(둘 다 같은 Docker 엔진을 봅니다):
 
 ```sh
 docker ps --format '{{.Names}}'     # 실행 중인 컨테이너 확인: junkloud-<환경 ID>-control-plane, junkloud-cpk-<환경 ID>, kindccm-gw-… 가 클러스터입니다
@@ -718,59 +718,6 @@ docker stop $(docker ps -q --filter "name=^junkloud-[0-9a-f]{12}-" --filter "nam
 ```
 
 `docker stop`은 컨테이너를 **지우지 않으므로** 내 학습 기록, 풀이 폴더, 클러스터 데이터는 그대로입니다(작업 컨테이너 `junkloud-dev-1`, `junkloud-workspace-1`은 위 이름 패턴에 해당하지 않아 멈추지 않습니다). 시험이 끝난 뒤 같은 컨테이너를 `docker start`하고 `ckad doctor`로 확인하면 됩니다. 멈춘 노드가 되살아나는지는 Docker 설정에 따라 달라 보장하지 않으며, 안 되면 [8장](#8-자주-겪는-문제와-해결)을 보세요.
-
-```sh
-bash runtime/up.sh dev                       # Windows: runtime/up.ps1 -Service dev
-docker compose exec dev bash
-```
-
-컨테이너 안에서:
-
-| 명령 | 하는 일 |
-| --- | --- |
-| `make test` | `go test ./...` 단위 테스트 |
-| `make test-race` | `go test -race ./...` |
-| `make lint` | 모든 빌드 태그(`integration`, `e2e`, `acceptance`)의 `go vet`과 `gofmt` 검사 |
-| `make test-runtime` | 작업 환경 자체 검증(Linux, 볼륨, 고정 도구 버전) |
-| `make test-integration` | 실제 kind 클러스터를 만들고 지우는 통합 테스트 (매우 오래 걸림) |
-| `make test-e2e` | `ckad` CLI E2E(`TestCLIFlow` 등). 시간 상한은 Makefile 참고 |
-| `make test-acceptance` | 릴리스 수용 시험: 준비 → 모범 풀이 → 채점 → reset을 3회 연속 수행(수 시간) |
-
-문제은행 통합 테스트(실제 클러스터 검증) 예:
-
-```sh
-go test -tags=integration ./tests/integration -run '^TestObservabilityBankSmoke$' -count=1 -timeout=30m -v
-go test -tags=integration ./tests/integration -run '^TestObservabilityBank$' -count=1 -timeout=150m -v
-# 한 문제만: -run '^TestObservabilityBank$/^probes-001$'
-```
-
-다른 문제은행 테스트(`TestBuildBank`, `TestDeploymentBank`, `TestSecurityBank`, `TestNetworkBank` 등)도 같은 방식으로 실행합니다.
-
-호스트가 표준과 다를 때 쓰는 테스트 전용 환경 변수입니다. 제품 기본값을 바꾸지 않습니다. 실제 기기(Mac/Windows Docker Desktop)에서는 보통 설정하지 않습니다.
-
-| 변수 | 쓰는 경우 |
-| --- | --- |
-| `JUNKLOUD_TEST_HOST_COMPAT=cgroupv1` | cgroup v1 호스트, `oom_score_adj` 조정이 막힌 VM |
-| `JUNKLOUD_TEST_HOST_COMPAT=cgroupv1,no-ipv6` | 위 조건에 더해 엔진 커널의 IPv6가 꺼져 있을 때 |
-| `JUNKLOUD_TEST_UNSUPPORTED_CAPABILITIES=network-policy` | 커널이 NetworkPolicy 차단을 지원하지 않음을 미리 알 때. doctor가 FAIL로 보고하는지 확인하고, 해당 시험은 `PARTIAL: mock-01 minus [...]`로 표시되며 mock-01로 보고하지 않습니다. |
-| `JUNKLOUD_ACCEPTANCE_EVIDENCE=<폴더>` | `make test-acceptance`의 사이클별 JSON 증거를 보관 |
-| `JUNKLOUD_ACCEPTANCE_COLD=1` | 첫 시작을 cold start로 표시하도록 요청(이미지가 이미 있으면 "cold (unverified)"로 기록) |
-
-- E2E와 통합 테스트는 실제 Docker, kind, kubectl과 클러스터 자원이 필요합니다. 사용할 수 없으면 실패를 반환합니다. 건너뛴 검증을 통과로 표시하지 않습니다.
-
-### 실기기 검증 절차 (`runtime/acceptance.sh`)
-
-Mac/Windows 실기기에서 수용 시험을 돌리는 절차입니다. **이 시험은 아직 실기기에서 실행하지 않았습니다.**
-
-**0. 먼저 내 JunKloud 클러스터를 멈추세요.** 수용 시험의 메모리 측정은 `junkloud-*`, `kindccm-*`, `envoy` 컨테이너의 사용량을 모두 더합니다. 3장을 따라 만든 내 전용 클러스터가 켜져 있으면 측정이 오염되고, 작은 Docker VM(4GiB) 안에 클러스터가 두 개 올라갑니다. 그래서 스크립트는 그런 컨테이너가 실행 중이면 **시작을 거부**합니다(작업 컨테이너 `junkloud-dev-1`, `junkloud-workspace-1`은 제외). 컨테이너 안에서:
-
-```sh
-docker ps --format '{{.Names}}'                                        # 실행 중인 junkloud-*/kindccm-* 확인
-docker stop $(docker ps -q --filter name=junkloud- --filter name=kindccm- \
-              | grep -v -e "$(hostname)")                              # 클러스터 컨테이너만 멈춤 (작업 컨테이너 제외)
-```
-
-`docker stop`은 컨테이너를 **지우지 않으므로** 내 학습 기록, 풀이 폴더, 클러스터 데이터는 그대로입니다. 위 명령이 작업 컨테이너까지 멈추려 하면 멈추지 말고 `docker ps`로 이름을 보고 `junkloud-<환경 ID>-control-plane`, `junkloud-cpk-<환경 ID>`, `kindccm-gw-…`만 이름으로 지정해 멈추세요. 시험이 끝난 뒤 같은 이름으로 `docker start`하고 `ckad doctor`로 확인하면 됩니다(멈춘 노드가 되살아나는지는 Docker 설정에 따라 달라 보장하지 않습니다. 안 되면 [8장](#8-자주-겪는-문제와-해결)).
 
 ```sh
 bash runtime/up.sh dev                  # Windows: runtime/up.ps1 -Service dev
