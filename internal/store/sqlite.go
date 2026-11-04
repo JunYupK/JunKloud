@@ -228,3 +228,31 @@ func decodeNullTime(s sql.NullString) (*time.Time, error) {
 	}
 	return &t, nil
 }
+
+// OpenReadOnly opens an existing database for reading only: it does not
+// create, check, convert or migrate anything, and every write fails. It is
+// meant for observers that poll a database another process owns.
+func OpenReadOnly(path string) (*Store, error) {
+	abs, err := filepath.Abs(path)
+	if err != nil {
+		return nil, fmt.Errorf("store: resolve %q: %w", path, err)
+	}
+	if _, err := os.Stat(abs); err != nil {
+		return nil, fmt.Errorf("store: open %q read-only: %w", abs, err)
+	}
+	q := url.Values{}
+	q.Add("mode", "ro")
+	q.Add("_pragma", fmt.Sprintf("busy_timeout(%d)", busyTimeout.Milliseconds()))
+	dsnRO := (&url.URL{Scheme: "file", Path: abs, RawQuery: q.Encode()}).String()
+	w, err := sql.Open("sqlite", dsnRO)
+	if err != nil {
+		return nil, fmt.Errorf("store: open %q read-only: %w", abs, err)
+	}
+	r, err := sql.Open("sqlite", dsnRO)
+	if err != nil {
+		w.Close()
+		return nil, fmt.Errorf("store: open %q read-only: %w", abs, err)
+	}
+	w.SetMaxOpenConns(1)
+	return &Store{w: w, r: r}, nil
+}

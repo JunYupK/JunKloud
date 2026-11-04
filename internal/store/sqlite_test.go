@@ -800,3 +800,33 @@ func TestListOperationsByKind(t *testing.T) {
 	testutil.NoError(t, err)
 	testutil.Equal(t, len(none), 0)
 }
+
+// OpenReadOnly serves polling readers: it sees committed data, cannot write,
+// and never creates or migrates a database.
+func TestOpenReadOnly(t *testing.T) {
+	s, path := openStore(t)
+	op := model.Operation{ID: "op1", EnvironmentID: "env-1", SessionID: "s1", Kind: "prepare", Phase: "planned", CreatedAt: t0}
+	testutil.NoError(t, s.PutOperation(ctx, op))
+
+	ro, err := store.OpenReadOnly(path)
+	testutil.NoError(t, err)
+	defer ro.Close()
+	got, err := ro.GetOperation(ctx, "op1")
+	testutil.NoError(t, err)
+	testutil.Equal(t, got.Phase, "planned")
+	op.Phase = "done"
+	if err := ro.PutOperation(ctx, op); err == nil {
+		t.Fatal("a read-only store accepted a write")
+	}
+	got, err = s.GetOperation(ctx, "op1")
+	testutil.NoError(t, err)
+	testutil.Equal(t, got.Phase, "planned")
+
+	missing := filepath.Join(t.TempDir(), "absent.db")
+	if _, err := store.OpenReadOnly(missing); err == nil {
+		t.Fatal("opened a missing database")
+	}
+	if _, err := os.Stat(missing); err == nil {
+		t.Fatal("OpenReadOnly created the database")
+	}
+}
