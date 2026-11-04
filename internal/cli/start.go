@@ -135,6 +135,11 @@ func startCommand(d *Dependencies) *cobra.Command {
 					return publicError(err)
 				}
 				if st.Session.State == model.StatePreparing {
+					for _, p := range st.Pending {
+						if p.Prepare {
+							return publicError(session.ErrNotPrepared)
+						}
+					}
 					view = st.Session
 				}
 			} else if !errors.Is(err, store.ErrNotFound) {

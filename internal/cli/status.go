@@ -35,6 +35,11 @@ func statusCommand(d *Dependencies) *cobra.Command {
 			fmt.Fprintf(c.OutOrStdout(), "Q%d %s | %d점 | %s%s\n", i+1, p.ID, p.Points, p.Title, mark)
 		}
 		printPending(c, st.Pending)
+		for _, p := range st.Pending {
+			if p.Prepare {
+				return fail(3, "이전 준비가 중단되었습니다. 풀이와 기록을 보존했습니다. ckad reset으로 정리한 뒤 다시 시작하세요.")
+			}
+		}
 		return nil
 	}}
 }
@@ -103,7 +108,7 @@ func markCommand(d *Dependencies) *cobra.Command {
 	return c
 }
 
-var recoveryCommand = regexp.MustCompile(`ckad (?:reset --recover|grade(?: --problem [a-z0-9][a-z0-9-]*)?(?: --(?:retry|resubmit))?)`)
+var recoveryCommand = regexp.MustCompile(`ckad (?:reset --recover|reset|grade(?: --problem [a-z0-9][a-z0-9-]*)?(?: --(?:retry|resubmit))?)`)
 
 func printPending(c *cobra.Command, pending []session.Pending) {
 	for _, p := range pending {

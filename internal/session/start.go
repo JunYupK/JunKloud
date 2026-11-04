@@ -143,6 +143,14 @@ func (s *Service) Status(ctx context.Context, sessionID string, now time.Time) (
 			}
 		}
 	}
+	if op, err := s.cfg.Store.GetOperation(ctx, OperationID(rec.ID)); err == nil {
+		if op.Phase != PhaseDone && (rec.State == model.StatePreparing || rec.State == model.StateSetupError) {
+			st.Pending = append(st.Pending, Pending{OperationID: op.ID, Phase: op.Phase, Since: op.CreatedAt, Recorded: true, Prepare: true,
+				Guidance: fmt.Sprintf("The preparation of session %s stopped at %q. Run ckad reset to clean up the resources it owns, then start again; nothing is recreated for you.", rec.ID, op.Phase)})
+		}
+	} else if !errors.Is(err, store.ErrNotFound) {
+		return Status{}, err
+	}
 	return st, nil
 }
 

@@ -7,6 +7,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -378,4 +379,31 @@ func TestBankChangeDoesNotChangeActiveSession(t *testing.T) {
 	}
 	_, err = session.LoadPackage(h.stateDir, editedHash)
 	testutil.ErrorIs(t, err, session.ErrPackageMissing)
+}
+
+// TestStatusReportsInterruptedPrepare: a preparation that stopped before its
+// initial states were verified is listed as unfinished work, with ckad reset
+// as the way out, instead of looking like a session that merely has not
+// started yet.
+func TestStatusReportsInterruptedPrepare(t *testing.T) {
+	h := newHarness(t)
+	prepared := h.prepareMock()
+	status, err := h.svc.Status(ctx, prepared.ID, t0)
+	testutil.NoError(t, err)
+	testutil.Equal(t, len(status.Pending), 0)
+
+	op, err := h.st.GetOperation(ctx, session.OperationID(prepared.ID))
+	testutil.NoError(t, err)
+	op.Phase = session.PhaseSetupApplied
+	testutil.NoError(t, h.st.PutOperation(ctx, op))
+	status, err = h.svc.Status(ctx, prepared.ID, t0)
+	testutil.NoError(t, err)
+	testutil.Equal(t, len(status.Pending), 1)
+	p := status.Pending[0]
+	testutil.Equal(t, p.OperationID, op.ID)
+	testutil.Equal(t, p.Phase, session.PhaseSetupApplied)
+	testutil.Equal(t, p.Prepare, true)
+	if !strings.Contains(p.Guidance, "ckad reset") {
+		t.Fatal(p.Guidance)
+	}
 }

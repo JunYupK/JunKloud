@@ -524,3 +524,28 @@ func TestResetPendingFirstCreatePreservesIntentAndGivesRecoveryGuidance(t *testi
 		t.Fatal("reset created an identity", err)
 	}
 }
+
+// An interrupted preparation (the process was killed after the setups were
+// applied) is detected: status names it and ckad reset, and neither status nor
+// a new start pretends the session is ready (spec 11).
+func TestInterruptedPrepareIsDetectedAndGuidesReset(t *testing.T) {
+	h := newHarness(t)
+	if code, _, errOut := h.run("no\n", "start", "--mode", "practice", "--count", "5"); code != 0 {
+		t.Fatal(code, errOut)
+	}
+	op, err := h.deps.Store.GetOperation(context.Background(), session.OperationID("practice-1"))
+	must(t, err)
+	op.Phase = session.PhaseSetupApplied
+	must(t, h.deps.Store.PutOperation(context.Background(), op))
+
+	code, out, errOut := h.run("", "status")
+	if code != 3 || !strings.Contains(out, op.ID) || !strings.Contains(out+errOut, "ckad reset") {
+		t.Fatal("status must exit 3 and name the interrupted prepare and ckad reset", code, out, errOut)
+	}
+	for _, args := range [][]string{{"start"}, {"start", "--mode", "practice", "--count", "5", "--seed", "42"}} {
+		code, out, errOut = h.run("yes\n", args...)
+		if code != 3 || strings.Contains(out, "준비 완료") || !strings.Contains(errOut, "ckad reset") {
+			t.Fatal("start must be refused with ckad reset guidance", args, code, out, errOut)
+		}
+	}
+}
