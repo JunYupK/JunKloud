@@ -453,10 +453,19 @@ func TestReadyFailedCreateIsLearnerFault(t *testing.T) {
 	// A ServiceAccount created after the failure: the ReplicaSet controller
 	// does not watch ServiceAccounts, backs off, and keeps the old FailedCreate
 	// condition. Grading right after the SA appears must be ERROR, not FAIL
-	// (the condition is stale). Waiting lets the retry back-off grow so the
-	// controller is unlikely to retry inside the short grading window; if it
-	// does, the Deployment turns Ready and the subtest is skipped as
-	// inconclusive; a confirmed FAIL (or an unexplained ERROR) fails it.
+	// (the condition is stale).
+	//
+	// Timing: the controller's retries (rate-limited requeue, 5ms doubling)
+	// were measured (task review) at about 10.2 s, 20.5 s and 41 s after the first failure. The
+	// test therefore creates the ServiceAccount about 29 s after it saw the
+	// failure, in the middle of the 20.5-41 s gap, so that the next retry
+	// comes about 12 s later, after the 4 s grading window has ended. Creating
+	// it near a retry (for example at 20 s) would let that retry succeed and
+	// the Pod become Ready inside the window, which makes the run inconclusive
+	// (PASS, skipped) or, on a slow host, a Pod that is not Ready yet.
+	// Only the safety invariant is asserted: ERROR naming the backing-off
+	// controller passes; PASS is skipped as inconclusive; anything else,
+	// notably a confirmed FAIL, fails the subtest.
 	t.Run("late-sa-is-stale-error", func(t *testing.T) {
 		const ns = "jk-fc-late"
 		owner := environment.Owner{
@@ -485,7 +494,7 @@ func TestReadyFailedCreateIsLearnerFault(t *testing.T) {
 			}
 			time.Sleep(time.Second)
 		}
-		time.Sleep(20 * time.Second) // let the controller's retry back-off grow (5ms doubling is past its early retries by now)
+		time.Sleep(29 * time.Second) // mid-interval between the controller's retries (see the comment above)
 		_, err = m.Apply(ctx, id, owner, []environment.Action{{Kind: model.ActionApply, Objects: []map[string]any{
 			{"apiVersion": "v1", "kind": "ServiceAccount", "metadata": map[string]any{"name": "late-sa", "namespace": ns}}}}})
 		testutil.NoError(t, err)
