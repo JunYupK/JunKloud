@@ -56,6 +56,9 @@ func gradeCommand(d *Dependencies) *cobra.Command {
 		printSubmissionTimes(c, rv.ReviewSubmissions)
 		if existing {
 			fmt.Fprintln(c.OutOrStdout(), "이미 제출했습니다. 기존 결과입니다. 기술적 오류는 ckad grade --retry, 수정 후에는 --resubmit, 결과는 ckad review로 확인하세요.")
+			if !run.Evaluation.Complete || run.Evaluation.Score == nil {
+				return publicError(session.ErrGradeInterrupted)
+			}
 			return nil
 		}
 		if !run.Evaluation.Complete || run.Evaluation.Score == nil {

@@ -549,3 +549,19 @@ func TestInterruptedPrepareIsDetectedAndGuidesReset(t *testing.T) {
 		}
 	}
 }
+
+// A plain grade that finds the earlier grading incomplete (no confirmed score,
+// for instance after Ctrl-C) shows it but must not exit 0 as if it were
+// graded: it exits 3 and names the recovery commands.
+func TestPlainGradeOfIncompleteSubmissionExits3(t *testing.T) {
+	h := newHarness(t)
+	h.start(model.ModePractice)
+	h.engine.broken = true
+	if code, _, _ := h.run("", "grade"); code != 3 {
+		t.Fatal(code)
+	}
+	code, out, diag := h.run("", "grade")
+	if code != 3 || strings.Contains(out, "점수:") || !strings.Contains(diag, "이전 채점이 중단되었습니다") || !strings.Contains(diag, "ckad grade --retry") {
+		t.Fatal(code, out, diag)
+	}
+}
