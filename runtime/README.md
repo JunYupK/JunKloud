@@ -148,3 +148,11 @@ that depends on an earlier save output is explicitly unsupported.
 Native image export uses the platform-selecting command. Only Docker's exact
 pre-API-1.48 unsupported-platform error enables legacy save, after immutable
 ID, unchanged tag and Linux/native-architecture checks; all other errors fail.
+
+# More documents
+
+The step-by-step beginner guide is the top-level [README](../README.md).
+Per-OS notes: [macOS](../docs/usage/mac.md), [Windows](../docs/usage/windows.md);
+the training commands: [training.md](../docs/usage/training.md); the real-device
+acceptance procedure and results: [acceptance-matrix.md](../docs/validation/acceptance-matrix.md)
+(`bash runtime/acceptance.sh`).
