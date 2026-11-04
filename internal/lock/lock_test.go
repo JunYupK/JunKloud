@@ -10,6 +10,7 @@ import (
 	"strconv"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/JunYupK/JunKloud/internal/lock"
 	"github.com/JunYupK/JunKloud/internal/testutil"
@@ -178,4 +179,80 @@ func TestLockFileRecordsOwnerPID(t *testing.T) {
 	b, err := os.ReadFile(path)
 	testutil.NoError(t, err)
 	testutil.Equal(t, strings.TrimSpace(string(b)), strconv.Itoa(os.Getpid()))
+}
+
+func TestHeldReportsOtherHolders(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "env.lock")
+
+	// A missing file is not held and is not created.
+	held, err := lock.Held(path)
+	testutil.NoError(t, err)
+	if held {
+		t.Fatal("a missing lock file reported as held")
+	}
+	if _, err := os.Stat(path); !os.IsNotExist(err) {
+		t.Fatal("Held created the lock file", err)
+	}
+
+	// Free file: not held, content and mtime untouched.
+	release, err := lock.Acquire(path)
+	testutil.NoError(t, err)
+	testutil.NoError(t, release())
+	held, err = lock.Held(path)
+	testutil.NoError(t, err)
+	if held {
+		t.Fatal("a free lock reported as held")
+	}
+
+	// Held by another descriptor (exclusive): held, and still untouched.
+	release, err = lock.Acquire(path)
+	testutil.NoError(t, err)
+	held, err = lock.Held(path)
+	testutil.NoError(t, err)
+	if !held {
+		t.Fatal("a held lock reported as free")
+	}
+	testutil.NoError(t, release())
+
+	// The probe released its own shared lock: the owner can take it again.
+	release, err = lock.Acquire(path)
+	testutil.NoError(t, err)
+	testutil.NoError(t, release())
+}
+
+// The probe works on a lock file it may only read and never needs write access.
+func TestHeldOnReadOnlyFile(t *testing.T) {
+	if os.Geteuid() == 0 {
+		t.Skip("root bypasses file permissions")
+	}
+	path := filepath.Join(t.TempDir(), "env.lock")
+	testutil.NoError(t, os.WriteFile(path, []byte("1\n"), 0o400))
+	held, err := lock.Held(path)
+	testutil.NoError(t, err)
+	if held {
+		t.Fatal("free read-only lock reported as held")
+	}
+}
+
+func TestHeldDoesNotModifyTheFile(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "env.lock")
+	testutil.NoError(t, os.WriteFile(path, []byte("12345\n"), 0o600))
+	past := time.Now().Add(-time.Hour).Truncate(time.Second)
+	testutil.NoError(t, os.Chtimes(path, past, past))
+	for i := 0; i < 3; i++ {
+		held, err := lock.Held(path)
+		testutil.NoError(t, err)
+		if held {
+			t.Fatal("unlocked file reported as held")
+		}
+	}
+	data, err := os.ReadFile(path)
+	testutil.NoError(t, err)
+	testutil.Equal(t, string(data), "12345\n")
+	st, err := os.Stat(path)
+	testutil.NoError(t, err)
+	if !st.ModTime().Equal(past) {
+		t.Fatal("Held changed the modification time", st.ModTime(), past)
+	}
 }

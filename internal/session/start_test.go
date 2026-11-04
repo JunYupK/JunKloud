@@ -437,3 +437,41 @@ func TestStatusDistinguishesRunningFromInterruptedPrepare(t *testing.T) {
 	testutil.NoError(t, err)
 	testutil.NoError(t, release())
 }
+
+// TestStatusProbeNeverWritesTheEnvironmentLock: status is read-only. Its lock
+// probe must not create env.lock, nor rewrite the PID in an existing one (a
+// read-only state directory or a concurrent mutating command would suffer).
+func TestStatusProbeNeverWritesTheEnvironmentLock(t *testing.T) {
+	h := newHarness(t)
+	prepared := h.prepareMock()
+	op, err := h.st.GetOperation(ctx, session.OperationID(prepared.ID))
+	testutil.NoError(t, err)
+	op.Phase = session.PhaseSetupApplied
+	testutil.NoError(t, h.st.PutOperation(ctx, op))
+	path := author.LockPath(h.stateDir)
+
+	// No lock file: status must not create one.
+	testutil.NoError(t, os.Remove(path))
+	status, err := h.svc.Status(ctx, prepared.ID, t0)
+	testutil.NoError(t, err)
+	testutil.Equal(t, len(status.Pending), 1)
+	testutil.Equal(t, status.Pending[0].Running, false)
+	if _, err := os.Stat(path); !os.IsNotExist(err) {
+		t.Fatal("status created env.lock", err)
+	}
+
+	// Existing lock file: content and modification time stay as they were.
+	testutil.NoError(t, os.WriteFile(path, []byte("424242\n"), 0o600))
+	past := t0.Add(-time.Hour)
+	testutil.NoError(t, os.Chtimes(path, past, past))
+	_, err = h.svc.Status(ctx, prepared.ID, t0)
+	testutil.NoError(t, err)
+	data, err := os.ReadFile(path)
+	testutil.NoError(t, err)
+	testutil.Equal(t, string(data), "424242\n")
+	fi, err := os.Stat(path)
+	testutil.NoError(t, err)
+	if !fi.ModTime().Equal(past) {
+		t.Fatal("status rewrote env.lock", fi.ModTime())
+	}
+}

@@ -146,6 +146,7 @@ func (s *Service) Status(ctx context.Context, sessionID string, now time.Time) (
 	if op, err := s.cfg.Store.GetOperation(ctx, OperationID(rec.ID)); err == nil {
 		if op.Phase != PhaseDone && (rec.State == model.StatePreparing || rec.State == model.StateSetupError) {
 			p := Pending{OperationID: op.ID, Phase: op.Phase, Since: op.CreatedAt, Recorded: true, Prepare: true}
+			skip := false
 			switch {
 			case op.Phase == PhaseFailed:
 				p.Guidance = fmt.Sprintf("The preparation of session %s failed (SETUP_ERROR). Run ckad reset to clean up the resources it owns, then start again.", rec.ID)
@@ -158,10 +159,25 @@ func (s *Service) Status(ctx context.Context, sessionID string, now time.Time) (
 				if running {
 					p.Guidance = fmt.Sprintf("The preparation of session %s is still being carried out by another command.", rec.ID)
 				} else {
-					p.Guidance = fmt.Sprintf("The preparation of session %s stopped at %q. Run ckad reset to clean up the resources it owns, then start again; nothing is recreated for you.", rec.ID, op.Phase)
+					// The preparation may have finished (or failed) between the
+					// read above and the probe: judge the record as it is now.
+					fresh, err := s.cfg.Store.GetOperation(ctx, OperationID(rec.ID))
+					if err != nil {
+						return Status{}, err
+					}
+					if fresh.Phase == PhaseDone {
+						skip = true
+					}
+					p.Phase = fresh.Phase
+					p.Guidance = fmt.Sprintf("The preparation of session %s stopped at %q. Run ckad reset to clean up the resources it owns, then start again; nothing is recreated for you.", rec.ID, fresh.Phase)
+					if fresh.Phase == PhaseFailed {
+						p.Guidance = fmt.Sprintf("The preparation of session %s failed (SETUP_ERROR). Run ckad reset to clean up the resources it owns, then start again.", rec.ID)
+					}
 				}
 			}
-			st.Pending = append(st.Pending, p)
+			if !skip {
+				st.Pending = append(st.Pending, p)
+			}
 		}
 	} else if !errors.Is(err, store.ErrNotFound) {
 		return Status{}, err
@@ -170,16 +186,14 @@ func (s *Service) Status(ctx context.Context, sessionID string, now time.Time) (
 }
 
 // environmentLockHeld probes the environment lock without waiting: true when
-// another process holds it. The lock is released again at once.
+// another process holds it. The probe is read-only (lock.Held): it never
+// creates or writes env.lock, so status works on a read-only state directory.
 func (s *Service) environmentLockHeld() (bool, error) {
-	release, err := lock.Acquire(author.LockPath(s.cfg.StateDir))
-	if errors.Is(err, lock.ErrLocked) {
-		return true, nil
-	}
+	held, err := lock.Held(author.LockPath(s.cfg.StateDir))
 	if err != nil {
 		return false, fmt.Errorf("session: probe the environment lock: %w", err)
 	}
-	return false, release()
+	return held, nil
 }
 
 // wallClock is the session's clock at `now`: plain wall time since the stored

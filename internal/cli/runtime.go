@@ -18,7 +18,8 @@ import (
 )
 
 // Run composes the real Linux executable, lazily after parsing and validating
-// the command. Read-only commands never initialize Docker or take env.lock.
+// the command. Read-only commands never initialize Docker or take env.lock; status
+// only probes it read-only (lock.Held), so it never creates or writes the file.
 // All paths are installation-local; the host kubeconfig is never consulted.
 func Run(ctx context.Context, args []string, in io.Reader, out, errOut io.Writer) int {
 	d := Dependencies{}
