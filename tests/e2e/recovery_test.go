@@ -50,17 +50,24 @@ func waitOperationAnyPhase(ctx context.Context, t *testing.T, h *cliHarness, kin
 }
 
 func pollOperation(ctx context.Context, h *cliHarness, kind string, phases []string) (model.Operation, bool) {
-	st, err := store.Open(filepath.Join(h.state, "sessions.db"))
+	// Read-only: the poller must never write to, migrate or check the
+	// database the CLI under test owns.
+	st, err := store.OpenReadOnly(filepath.Join(h.state, "sessions.db"))
 	if err != nil {
 		return model.Operation{}, false
 	}
 	defer st.Close()
+	// Only the current session's operations count, never an earlier one's.
+	sid, err := st.CurrentSessionID(ctx)
+	if err != nil {
+		return model.Operation{}, false
+	}
 	ops, err := st.ListOperations(ctx, kind)
 	if err != nil {
 		return model.Operation{}, false
 	}
 	for i := len(ops) - 1; i >= 0; i-- {
-		if slices.Contains(phases, ops[i].Phase) {
+		if ops[i].SessionID == sid && slices.Contains(phases, ops[i].Phase) {
 			return ops[i], true
 		}
 	}
@@ -260,7 +267,7 @@ func cleanSlate(ctx context.Context, t *testing.T, h *cliHarness) {
 // races two gradings, then requires the next commands to detect the
 // unfinished work and recover it (spec 11) without inventing a score.
 func TestInterruptedOperations(t *testing.T) {
-	ctx, cancel := context.WithTimeout(context.Background(), 50*time.Minute)
+	ctx, cancel := context.WithTimeout(context.Background(), 35*time.Minute)
 	defer cancel()
 	bank := filepath.Join(repoRoot(t), "tests", "fixtures", "dev-bank")
 	h := newHarness(t, bank)
@@ -310,8 +317,8 @@ func TestInterruptedOperations(t *testing.T) {
 			t.Fatalf("status does not name the interrupted prepare %s and ckad reset:\n%s", op.ID, status)
 		}
 		refused := expectCode(t, h, "yes\n", 3, practiceArgs()...)
-		if strings.Contains(refused, "준비 완료") {
-			t.Fatalf("a new start was not refused:\n%s", refused)
+		if strings.Contains(refused, "준비 완료") || !strings.Contains(refused, "이전 준비가 중단되었습니다") || !strings.Contains(refused, "ckad reset") {
+			t.Fatalf("a new start was not refused with the interrupted-prepare guidance:\n%s", refused)
 		}
 		if namespaceExists(ctx, k, missing) {
 			t.Fatalf("namespace %s was recreated", missing)
@@ -344,8 +351,8 @@ func TestInterruptedOperations(t *testing.T) {
 		}
 
 		interrupted := expectCode(t, h, "", 3, "grade")
-		if !strings.Contains(interrupted, "이전 채점이 중단되었습니다") {
-			t.Fatalf("grade does not report the interrupted grading:\n%s", interrupted)
+		if !strings.Contains(interrupted, "채점을 확정할 수 없습니다") || !strings.Contains(interrupted, "ckad grade --retry") {
+			t.Fatalf("grade does not report the unconfirmed grading and its recovery:\n%s", interrupted)
 		}
 		code, out, diag := runCode(t, h, "", "grade", "--retry")
 		if code != 0 && code != 1 {
@@ -393,6 +400,7 @@ func TestInterruptedOperations(t *testing.T) {
 		}
 
 		refused := expectCode(t, h, "yes\n", 3, practiceArgs()...)
+		t.Logf("the reset was killed in phase %q (operation %s)", op.Phase, op.ID)
 		if !strings.Contains(refused, "초기화가 중단되었습니다") {
 			t.Fatalf("start does not report the interrupted reset:\n%s", refused)
 		}
@@ -416,6 +424,7 @@ func TestInterruptedOperations(t *testing.T) {
 		expectCode(t, h, "yes\n", 0, practiceArgs()...)
 		sid, _ := currentSessionOf(ctx, t, h)
 		node := h.identity(ctx).ClusterName + "-control-plane"
+		h.applyFrozenObjects(ctx) // a correct answer: any FAIL below would be the outage's fault
 		paused := false
 		unpause := func() {
 			if paused {
@@ -425,7 +434,8 @@ func TestInterruptedOperations(t *testing.T) {
 				paused = false
 			}
 		}
-		defer unpause()
+		t.Cleanup(unpause)
+		defer unpause() // before the failure cleanup below talks to the cluster
 
 		p := startProc(t, h, "", "grade")
 		waitOperationAnyPhase(p.watch(ctx), t, h, session.GradeOperationKind, session.GradePlanned, session.GradeRecorded)
@@ -443,12 +453,15 @@ func TestInterruptedOperations(t *testing.T) {
 		if scoreRe.MatchString(combined) {
 			t.Fatalf("a score was printed during the outage:\n%s", combined)
 		}
+		if strings.Contains(combined, ": FAIL (") {
+			t.Fatalf("the outage was graded as a FAIL:\n%s", combined)
+		}
 
 		// The cluster answers again. Give the control plane a moment.
 		waitAPI(ctx, t, h)
-		retry := expectCode(t, h, "", 1, "grade", "--retry")
-		if !scoreRe.MatchString(retry) {
-			t.Fatalf("grade --retry confirmed no score:\n%s", retry)
+		retry := expectCode(t, h, "", 0, "grade", "--retry")
+		if !strings.Contains(retry, "점수: 29/29") {
+			t.Fatalf("grade --retry did not confirm the full score:\n%s", retry)
 		}
 		if subs, _ := submissionsAndRuns(ctx, t, h, sid); subs != 1 {
 			t.Fatalf("expected one submission, got %d", subs)
