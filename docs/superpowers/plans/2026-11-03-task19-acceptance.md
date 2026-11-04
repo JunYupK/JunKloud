@@ -283,4 +283,24 @@ The original Task 19 is in `docs/superpowers/plans/2026-10-14-ckad-training-syst
 
 ## Verified evidence
 
-(Filled during execution.)
+Logs are in the local, uncommitted workspace `.superpowers/sdd/2026-11-03-task19-acceptance/task-N-logs/`. Sandbox env for live runs: `JUNKLOUD_TEST_HOST_COMPAT=cgroupv1,no-ipv6 JUNKLOUD_TEST_UNSUPPORTED_CAPABILITIES=network-policy`. Full table: `docs/validation/acceptance-matrix.md`.
+
+| Item | Result | Commit | Log |
+| --- | --- | --- | --- |
+| grader-9 unit tests (RED then GREEN) | PASS; 6 stale-guard rows were RED first | `f603b72`, `65fae8c` | task-1-logs/red.log, fix1-red.log, fix1-green.log |
+| `TestReadyFailedCreateIsLearnerFault` live | PASS 197.9 s (missing-sa, quota, late-sa) | `65fae8c` | task-1-logs/fix1-live.log |
+| Late-SA subtest hardened (ERROR passes, PASS skipped) | PASS 166.6 s, subtest 34.2 s | tree after `8d8cb4e` | task-4-logs/fix1-late-sa-live.log |
+| `TestFullMockLifecycle` (PARTIAL: mock-01 minus [networkpolicy-001], 19 problems, 92 points, stand-in certificates) | PASS 4569.9 s; 3 cycles; initial [20 20 20]; solved [92 92 92]; 0 leftovers; no OOM/Pending; peak 1158/1189/1210 MiB; warm-after-setup | `f2fb82c` | task-2-logs/fix1-live.log, evidence-fix1/ |
+| batch-001 after TTL removal | subtest PASS 478.64 s, seeds [1 3], hash `4a009b41...`; parent FAIL is the `-run` filter artefact | `b40a736` | task-2-logs/fix2-batch001.log |
+| `TestInterruptedOperations` | 5/5 PASS 952.27 s | Task 3 fix round 1, before `c6f3b5a` | task-3-logs/fix1-interrupted.log |
+| `TestCLIFlow` | PASS 497.34 s | Task 3 fix round 1 | task-3-logs/fix1-cliflow.log |
+| `make test-e2e` | PASS 1594.69 s; pause-retry path never exercised (an earlier run failed on `docker pause`) | `c6f3b5a` | task-3-logs/fix1-make-test-e2e-2.log, fix1-make-test-e2e.log |
+| `make test` | exit 0, 14 packages ok | `c6f3b5a` + docs | task-5-logs/make-test.log |
+| `make test-race` | exit 0, 14 packages ok | `c6f3b5a` + docs | task-5-logs/make-test-race.log |
+| `make lint` | exit 0 | `c6f3b5a` + docs | task-5-logs/make-lint.log |
+| README/docs vs `--help`, links and anchors | 0 problems (help output identical to Task 4's) | Task 5 docs | task-5-logs/help-*.log, links-help-check.log |
+| Problem content since the last bank runs | only batch-001 changed (revalidated) | | task-5-logs/problems-unchanged-check.log |
+
+NOT RUN: full `make test-integration` (ruling R7); a bank re-run under grader-9; Apple M2 8GB/4GiB; Windows 16GB; GitHub CI; `runtime/acceptance.sh` on a real device; mock-01 positive start; networkpolicy-001 certification; 4GiB fit; cold start. Device cells stay `미완료`. "출시 준비 완료" (ready for release) is withheld until the user's device runs.
+
+Known product gaps recorded for the user (not changed): managed `ckad image build` is refused after a COMPLETED session; the grade fingerprint hashes whole Deployment specs, so an HPA scale during grading of `api-migration-001` could give a spurious `!inputs-changed` ERROR (M9); the `ckad status` lock probe writes `env.lock`; `start` explicit-flag detection (`NFlag()`) is always 0 (M5).

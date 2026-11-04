@@ -470,18 +470,30 @@ Task 2에서 `internal/model`에 아래 타입을 정의한다. 패키지 간에
 
 **Interfaces:** Consumes 전체 제품 CLI·mock-01. Produces 실제 version·architecture·memory·측정시간·증거 경로가 있는 검증 보고서와 재현 가능한 테스트 명령.
 
-- [ ] **실패 테스트 작성:** `TestFullMockLifecycle`, `TestInterruptedOperations`, `TestNoLeaksAfterThreeCycles`. 정상 전체모범풀이100점, 문제별 대표오답 기대점수, 3회 reset후 initial 벡터, 소유하지 않은 sentinel·개인 파일 보존을 assert한다.
+- [x] **실패 테스트 작성:** `TestFullMockLifecycle`, `TestInterruptedOperations`, `TestNoLeaksAfterThreeCycles`. 정상 전체모범풀이100점, 문제별 대표오답 기대점수, 3회 reset후 initial 벡터, 소유하지 않은 sentinel·개인 파일 보존을 assert한다. (계획 주석: 정상 점수 100이 아니라 PARTIAL 19문제 92점을 검증한다. `TestNoLeaksAfterThreeCycles`는 별도 함수가 아니라 `TestFullMockLifecycle`의 하위 테스트 `NoLeaksAfterThreeCycles`다.)
   ```go
   testutil.Equal(t, solvedScores, []int{100,100,100})
   testutil.Equal(t, leakedOwnedResources, 0)
   testutil.Equal(t, foreignSentinelAfter, foreignSentinelBefore)
   testutil.Equal(t, personalFilesAfter, personalFilesBefore)
   ```
-- [ ] **실패 확인:** `make test-e2e`를 실행해 남은 통합 문제를 실제 실패로 수집한다. 테스트 환경 부재는 SKIPPED/NOT RUN으로 기록하고 PASS로 대체하지 않는다.
-- [ ] **Task 18 이월 확인:** grader는 Ingress 주소를 최대 15초 기다린다(`internal/grader/network_eval.go:334`). 샌드박스에서는 약 3초였으므로 M2와 Windows에서 실제 대기 시간을 측정한다. 메모리 합계 3.66GiB는 선언 budget의 합이므로 kind control plane, cloud-provider-kind/envoy, workspace 컨테이너를 포함한 peak를 측정한다. networkpolicy-001 검증(`ckad doctor` network-policy PASS 후 `ckad bank validate networkpolicy-001`)과 mock-01 긍정 시작도 여기서 수행한다.
-- [ ] **최소 보완·문서화:** 발견된 문제만 소유 모듈에서 수정하고 회귀 테스트를 추가한다. mac/windows 시작·복수 터미널·alias·제출·복습·reset·오류 복구를 문서화한다. bootstrap/의존성 checksum/version 사용법, Docker 소켓의 권한 범위, SSH·다중context 제외를 설명한다. CI는 unit·schema·build·가능한 native integration을 수행하며 M2 실측을 에뮬레이터 결과로 대체하지 않는다.
-- [ ] **최종 검증:** `make test`, `make test-race`, `go vet ./...`, `make test-integration`, `make test-e2e` PASS. M2 8GB/4GiB Docker와 Windows16GB 각각에서 20문항 동시 준비·3회 lifecycle을 실행한다. cold/warm start·reset·grade 시간, peak memory, OOM/환경 Pending 여부를 기록한다. 실제 접근할 수 없는 장비의 셀은 미완료로 남긴다.
-- [ ] **커밋:** `test: verify full mock lifecycle and document operation`. 최종 변경 검토와 사용자 실행 검증 후에만 출시 준비 완료라고 보고한다. push·merge는 별도 요청 범위다.
+- [x] **실패 확인:** `make test-e2e`를 실행해 남은 통합 문제를 실제 실패로 수집한다. 테스트 환경 부재는 SKIPPED/NOT RUN으로 기록하고 PASS로 대체하지 않는다. (부분: RED는 도우미 부재 컴파일 실패와 docker 부재 실패로 기록했다(Task 2 P1). 남은 통합 문제를 실제로 수집하는 전체 `make test-integration`은 실행하지 않았다(NOT RUN, 컨트롤러 판정 R7).)
+- [ ] **Task 18 이월 확인:** grader는 Ingress 주소를 최대 15초 기다린다(`internal/grader/network_eval.go:334`). 샌드박스에서는 약 3초였으므로 M2와 Windows에서 실제 대기 시간을 측정한다. 메모리 합계 3.66GiB는 선언 budget의 합이므로 kind control plane, cloud-provider-kind/envoy, workspace 컨테이너를 포함한 peak를 측정한다. networkpolicy-001 검증(`ckad doctor` network-policy PASS 후 `ckad bank validate networkpolicy-001`)과 mock-01 긍정 시작도 여기서 수행한다. (NOT RUN: Ingress 대기 15초의 실측, peak 메모리, networkpolicy-001 검증, mock-01 긍정 시작은 M2·Windows 기기에서 수행해야 하며 아직 하지 않았다. 샌드박스 peak는 1.2GiB 안팎이지만 4GiB 적합성의 증거가 아니다.)
+- [x] **최소 보완·문서화:** 발견된 문제만 소유 모듈에서 수정하고 회귀 테스트를 추가한다. mac/windows 시작·복수 터미널·alias·제출·복습·reset·오류 복구를 문서화한다. bootstrap/의존성 checksum/version 사용법, Docker 소켓의 권한 범위, SSH·다중context 제외를 설명한다. CI는 unit·schema·build·가능한 native integration을 수행하며 M2 실측을 에뮬레이터 결과로 대체하지 않는다. (완료: 문서·CI·runbook 작성, 제품 수정 3건과 grader-9. CI는 한 번도 실행되지 않았다.)
+- [ ] **최종 검증:** `make test`, `make test-race`, `go vet ./...`, `make test-integration`, `make test-e2e` PASS. M2 8GB/4GiB Docker와 Windows16GB 각각에서 20문항 동시 준비·3회 lifecycle을 실행한다. cold/warm start·reset·grade 시간, peak memory, OOM/환경 Pending 여부를 기록한다. 실제 접근할 수 없는 장비의 셀은 미완료로 남긴다. (부분 완료: `make test`·`make test-race`·`make lint`·`make test-e2e` PASS, `go vet ./...`는 lint에 포함. 전체 `make test-integration` NOT RUN(R7). M2 8GB/4GiB와 Windows 16GB의 lifecycle은 미완료.)
+- [x] **커밋:** `test: verify full mock lifecycle and document operation`. 최종 변경 검토와 사용자 실행 검증 후에만 출시 준비 완료라고 보고한다. push·merge는 별도 요청 범위다. (커밋은 계획의 단일 커밋 대신 단계별로 나뉘었다. 사용자 실행 검증이 끝나지 않았으므로 **출시 준비 완료는 선언하지 않는다.**)
+
+**실행 기록:** 2026-11-04. 상세 증거: `docs/validation/acceptance-matrix.md`, `docs/superpowers/plans/2026-11-03-task19-acceptance.md`의 Verified evidence. 로그는 로컬 비커밋 작업 폴더 `.superpowers/sdd/2026-11-03-task19-acceptance/task-N-logs/`에 있다.
+- **커밋(로컬, 푸시 전):** Task 1 grader-9 `f603b72`·`65fae8c`; Task 2 lifecycle `47a8a15`·`e0b3d03`·`93f7106`·`f2fb82c`·`b40a736`; Task 3 복구 `1fbb61f`·`d396d9b`·`0d3e2f4`·`fecc744`·`4e7e7cd`·`5e60158`·`1554a58`·`c6f3b5a`; Task 4 CI·문서 `a737e3a`·`1963be6`·`11fbb1a`·`76ebc7c`·`f000579`·`8d8cb4e`·`fe63212`·`f9d6090`·`c9abffa`; Task 5 기록·문서 정정.
+- **grader-9:** 학습자 잘못으로 컨트롤러가 Pod를 만들지 못한 FailedCreate(`is forbidden:`에 인프라 표지 없음)를 FAIL로 판정하고 인프라성은 ERROR로 둔다. 오래된 조건 방지: 이름이 나온 ServiceAccount가 이제 존재하거나 ResourceQuota가 사라졌으면 ERROR(컨트롤러 back-off). 단위 RED→GREEN, 라이브 `TestReadyFailedCreateIsLearnerFault` PASS 197.9초(`65fae8c`). 한계: 완화됐지만 남아 있는 quota, PodSecurity 라벨·LimitRange 변경은 stale 판정을 못 한다.
+- **lifecycle(PARTIAL: mock-01 minus [networkpolicy-001]):** 스펙 순서(start→모범 풀이→grade→review→reset) 3회, `f2fb82c`, PASS 4569.9초. 초기 [20 20 20], 풀이 [92 92 92]/92(19문제), 잔여 0(namespace·객체·볼륨·이미지·미완료 operation), OOM·환경 Pending 없음, sentinel·개인 파일 보존, peak 1158/1189/1210MiB(warm-after-setup), start 약 7분25초, 풀이 grade 4분37초~5분10초, reset 약 12분26초. 대용 certificate이며 패키지 검증이 아니다. cold start 미측정. 이 실행 뒤 `b40a736`이 batch-001 Job TTL을 제거했고(그 전 TTL 300초는 5분 넘는 채점 중 Job을 지워 `!inputs-changed`를 일으킴) batch-001만 재검증했다(PASS 478.6초, seeds [1 3], hash `4a009b41…`). Task 3의 CLI 변경도 이 실행 뒤이며 lifecycle은 HEAD에서 재실행하지 않았다.
+- **복구(`TestInterruptedOperations`, 5/5 PASS 952.3초; 전체 `make test-e2e` `c6f3b5a` PASS 1594.7초):** KillDuringPrepare, InterruptDuringGrade, KillDuringReset, APIOutageDuringGrade(풀이 적용 뒤 outage에서 FAIL·점수 없음, `--retry`로 29/29), ConcurrentCommands. 제품 수정 3건(각각 실패 테스트 먼저): 중단된 준비를 status/start가 감지(exit 3, `ckad reset` 안내), 전체 reset과 reset --cluster가 중단된 준비 operation을 닫음, 미완료 제출의 일반 grade는 exit 3. 1라운드: 다른 터미널의 진행 중 준비는 잠금 probe로 구분(status exit 0 `준비가 진행 중입니다`), 준비 실패는 `준비에 실패했습니다`(exit 3), grade 안내는 허용된 명령만, read-only poller. 첫 전체 e2e는 `docker pause` 거부("unable to freeze")로 실패했고 pause 재시도를 추가했으나 그 재시도 경로는 실제로 실행된 적이 없다. `TestCLIFlow` PASS 497.3초(Task 3 이후).
+- **CI:** `.github/workflows/ci.yaml`은 정의와 `TestCIWorkflowParses`만 검증했고 **GitHub에서 한 번도 실행되지 않았다**(NOT RUN). `runtime/acceptance.sh`는 스텁 테스트만 통과했고 실기기에서 실행된 적이 없다.
+- **최종 검증(`c6f3b5a` + 문서):** `make test` exit 0, `make test-race` exit 0, `make lint` exit 0. 전체 `make test-integration`은 NOT RUN(R7: 수 시간 소요). 이전 은행 실행(grader-8 시점)과 그 이후 문제 내용 불변은 매트릭스의 통합 은행 행 참조(batch-001만 변경되어 재검증).
+- **NOT RUN:** Apple M2 8GB/4GiB, Windows 16GB, mock-01 긍정 시작, networkpolicy-001 certification(NetworkPolicy 강제 호스트 필요), 4GiB 적합성, cold start, GitHub CI, grader-9 하의 전체 은행 재실행.
+- **사용자에게 알리는 알려진 제품 공백:** (1) COMPLETED 세션 뒤 관리형 `ckad image build`가 거부된다(복습 재제출은 일반 `docker build`). (2) 채점 fingerprint가 Deployment spec 전체(replicas 포함)를 해시하므로 HPA가 있는 문제(`api-migration-001`)는 채점 중 스케일 시 거짓 `!inputs-changed` ERROR 위험이 있다(M9, 미확인). (3) `ckad status`의 잠금 probe가 `env.lock`을 만든다(쓰기 불가면 status 실패 가능). (4) `start`의 explicit-flag 판정(`NFlag()`)이 항상 0이라 플래그를 준 `start`도 resume 경로를 탈 수 있다(M5).
+- **출시 준비 완료는 보류한다.** 기기 셀(M2·Windows)이 `미완료`이고 사용자의 기기 실행 검증이 끝나지 않았다.
+- **README·`docs/usage/training.md` 정정:** Task 3의 CLI 변경에 맞춰 status/start/grade의 종료 코드와 메시지를 최종 코드로 바로잡았다.
 
 ## 5. Spec coverage와 자체 검토
 
