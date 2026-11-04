@@ -147,7 +147,7 @@ func stubbedAcceptanceEnv(t *testing.T, dockerPS, ckadBank, doctor string, args 
  "info --format {{.MemTotal}}") echo 4294967296;;
  "info --format {{.NCPU}}") echo 4;;
  "info --format {{.ServerVersion}}") echo 29.0.0;;
- "ps --format {{.Names}}") printf '%s' "$FAKE_PS";;
+ "ps --format "*) printf '%s' "$FAKE_PS";;
  *) echo "docker $*" >> "$CALLS";;
 esac
 `)
@@ -193,9 +193,18 @@ func TestAcceptanceScriptRefusesRunningJunkloudContainers(t *testing.T) {
 		t.Errorf("running_junkloud_containers = %q", got)
 	}
 	// The compose containers of this very repository (project "junkloud") are
-	// named junkloud-dev-1 and junkloud-workspace-1; they are not another environment.
-	if got := runAcceptanceFunc(t, `docker() { printf 'junkloud-dev-1\njunkloud-workspace-1\njunkloud-sock-init-1\n'; }; running_junkloud_containers`); got != "" {
+	// named junkloud-dev-1 and junkloud-workspace-1 and carry the compose project label; they are not another environment.
+	if got := runAcceptanceFunc(t, `docker() { printf 'junkloud-dev-1|junkloud\njunkloud-workspace-1|junkloud\njunkloud-sock-init-1|junkloud\n'; }; running_junkloud_containers`); got != "" {
 		t.Errorf("compose service containers must not count as another environment: %q", got)
+	}
+	// The work containers are recognised by their compose project label, not by
+	// a name that assumes the folder is called JunKloud: a GitHub ZIP unpacks to
+	// JunKloud-master. A kind node never carries the label.
+	if got := runAcceptanceFunc(t, `docker() { printf 'junkloud-master-workspace-1|junkloud-master\njunkloud-master-dev-1|junkloud-master\njunkloud-master-sock-init-1|junkloud-master\nmy-work-dev-1|my-work\n'; }; running_junkloud_containers`); got != "" {
+		t.Errorf("labelled compose containers must not count as another environment: %q", got)
+	}
+	if got := runAcceptanceFunc(t, `docker() { printf 'junkloud-master-workspace-1|junkloud-master\njunkloud-0123456789ab-control-plane|\nkindccm-x|\n'; }; running_junkloud_containers`); strings.Fields(got)[0] != "junkloud-0123456789ab-control-plane" || len(strings.Fields(got)) != 2 {
+		t.Errorf("unlabelled kind containers must still count: %q", got)
 	}
 	out, calls, exit := stubbedAcceptance(t, "junkloud-xyz-control-plane\n", "exit 0")
 	if exit == 0 || strings.Contains(calls, "ckad ") || strings.Contains(calls, "make ") {
@@ -254,5 +263,20 @@ func TestAcceptanceScriptFlagsUnexpectedCapabilityFailures(t *testing.T) {
 	}
 	if strings.Contains(calls, "UNSUP=dns") {
 		t.Errorf("dns must never be passed as an unsupported capability:\n%s", calls)
+	}
+}
+
+// --unsupported is honoured only with --cold (the doctor phase decides
+// otherwise); silently ignoring it would label a PARTIAL run wrongly.
+func TestAcceptanceScriptRejectsUnsupportedWithoutCold(t *testing.T) {
+	out, calls, exit := stubbedAcceptance(t, "", "exit 0", "--unsupported", "network-policy")
+	if exit != 2 || strings.Contains(calls, "make ") {
+		t.Errorf("--unsupported without --cold must exit 2 before running anything: exit %d calls %q\n%s", exit, calls, out)
+	}
+	if !strings.Contains(out, "--unsupported") || !strings.Contains(out, "--cold") {
+		t.Errorf("the error must explain that --unsupported needs --cold:\n%s", out)
+	}
+	if _, calls, exit = stubbedAcceptance(t, "", "exit 0", "--cold", "--unsupported", "network-policy"); exit != 0 || !strings.Contains(calls, "make test-acceptance") {
+		t.Errorf("--cold --unsupported must run: exit %d calls %q", exit, calls)
 	}
 }

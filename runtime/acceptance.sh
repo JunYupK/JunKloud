@@ -90,11 +90,12 @@ unexpected_from_doctor() {
 # lifecycle test's memory sampler would sum (junkloud-*, kindccm-*, *envoy*): the
 # user's own practice cluster, for example.
 running_junkloud_containers() {
-    # The compose services of this repository (project "junkloud") are named
-    # junkloud-dev-1, junkloud-workspace-1 ...; they are the work container, not
-    # another environment.
-    docker ps --format '{{.Names}}' 2>/dev/null | grep -E '^(junkloud-|kindccm-)|envoy' \
-        | grep -Ev '^junkloud-(dev|workspace|sock-init)-[0-9]+$' || true
+    # The work containers (dev, workspace, sock-init) belong to a compose
+    # project and carry its label; they are not another environment, whatever
+    # the checkout folder is called (a GitHub ZIP unpacks to JunKloud-master).
+    # Kind nodes and cloud-provider-kind containers never carry that label.
+    docker ps --format '{{.Names}}|{{.Label "com.docker.compose.project"}}' 2>/dev/null \
+        | awk -F'|' '$2 == "" { print $1 }' | grep -E '^(junkloud-|kindccm-)|envoy' || true
 }
 
 # environment_id_from_doctor <doctor-output-file> prints the "전용 환경: <id>" value.
@@ -146,12 +147,12 @@ secs() { # seconds -> 1h02m03s
 }
 
 main() {
-    local cold=0 skip_validate=0 given_unsupported=""
+    local cold=0 skip_validate=0 given_unsupported="" unsupported_given=0
     while [ $# -gt 0 ]; do
         case "$1" in
             --cold) cold=1 ;;
             --skip-validate) skip_validate=1 ;;
-            --unsupported) shift; given_unsupported="${1:-}" ;;
+            --unsupported) shift; given_unsupported="${1:-}"; unsupported_given=1 ;;
             -h | --help)
                 sed -n '2,/^# run is printed as NOT RUN/p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'
                 echo
@@ -167,6 +168,11 @@ main() {
         esac
         shift
     done
+
+    if [ "${unsupported_given}" -eq 1 ] && [ "${cold}" -eq 0 ]; then
+        echo "--unsupported only works together with --cold (without --cold the doctor decides which capabilities are unsupported). Nothing was run." >&2
+        return 2
+    fi
 
     cd "${repo_root}" || return 1
     local started evidence stamp work state
@@ -205,7 +211,7 @@ main() {
     if [ -n "${others}" ]; then
         echo "These JunKloud containers are running and would be counted into the peak memory (and share a small Docker VM):" >&2
         echo "${others}" | sed 's/^/  /' >&2
-        echo "Stop them first, without removing anything. These anchored filters do not match the work containers (junkloud-dev-1, junkloud-workspace-1), which must keep running:" >&2
+        echo "Stop them first, without removing anything. These anchored filters match only kind nodes and gateways, never the compose work containers (dev, workspace; whatever the folder is called), which must keep running:" >&2
         echo '  docker stop $(docker ps -q --filter "name=^junkloud-[0-9a-f]{12}-" --filter "name=^junkloud-cpk-" --filter "name=^kindccm-")' >&2
         echo "Then run this script again. Nothing was run." >&2
         return 3
