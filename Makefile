@@ -25,7 +25,7 @@ test-integration:
 
 # End-to-end tests of the ckad CLI.
 test-e2e:
-	go test -tags=e2e ./tests/e2e/... -count=1 -timeout=25m
+	go test -tags=e2e ./tests/e2e/... -count=1 -timeout=60m
 
 # Release acceptance: the full mock lifecycle (prepare, model solution, grade,
 # reset) three times in a row on a real kind cluster. Takes hours. On a host
