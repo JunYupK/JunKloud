@@ -145,13 +145,41 @@ func (s *Service) Status(ctx context.Context, sessionID string, now time.Time) (
 	}
 	if op, err := s.cfg.Store.GetOperation(ctx, OperationID(rec.ID)); err == nil {
 		if op.Phase != PhaseDone && (rec.State == model.StatePreparing || rec.State == model.StateSetupError) {
-			st.Pending = append(st.Pending, Pending{OperationID: op.ID, Phase: op.Phase, Since: op.CreatedAt, Recorded: true, Prepare: true,
-				Guidance: fmt.Sprintf("The preparation of session %s stopped at %q. Run ckad reset to clean up the resources it owns, then start again; nothing is recreated for you.", rec.ID, op.Phase)})
+			p := Pending{OperationID: op.ID, Phase: op.Phase, Since: op.CreatedAt, Recorded: true, Prepare: true}
+			switch {
+			case op.Phase == PhaseFailed:
+				p.Guidance = fmt.Sprintf("The preparation of session %s failed (SETUP_ERROR). Run ckad reset to clean up the resources it owns, then start again.", rec.ID)
+			default:
+				running, err := s.environmentLockHeld()
+				if err != nil {
+					return Status{}, err
+				}
+				p.Running = running
+				if running {
+					p.Guidance = fmt.Sprintf("The preparation of session %s is still being carried out by another command.", rec.ID)
+				} else {
+					p.Guidance = fmt.Sprintf("The preparation of session %s stopped at %q. Run ckad reset to clean up the resources it owns, then start again; nothing is recreated for you.", rec.ID, op.Phase)
+				}
+			}
+			st.Pending = append(st.Pending, p)
 		}
 	} else if !errors.Is(err, store.ErrNotFound) {
 		return Status{}, err
 	}
 	return st, nil
+}
+
+// environmentLockHeld probes the environment lock without waiting: true when
+// another process holds it. The lock is released again at once.
+func (s *Service) environmentLockHeld() (bool, error) {
+	release, err := lock.Acquire(author.LockPath(s.cfg.StateDir))
+	if errors.Is(err, lock.ErrLocked) {
+		return true, nil
+	}
+	if err != nil {
+		return false, fmt.Errorf("session: probe the environment lock: %w", err)
+	}
+	return false, release()
 }
 
 // wallClock is the session's clock at `now`: plain wall time since the stored

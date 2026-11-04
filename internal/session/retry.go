@@ -451,7 +451,10 @@ type Pending struct {
 	// Prepare marks an unfinished preparation of the session (the process was
 	// stopped, or it failed, before the initial states were verified). Only a
 	// full ckad reset leaves it.
-	Prepare  bool
+	Prepare bool
+	// Running (with Prepare): the environment lock is held by another
+	// process, so the preparation is still being carried out, not interrupted.
+	Running  bool
 	Guidance string
 }
 

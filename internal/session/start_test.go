@@ -407,3 +407,33 @@ func TestStatusReportsInterruptedPrepare(t *testing.T) {
 		t.Fatal(p.Guidance)
 	}
 }
+
+// TestStatusDistinguishesRunningFromInterruptedPrepare: status takes no lock,
+// so a preparation another terminal is still running must not be reported as
+// interrupted. The environment lock tells the two apart (R12).
+func TestStatusDistinguishesRunningFromInterruptedPrepare(t *testing.T) {
+	h := newHarness(t)
+	prepared := h.prepareMock()
+	op, err := h.st.GetOperation(ctx, session.OperationID(prepared.ID))
+	testutil.NoError(t, err)
+	op.Phase = session.PhaseSetupApplied
+	testutil.NoError(t, h.st.PutOperation(ctx, op))
+
+	release, err := lock.Acquire(author.LockPath(h.stateDir))
+	testutil.NoError(t, err)
+	status, err := h.svc.Status(ctx, prepared.ID, t0)
+	testutil.NoError(t, err)
+	testutil.Equal(t, len(status.Pending), 1)
+	testutil.Equal(t, status.Pending[0].Prepare, true)
+	testutil.Equal(t, status.Pending[0].Running, true)
+	testutil.NoError(t, release())
+
+	status, err = h.svc.Status(ctx, prepared.ID, t0)
+	testutil.NoError(t, err)
+	testutil.Equal(t, len(status.Pending), 1)
+	testutil.Equal(t, status.Pending[0].Running, false)
+	// The probe released the lock again.
+	release, err = lock.Acquire(author.LockPath(h.stateDir))
+	testutil.NoError(t, err)
+	testutil.NoError(t, release())
+}

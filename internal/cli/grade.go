@@ -5,6 +5,7 @@ package cli
 import (
 	"errors"
 	"fmt"
+	"strings"
 
 	"github.com/JunYupK/JunKloud/internal/model"
 	"github.com/JunYupK/JunKloud/internal/session"
@@ -33,6 +34,7 @@ func gradeCommand(d *Dependencies) *cobra.Command {
 		resubmit, _ := c.Flags().GetBool("resubmit")
 		fmt.Fprintln(c.ErrOrStderr(), "채점 중에는 답안 수정을 멈추세요. 중단 후 ckad status로 복구 방법을 확인하세요.")
 		run, err := d.Session.Grade(c.Context(), id, session.GradeOptions{ProblemID: pid, Retry: retry, Resubmit: resubmit, At: d.Now()})
+		grading := err
 		existing := errors.Is(err, session.ErrAlreadySubmitted)
 		if err != nil && !existing {
 			return publicError(err)
@@ -57,7 +59,12 @@ func gradeCommand(d *Dependencies) *cobra.Command {
 		if existing {
 			fmt.Fprintln(c.OutOrStdout(), "이미 제출했습니다. 기존 결과입니다. 기술적 오류는 ckad grade --retry, 수정 후에는 --resubmit, 결과는 ckad review로 확인하세요.")
 			if !run.Evaluation.Complete || run.Evaluation.Score == nil {
-				return publicError(session.ErrGradeInterrupted)
+				// Name only the commands the service accepts for this scope.
+				commands := recoveryCommand.FindAllString(grading.Error(), -1)
+				if len(commands) == 0 {
+					return fail(3, "채점을 확정할 수 없습니다. ckad status를 확인하세요.")
+				}
+				return fail(3, "채점을 확정할 수 없습니다. 사용할 수 있는 명령: "+strings.Join(commands, " / "))
 			}
 			return nil
 		}

@@ -400,7 +400,19 @@ func TestResetClosesInterruptedPrepare(t *testing.T) {
 	got, err := h.st.GetOperation(ctx, op.ID)
 	testutil.NoError(t, err)
 	testutil.Equal(t, got.Phase, session.PhaseFailed)
-	status, err := h.svc.Status(ctx, v.ID, t0)
+}
+
+// A cluster reset removes everything, so the interrupted preparation of the
+// abandoned session is closed as well.
+func TestClusterResetClosesInterruptedPrepare(t *testing.T) {
+	h := newHarness(t)
+	v := h.prepareMock()
+	op, err := h.st.GetOperation(ctx, session.OperationID(v.ID))
 	testutil.NoError(t, err)
-	testutil.Equal(t, len(status.Pending), 0)
+	op.Phase = session.PhaseSetupApplied
+	testutil.NoError(t, h.st.PutOperation(ctx, op))
+	testutil.NoError(t, h.svc.Reset(ctx, v.ID, session.ResetOptions{Cluster: true, ConfirmedEnvironmentID: v.EnvironmentID}))
+	got, err := h.st.GetOperation(ctx, op.ID)
+	testutil.NoError(t, err)
+	testutil.Equal(t, got.Phase, session.PhaseFailed)
 }

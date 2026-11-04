@@ -120,6 +120,22 @@ func (s *Service) Reset(ctx context.Context, sessionID string, opts ResetOptions
 	return s.resumeReset(ctx, rec, op)
 }
 
+// closePrepare marks the session's unfinished preparation operation failed.
+func (s *Service) closePrepare(ctx context.Context, sessionID string) error {
+	prep, err := s.cfg.Store.GetOperation(ctx, OperationID(sessionID))
+	if errors.Is(err, store.ErrNotFound) {
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	if prep.Phase == PhaseDone || prep.Phase == PhaseFailed {
+		return nil
+	}
+	prep.Phase = PhaseFailed
+	return s.cfg.Store.PutOperation(ctx, prep)
+}
+
 func (s *Service) requireNoPendingReset(ctx context.Context) error {
 	for _, kind := range []string{ResetOperationKind, environment.OperationCleanup, environment.OperationImageBuild} {
 		ops, err := s.cfg.Store.ListOperations(ctx, kind)
@@ -186,13 +202,7 @@ func (s *Service) resumeReset(ctx context.Context, rec model.SessionRecord, op m
 			}
 		}
 		// The abandoned session's interrupted preparation is over with it.
-		prep, err := s.cfg.Store.GetOperation(ctx, OperationID(rec.ID))
-		if err == nil && prep.Phase != PhaseDone && prep.Phase != PhaseFailed {
-			prep.Phase = PhaseFailed
-			if err := s.cfg.Store.PutOperation(ctx, prep); err != nil {
-				return err
-			}
-		} else if err != nil && !errors.Is(err, store.ErrNotFound) {
+		if err := s.closePrepare(ctx, rec.ID); err != nil {
 			return err
 		}
 		return advance(PhaseDone)

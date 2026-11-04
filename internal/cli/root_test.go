@@ -561,7 +561,53 @@ func TestPlainGradeOfIncompleteSubmissionExits3(t *testing.T) {
 		t.Fatal(code)
 	}
 	code, out, diag := h.run("", "grade")
-	if code != 3 || strings.Contains(out, "점수:") || !strings.Contains(diag, "이전 채점이 중단되었습니다") || !strings.Contains(diag, "ckad grade --retry") {
+	if code != 3 || strings.Contains(out, "점수:") || !strings.Contains(diag, "채점을 확정할 수 없습니다") || strings.Contains(diag, "이전 채점이 중단되었습니다") || !strings.Contains(diag, "ckad grade --retry") {
 		t.Fatal(code, out, diag)
+	}
+}
+
+// Status takes no lock: while another terminal's command still holds the
+// environment lock the preparation is running, not interrupted. Status says
+// so and exits 0, and start is refused with the lock message (R12).
+func TestRunningPrepareIsNotReportedAsInterrupted(t *testing.T) {
+	h := newHarness(t)
+	if code, _, errOut := h.run("no\n", "start", "--mode", "practice", "--count", "5"); code != 0 {
+		t.Fatal(code, errOut)
+	}
+	op, err := h.deps.Store.GetOperation(context.Background(), session.OperationID("practice-1"))
+	must(t, err)
+	op.Phase = session.PhaseSetupApplied
+	must(t, h.deps.Store.PutOperation(context.Background(), op))
+	release, err := lock.Acquire(author.LockPath(h.state))
+	must(t, err)
+	defer release()
+
+	code, out, errOut := h.run("", "status")
+	if code != 0 || !strings.Contains(out, "준비가 진행 중입니다") || strings.Contains(out+errOut, "ckad reset") || strings.Contains(out+errOut, "중단되었습니다") {
+		t.Fatal(code, out, errOut)
+	}
+	code, out, errOut = h.run("yes\n", "start")
+	if code != 3 || strings.Contains(out, "준비 완료") || !strings.Contains(errOut, "다른 준비·채점·검증 작업이 실행 중입니다") {
+		t.Fatal(code, out, errOut)
+	}
+}
+
+// A failed setup (SETUP_ERROR) is not an interruption: status says the
+// preparation failed and names ckad reset.
+func TestFailedPrepareHasItsOwnWording(t *testing.T) {
+	h := newHarness(t)
+	if code, _, errOut := h.run("no\n", "start", "--mode", "practice", "--count", "5"); code != 0 {
+		t.Fatal(code, errOut)
+	}
+	ctx := context.Background()
+	op, err := h.deps.Store.GetOperation(ctx, session.OperationID("practice-1"))
+	must(t, err)
+	op.Phase = session.PhaseFailed
+	must(t, h.deps.Store.PutOperation(ctx, op))
+	must(t, h.deps.Store.Transition(ctx, "practice-1", model.StatePreparing, model.StateSetupError))
+
+	code, out, errOut := h.run("", "status")
+	if code != 3 || !strings.Contains(errOut, "준비에 실패했습니다") || !strings.Contains(out+errOut, "ckad reset") || strings.Contains(out+errOut, "중단되었습니다") {
+		t.Fatal(code, out, errOut)
 	}
 }

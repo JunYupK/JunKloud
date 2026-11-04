@@ -10,6 +10,7 @@ import (
 	"strings"
 
 	"github.com/JunYupK/JunKloud/internal/environment"
+	"github.com/JunYupK/JunKloud/internal/lock"
 	"github.com/JunYupK/JunKloud/internal/model"
 	"github.com/JunYupK/JunKloud/internal/session"
 	"github.com/JunYupK/JunKloud/internal/store"
@@ -136,6 +137,9 @@ func startCommand(d *Dependencies) *cobra.Command {
 				}
 				if st.Session.State == model.StatePreparing {
 					for _, p := range st.Pending {
+						if p.Prepare && p.Running {
+							return publicError(lock.ErrLocked)
+						}
 						if p.Prepare {
 							return publicError(session.ErrNotPrepared)
 						}
