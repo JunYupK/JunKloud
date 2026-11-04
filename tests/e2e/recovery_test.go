@@ -439,8 +439,19 @@ func TestInterruptedOperations(t *testing.T) {
 
 		p := startProc(t, h, "", "grade")
 		waitOperationAnyPhase(p.watch(ctx), t, h, session.GradeOperationKind, session.GradePlanned, session.GradeRecorded)
-		if out, err := docker(ctx, "pause", node); err != nil {
-			t.Fatalf("pause %s: %v %s", node, err, out)
+		// The kernel's cgroup freezer occasionally refuses a pause for a
+		// moment ("unable to freeze"); retry before giving up.
+		var pauseErr error
+		for attempt := 0; attempt < 5; attempt++ {
+			if _, pauseErr = docker(ctx, "pause", node); pauseErr == nil {
+				break
+			}
+			t.Logf("pause %s attempt %d: %v", node, attempt+1, pauseErr)
+			time.Sleep(2 * time.Second)
+		}
+		if pauseErr != nil {
+			p.kill(t) // never leave a grading holding the lock behind
+			t.Fatalf("pause %s: %v", node, pauseErr)
 		}
 		paused = true
 		code := p.wait(t, 15*time.Minute)
