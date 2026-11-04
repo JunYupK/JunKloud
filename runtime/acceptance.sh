@@ -205,7 +205,9 @@ main() {
     if [ -n "${others}" ]; then
         echo "These JunKloud containers are running and would be counted into the peak memory (and share a small Docker VM):" >&2
         echo "${others}" | sed 's/^/  /' >&2
-        echo "Stop them first (for example: docker stop \$(docker ps -q --filter name=junkloud- --filter name=kindccm-)) and run again. Nothing was run." >&2
+        echo "Stop them first, without removing anything. These anchored filters do not match the work containers (junkloud-dev-1, junkloud-workspace-1), which must keep running:" >&2
+        echo '  docker stop $(docker ps -q --filter "name=^junkloud-[0-9a-f]{12}-" --filter "name=^junkloud-cpk-" --filter "name=^kindccm-")' >&2
+        echo "Then run this script again. Nothing was run." >&2
         return 3
     fi
     echo "none running"

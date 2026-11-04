@@ -6,6 +6,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"testing"
 )
@@ -202,6 +203,23 @@ func TestAcceptanceScriptRefusesRunningJunkloudContainers(t *testing.T) {
 	}
 	if !strings.Contains(out, "junkloud-xyz-control-plane") {
 		t.Errorf("the refusal must name the container:\n%s", out)
+	}
+	// The suggested docker stop must never match the work containers: the
+	// script runs inside one of them, so stopping it would kill the user's session.
+	filters := regexp.MustCompile(`name=(\^[^" ]+)`).FindAllStringSubmatch(out, -1)
+	if len(filters) == 0 {
+		t.Errorf("the refusal must print anchored name= filters:\n%s", out)
+	}
+	for _, f := range filters {
+		re := regexp.MustCompile(f[1])
+		for _, work := range []string{"junkloud-dev-1", "junkloud-workspace-1", "junkloud-sock-init-1"} {
+			if re.MatchString(work) {
+				t.Errorf("suggested filter %q matches the work container %s", f[1], work)
+			}
+		}
+	}
+	if regexp.MustCompile(`name=junkloud-`).MatchString(out) {
+		t.Errorf("the suggestion must not use the unanchored name=junkloud- filter:\n%s", out)
 	}
 	// With nothing running it proceeds.
 	if _, calls, exit = stubbedAcceptance(t, "", "exit 0"); exit != 0 || !strings.Contains(calls, "make test-acceptance") {
