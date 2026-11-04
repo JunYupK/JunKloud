@@ -78,7 +78,10 @@ func TestFullMockLifecycle(t *testing.T) {
 			t.Fatalf("the lifecycle acceptance test requires %s: %v", name, err)
 		}
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), 6*time.Hour)
+	// Shorter than the go test -timeout=6h of make test-acceptance: if the
+	// context were equal, a slow device would hit the test binary's panic
+	// before the deferred cleanups run. 20 minutes remain for them.
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Hour+40*time.Minute)
 	defer cancel()
 
 	sel := selectExam(t)

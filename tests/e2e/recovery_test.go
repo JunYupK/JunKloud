@@ -19,6 +19,7 @@ import (
 	"github.com/JunYupK/JunKloud/internal/model"
 	"github.com/JunYupK/JunKloud/internal/session"
 	"github.com/JunYupK/JunKloud/internal/store"
+	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 )
 
@@ -425,13 +426,12 @@ func TestInterruptedOperations(t *testing.T) {
 		sid, _ := currentSessionOf(ctx, t, h)
 		node := h.identity(ctx).ClusterName + "-control-plane"
 		h.applyFrozenObjects(ctx) // a correct answer: any FAIL below would be the outage's fault
-		paused := false
+		// Always attempt the unpause, even when no pause is known to have
+		// succeeded: a pause that reported an error may still have frozen the
+		// node. "is not paused" is the normal answer then and is ignored.
 		unpause := func() {
-			if paused {
-				if out, err := docker(context.Background(), "unpause", node); err != nil {
-					t.Errorf("unpause %s: %v %s", node, err, out)
-				}
-				paused = false
+			if out, err := docker(context.Background(), "unpause", node); err != nil && !strings.Contains(out+err.Error(), "not paused") {
+				t.Errorf("unpause %s: %v %s", node, err, out)
 			}
 		}
 		t.Cleanup(unpause)
@@ -453,7 +453,6 @@ func TestInterruptedOperations(t *testing.T) {
 			p.kill(t) // never leave a grading holding the lock behind
 			t.Fatalf("pause %s: %v", node, pauseErr)
 		}
-		paused = true
 		code := p.wait(t, 15*time.Minute)
 		unpause()
 		combined := p.out.String() + p.diag.String()
@@ -468,8 +467,11 @@ func TestInterruptedOperations(t *testing.T) {
 			t.Fatalf("the outage was graded as a FAIL:\n%s", combined)
 		}
 
-		// The cluster answers again. Give the control plane a moment.
+		// The cluster answers again. Wait until the node and the session's
+		// pods are Ready too, not only the API: a retry against pods that
+		// are still restarting would grade the outage's aftermath.
 		waitAPI(ctx, t, h)
+		waitNodeAndPodsReady(ctx, t, h)
 		retry := expectCode(t, h, "", 0, "grade", "--retry")
 		if !strings.Contains(retry, "점수: 29/29") {
 			t.Fatalf("grade --retry did not confirm the full score:\n%s", retry)
@@ -534,6 +536,67 @@ func waitAPI(ctx context.Context, t *testing.T, h *cliHarness) {
 			t.Fatal("the API server did not answer after the unpause")
 		}
 		time.Sleep(time.Second)
+	}
+}
+
+// waitNodeAndPodsReady waits (at most five minutes) until every node is Ready
+// and every pod outside the cluster's own system namespaces is Ready or has
+// Succeeded.
+func waitNodeAndPodsReady(ctx context.Context, t *testing.T, h *cliHarness) {
+	t.Helper()
+	k := h.kube(ctx)
+	system := map[string]bool{"kube-system": true, "kube-public": true, "kube-node-lease": true, "local-path-storage": true}
+	deadline := time.Now().Add(5 * time.Minute)
+	for {
+		problem := ""
+		nodes, err := k.cs.CoreV1().Nodes().List(ctx, metav1.ListOptions{})
+		switch {
+		case err != nil:
+			problem = "list nodes: " + err.Error()
+		case len(nodes.Items) == 0:
+			problem = "no nodes"
+		default:
+			for _, n := range nodes.Items {
+				ready := false
+				for _, c := range n.Status.Conditions {
+					if c.Type == corev1.NodeReady && c.Status == corev1.ConditionTrue {
+						ready = true
+					}
+				}
+				if !ready {
+					problem = "node " + n.Name + " is not Ready"
+				}
+			}
+		}
+		if problem == "" {
+			pods, err := k.cs.CoreV1().Pods("").List(ctx, metav1.ListOptions{})
+			if err != nil {
+				problem = "list pods: " + err.Error()
+			} else {
+				for _, p := range pods.Items {
+					if system[p.Namespace] || p.Status.Phase == corev1.PodSucceeded {
+						continue
+					}
+					ready := false
+					for _, c := range p.Status.Conditions {
+						if c.Type == corev1.PodReady && c.Status == corev1.ConditionTrue {
+							ready = true
+						}
+					}
+					if !ready {
+						problem = "pod " + p.Namespace + "/" + p.Name + " is not Ready"
+						break
+					}
+				}
+			}
+		}
+		if problem == "" {
+			return
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("the cluster did not settle after the unpause: %s", problem)
+		}
+		time.Sleep(2 * time.Second)
 	}
 }
 
