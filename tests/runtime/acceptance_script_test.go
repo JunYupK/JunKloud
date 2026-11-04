@@ -48,9 +48,18 @@ func TestAcceptanceScriptDerivesUnsupportedCapabilities(t *testing.T) {
 	allPass := write("pass.txt", "전용 환경: abc123def456\nkind: v0.33.0\ndns: PASS\nservice: PASS\nnetwork-policy: PASS\ningress: PASS\nstorage: PASS\nmetrics: PASS\nimage-build: PASS\n")
 	oneFail := write("one.txt", "전용 환경: abc123def456\nkind: v0.33.0\ndns: PASS\nservice: PASS\nnetwork-policy: FAIL\ningress: PASS\nstorage: PASS\nmetrics: PASS\nimage-build: PASS\n")
 	twoFail := write("two.txt", "전용 환경: abc123def456\ndns: PASS\nservice: PASS\nnetwork-policy: FAIL\ningress: FAIL\nstorage: PASS\nmetrics: PASS\nimage-build: PASS\n")
-	for _, tc := range []struct{ file, want string }{{allPass, ""}, {oneFail, "network-policy"}, {twoFail, "network-policy,ingress"}} {
-		if got := runAcceptanceFunc(t, `unsupported_from_doctor "`+tc.file+`"`); got != tc.want {
-			t.Errorf("%s: unsupported = %q, want %q", filepath.Base(tc.file), got, tc.want)
+	dnsFail := write("dns.txt", "전용 환경: abc123def456\ndns: FAIL\nservice: PASS\nnetwork-policy: PASS\ningress: PASS\nstorage: PASS\nmetrics: PASS\nimage-build: PASS\n")
+	// Only a network-policy FAIL makes the run PARTIAL (the test selects a
+	// partial exam only for what is listed, and the product treats the other
+	// capabilities as required). Any other FAIL is unexpected and reported.
+	for _, tc := range []struct{ file, unsupported, unexpected string }{
+		{allPass, "", ""}, {oneFail, "network-policy", ""}, {twoFail, "network-policy", "ingress"}, {dnsFail, "", "dns"},
+	} {
+		if got := runAcceptanceFunc(t, `unsupported_from_doctor "`+tc.file+`"`); got != tc.unsupported {
+			t.Errorf("%s: unsupported = %q, want %q", filepath.Base(tc.file), got, tc.unsupported)
+		}
+		if got := runAcceptanceFunc(t, `unexpected_from_doctor "`+tc.file+`"`); got != tc.unexpected {
+			t.Errorf("%s: unexpected = %q, want %q", filepath.Base(tc.file), got, tc.unexpected)
 		}
 	}
 	if got := runAcceptanceFunc(t, `environment_id_from_doctor "`+oneFail+`"`); got != "abc123def456" {
@@ -102,5 +111,130 @@ func TestAcceptanceScriptNeverHardcodesUnsupported(t *testing.T) {
 		if strings.Contains(line, "JUNKLOUD_TEST_HOST_COMPAT=") && !strings.HasPrefix(strings.TrimSpace(line), "#") {
 			t.Errorf("a real device run must not set the sandbox compat variable: %s", line)
 		}
+	}
+}
+
+// stubbedAcceptance runs the whole script with fake docker/kind/ckad/make on
+// PATH. The fakes append their calls to calls.log.
+func stubbedAcceptance(t *testing.T, dockerPS, ckadBank string, args ...string) (out string, calls string, exit int) {
+	t.Helper()
+	return stubbedAcceptanceEnv(t, dockerPS, ckadBank, "", args...)
+}
+
+func stubbedAcceptanceDoctor(t *testing.T, doctor string) (string, string, int) {
+	t.Helper()
+	return stubbedAcceptanceEnv(t, "", "exit 0", doctor)
+}
+
+func stubbedAcceptanceEnv(t *testing.T, dockerPS, ckadBank, doctor string, args ...string) (out string, calls string, exit int) {
+	t.Helper()
+	root, err := filepath.Abs(filepath.Join("..", ".."))
+	if err != nil {
+		t.Fatal(err)
+	}
+	dir := t.TempDir()
+	bin := filepath.Join(dir, "bin")
+	if err := os.MkdirAll(bin, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	put := func(name, body string) {
+		if err := os.WriteFile(filepath.Join(bin, name), []byte("#!/bin/sh\n"+body), 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	put("docker", `case "$*" in
+ "info --format {{.MemTotal}}") echo 4294967296;;
+ "info --format {{.NCPU}}") echo 4;;
+ "info --format {{.ServerVersion}}") echo 29.0.0;;
+ "ps --format {{.Names}}") printf '%s' "$FAKE_PS";;
+ *) echo "docker $*" >> "$CALLS";;
+esac
+`)
+	put("kind", `echo "kind $*" >> "$CALLS"
+`)
+	put("make", `echo "make $* UNSUP=$JUNKLOUD_TEST_UNSUPPORTED_CAPABILITIES" >> "$CALLS"
+echo "    RESULT $FAKE_RESULT"
+`)
+	put("ckad", `echo "ckad $*" >> "$CALLS"
+case "$1" in
+ doctor) printf '전용 환경: stub123456ab\n'; printf '%s\n' "$FAKE_DOCTOR"; exit 0;;
+ bank) `+ckadBank+`;;
+esac
+`)
+	calls = filepath.Join(dir, "calls.log")
+	home := filepath.Join(dir, "home")
+	_ = os.MkdirAll(home, 0o755)
+	cmd := exec.Command("bash", append([]string{"runtime/acceptance.sh"}, args...)...)
+	cmd.Dir = root
+	cmd.Env = append(os.Environ(), "PATH="+bin+":"+os.Getenv("PATH"), "HOME="+home, "CALLS="+calls, "FAKE_PS="+dockerPS,
+		"CKAD_BANK_DIR="+root, "FAKE_RESULT=PARTIAL: mock-01 minus [networkpolicy-001] (stub)",
+		"FAKE_DOCTOR=dns: PASS\nservice: PASS\nnetwork-policy: FAIL\ningress: PASS\nstorage: PASS\nmetrics: PASS\nimage-build: PASS")
+	if doctor != "" {
+		cmd.Env = append(cmd.Env, "FAKE_DOCTOR="+doctor)
+	}
+	b, err := cmd.CombinedOutput()
+	exit = 0
+	if ee, ok := err.(*exec.ExitError); ok {
+		exit = ee.ExitCode()
+	} else if err != nil {
+		t.Fatal(err)
+	}
+	c, _ := os.ReadFile(calls)
+	return string(b), string(c), exit
+}
+
+// Another JunKloud environment (the user's own practice cluster) would be summed
+// into the lifecycle test's peak memory and would put two clusters into one
+// small VM, so the script refuses to start next to one.
+func TestAcceptanceScriptRefusesRunningJunkloudContainers(t *testing.T) {
+	got := runAcceptanceFunc(t, `docker() { printf 'junkloud-abc-control-plane\nredis\nkindccm-gw-1\njunkloud-cpk-abc\n'; }; running_junkloud_containers`)
+	if strings.Fields(got)[0] != "junkloud-abc-control-plane" || len(strings.Fields(got)) != 3 {
+		t.Errorf("running_junkloud_containers = %q", got)
+	}
+	// The compose containers of this very repository (project "junkloud") are
+	// named junkloud-dev-1 and junkloud-workspace-1; they are not another environment.
+	if got := runAcceptanceFunc(t, `docker() { printf 'junkloud-dev-1\njunkloud-workspace-1\njunkloud-sock-init-1\n'; }; running_junkloud_containers`); got != "" {
+		t.Errorf("compose service containers must not count as another environment: %q", got)
+	}
+	out, calls, exit := stubbedAcceptance(t, "junkloud-xyz-control-plane\n", "exit 0")
+	if exit == 0 || strings.Contains(calls, "ckad ") || strings.Contains(calls, "make ") {
+		t.Errorf("must refuse before running anything: exit %d calls %q\n%s", exit, calls, out)
+	}
+	if !strings.Contains(out, "junkloud-xyz-control-plane") {
+		t.Errorf("the refusal must name the container:\n%s", out)
+	}
+	// With nothing running it proceeds.
+	if _, calls, exit = stubbedAcceptance(t, "", "exit 0"); exit != 0 || !strings.Contains(calls, "make test-acceptance") {
+		t.Errorf("clean host must run: exit %d calls %q", exit, calls)
+	}
+}
+
+// An interrupt during validation must remove the throwaway cluster, not only
+// the work directory.
+func TestAcceptanceScriptInterruptReleasesTheThrowawayCluster(t *testing.T) {
+	_, calls, exit := stubbedAcceptance(t, "", `kill -INT $PPID; sleep 1; exit 0`)
+	if exit == 0 {
+		t.Errorf("an interrupted run must not exit 0")
+	}
+	if !strings.Contains(calls, "kind delete cluster --name junkloud-stub123456ab") {
+		t.Errorf("the throwaway cluster was not released after SIGINT; calls:\n%s", calls)
+	}
+	if strings.Contains(calls, "make ") {
+		t.Errorf("the acceptance phase must not run after an interrupt; calls:\n%s", calls)
+	}
+}
+
+// A non network-policy FAIL is unexpected: it must not look like a clean
+// PARTIAL run, and the run must not exit 0.
+func TestAcceptanceScriptFlagsUnexpectedCapabilityFailures(t *testing.T) {
+	out, calls, exit := stubbedAcceptanceDoctor(t, "dns: FAIL\nservice: PASS\nnetwork-policy: PASS\ningress: PASS\nstorage: PASS\nmetrics: PASS\nimage-build: PASS")
+	if exit == 0 {
+		t.Errorf("an unexpected capability FAIL must give a non-zero exit\n%s", out)
+	}
+	if !strings.Contains(out, "UNEXPECTED") || !strings.Contains(out, "dns") {
+		t.Errorf("summary must flag the unexpected FAIL:\n%s", out)
+	}
+	if strings.Contains(calls, "UNSUP=dns") {
+		t.Errorf("dns must never be passed as an unsupported capability:\n%s", calls)
 	}
 }
