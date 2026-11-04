@@ -185,6 +185,16 @@ func (s *Service) resumeReset(ctx context.Context, rec model.SessionRecord, op m
 				return err
 			}
 		}
+		// The abandoned session's interrupted preparation is over with it.
+		prep, err := s.cfg.Store.GetOperation(ctx, OperationID(rec.ID))
+		if err == nil && prep.Phase != PhaseDone && prep.Phase != PhaseFailed {
+			prep.Phase = PhaseFailed
+			if err := s.cfg.Store.PutOperation(ctx, prep); err != nil {
+				return err
+			}
+		} else if err != nil && !errors.Is(err, store.ErrNotFound) {
+			return err
+		}
 		return advance(PhaseDone)
 	}
 	if len(selected) != 1 {
