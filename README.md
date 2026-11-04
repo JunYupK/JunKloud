@@ -167,7 +167,7 @@ docker compose exec workspace bash
    docker compose exec workspace bash
    ```
 3. 컨테이너 안에서 `ckad status`로 세션을 확인합니다.
-4. 클러스터가 이상하면 `ckad doctor`로 점검하고, 그래도 안 되면 `ckad reset --cluster`를 씁니다([8장](#8-자주-겪는-문제와-해결)). 재시작 뒤 클러스터가 자동으로 살아나는지는 Docker 설정에 따라 달라서 이 문서는 보장하지 않습니다.
+4. 클러스터 노드 컨테이너가 멈춰 있을 수 있습니다(재시작 뒤 자동으로 살아나는지는 Docker 설정에 따라 달라서 이 문서는 보장하지 않습니다). `docker ps -a --filter name=junkloud-`로 `junkloud-<환경 ID>-…` 노드 컨테이너가 `Exited`이면 `docker start <이름>`으로 시작하거나 Docker Desktop을 다시 시작한 뒤 `ckad doctor`로 확인하세요. `ckad reset --cluster`는 **노드가 실행 중이고 API가 응답하는** 전용 클러스터를 다시 만드는 명령이라, 노드가 멈췄거나 클러스터가 지워졌으면 거부합니다(종료 코드 3). 자세한 내용은 [8장](#8-자주-겪는-문제와-해결)을 보세요.
 
 ### 2.6 컨테이너 멈추기와 완전히 지우기
 
@@ -189,7 +189,9 @@ docker compose exec workspace bash
   docker ps -a --filter label=junkloud.io/environment-id=<ID>   # 남은 JunKloud 보조 컨테이너 확인
   ```
 
-  이렇게 클러스터만 지우고 학습 기록(볼륨)을 남겨 두면 `ckad`가 기록된 환경이 사라졌다고 안내할 수 있습니다. 그때는 `ckad reset --cluster`로 복구합니다. 기록까지 모두 지우는 `down -v`와 함께 쓰는 것을 전제로 한 절차입니다.
+  **클러스터만 지우고 학습 기록(볼륨)을 남기지 마세요.** 기록된 환경이 사라지면 `ckad doctor`·`ckad list`·`ckad start`·`ckad reset --cluster`가 모두 거부하고, 사라진 클러스터를 제품이 자동으로 다시 만들지도 않습니다(설계 문서 §11). 이 절차는 바로 이어서 `docker compose down -v`로 기록까지 모두 지우는 **전체 초기화**에만 쓰세요. 순서: ① 컨테이너 안에서 `ckad reset` → ② 위의 클러스터 삭제 → ③ 컨테이너를 나와 호스트에서 `docker compose down -v`.
+- 클러스터를 지워도 클러스터 보조 컨테이너(`junkloud-cpk-<ID>`, `kindccm-gw-…`)가 남을 수 있습니다. 위의 `docker ps -a --filter label=junkloud.io/environment-id=<ID>`와 `docker ps -a --filter label=io.x-k8s.cloud-provider-kind.cluster=junkloud-<ID>`로 확인하고 해당 ID의 컨테이너만 `docker rm -f` 하세요.
+- Docker 이미지(내려받은 고정 이미지, 직접 만든 `junkloud.local/...` 이미지)는 지워지지 않고 남습니다. 필요하면 `docker image ls`로 확인해 직접 지우세요. 전역 `docker system prune`은 쓰지 마세요.
 - Docker 소켓 공유는 보안 격리 경계가 **아닙니다.** 작업 컨테이너는 호스트의 Docker 엔진에 접근하므로, 컨테이너 안에서 직접 입력한 Docker 명령은 호스트의 다른 Docker 리소스에도 영향을 줄 수 있습니다. JunKloud 자체는 자신이 만들고 소유를 기록한 리소스만 정리하고 전역 `prune`은 쓰지 않습니다.
 
 ---
@@ -227,7 +229,7 @@ image-build: PASS
 
 | 기능 | 확인하는 것 | FAIL이면 |
 | --- | --- | --- |
-| `dns` | 클러스터 DNS | 어떤 문제도 이 기능을 출제 조건으로 선언하지는 않지만, FAIL이면 클러스터 기본 기능에 문제가 있다는 신호입니다. `ckad reset --cluster`를 고려하세요. |
+| `dns` | 클러스터 DNS | 어떤 문제도 이 기능을 출제 조건으로 선언하지는 않지만, FAIL이면 클러스터 기본 기능에 문제가 있다는 신호입니다. `ckad doctor`가 FAIL이어도 클러스터에 접근할 수 있으면 `ckad reset --cluster`를 고려하세요. |
 | `service` | Service 라우팅 | 위와 같음 |
 | `network-policy` | NetworkPolicy가 실제로 차단하는지(ingress 차단만 확인) | `networkpolicy-001` 출제 불가 → **모의시험 전체가 거부됨** |
 | `ingress` | Ingress 라우팅 | `ingress-001` 출제 불가 → 모의시험 거부 |
@@ -267,6 +269,8 @@ done
 검증 완료: <문제 ID> | <N>개 seed | hash <문제 해시>
 ```
 
+통과하지 못하면 `문제 검증을 통과하지 못했습니다. 작성용 검증 자료를 확인하세요.`(종료 코드 3)가 나옵니다. 세부 단계별 결과는 화면에 나오지 않으니, 실패한 문제는 환경 상태(`ckad doctor`)와 필요한 기능을 먼저 확인하세요.
+
 - **시간:** 문제마다 다르고 오래 걸릴 수 있습니다(예: `probes-001`은 긴 안정성 관찰이 있습니다). 문제별 소요 시간은 아직 기기에서 측정하지 않았으니 시간을 넉넉히 잡고, 터미널을 닫지 마세요.
 - **반복문은 첫 실패에서 멈춥니다.** `networkpolicy-001`을 마지막에 둔 이유입니다. NetworkPolicy를 차단하지 않는 호스트에서는 이 문제만 실패하고 나머지 19개는 통과합니다. 그 경우 반복문에서 `networkpolicy-001`을 빼고 쓰면 됩니다.
 - **검증 기록이 무효가 되는 경우:** 기록은 문제 내용 해시, **채점기 버전**(현재 `grader-9`), 환경 버전에 묶입니다. 셋 중 하나라도 바뀌면 다시 검증해야 합니다. 저장소를 업데이트한 뒤 채점기 버전이 바뀌었다면 이전 검증은 무효입니다.
@@ -296,7 +300,7 @@ ckad start --mode practice --count 5
 
 - 문제 수는 **5~20개**입니다. 검증된 문제 중에서 고릅니다.
 - 선택 필터: `--domain`(`design-build`, `deployment`, `observability`, `environment-security`, `networking`), `--difficulty`, `--tag`. 같은 선택을 다시 재현하려면 `--seed`.
-- 한 영역만 고르면 5문제가 안 될 수 있습니다(예: `observability`는 3문제). 이때는 이유와 가능한 수를 보여 주고 시작하지 않습니다. 부족분을 몰래 채우지 않습니다.
+- 한 영역만 고르면 5문제가 안 될 수 있습니다(예: `observability`는 3문제). 이때는 `출제 가능한 문제가 요청한 수보다 적습니다. ckad list로 검증 상태와 필터를 확인하세요.`(종료 코드 2)만 나오고 시작하지 않습니다(남은 문제 수는 알려 주지 않으니 `ckad list`로 세세요). 부족분을 중복으로 몰래 채우지 않습니다. 검증이나 기능 문제로 빠진 문제가 있으면 준비 중에 `제외: <문제 ID> — 검증 또는 환경 capability를 확인하세요.` 줄이 먼저 출력됩니다.
 
 환경과 문제를 준비한 뒤 확인을 묻습니다. 이 단계에서는 문제 본문을 보여 주지 않습니다.
 
@@ -331,7 +335,7 @@ Q2 ...
 ckad show Q1
 ```
 
-`show`는 문제 ID와 제목, `Context:`, `Namespace:`, 영어 문제 본문, 그리고 있으면 `Provided file:` 줄(제공 파일 이름과 위치)을 출력합니다. 영어로 쓰인 요구사항을 꼼꼼히 읽으세요. **채점 항목은 모두 문제 문장에 적혀 있습니다**(숨은 조건 없음).
+`show`는 문제 ID와 제목, `Context:`, `Namespace:`, 영어 문제 본문, 그리고 제공 파일이 있으면 `Provided file: <이름>` 줄과 그 파일의 내용을 출력합니다(파일 자체는 풀이 폴더에 있습니다). 영어로 쓰인 요구사항을 꼼꼼히 읽으세요. **채점 항목은 모두 문제 문장에 적혀 있습니다**(숨은 조건 없음).
 
 ### 5.4 풀이 위치와 `kubectl` 사용
 
@@ -386,7 +390,7 @@ ckad grade                   # 세션 전체를 제출
 | ERROR | 클러스터 API 불통 등으로 **판정할 수 없음.** 점수가 아니라 "미확정"입니다. |
 
 - ERROR가 하나라도 있으면 `점수:` 줄 대신 `채점 미완료: 확정 총점 없음 (ERROR 또는 진행 중)`이 나옵니다.
-- **종료 코드:** 0 = 만점, 1 = 정상 채점이지만 일부 미충족, 3 = 채점을 확정할 수 없음(ERROR 등), 2 = 사용법·모드 오류. 스크립트에서 쓸 때 참고하세요([10장](#10-채점-규칙과-종료-코드)).
+- **종료 코드:** 0 = 만점(또는 이미 제출한 결과를 다시 보여 준 경우 — 이때는 만점이 아니어도 0), 1 = 정상 채점이지만 일부 미충족, 3 = 채점을 확정할 수 없음(ERROR 등), 2 = 사용법·모드 오류. 스크립트에서 쓸 때 참고하세요([10장](#10-채점-규칙과-종료-코드)).
 
 ### 5.6 복습
 
@@ -401,12 +405,23 @@ ckad review --problem Q1 --solution     # 해설·모범 풀이 (열람 기록�
 
 ### 5.7 다시 채점: `--retry`와 `--resubmit`
 
+**훈련 중 문제 하나를 채점한 경우** (세션이 아직 진행 중):
+
 | 상황 | 명령 | 의미 |
 | --- | --- | --- |
-| ERROR가 났지만 답안은 안 고쳤다 | `ckad grade --retry` | 같은 제출을 **다시 관찰**합니다(기술적 재시도). |
-| 답안을 고쳤다 | `ckad grade --resubmit` | **새 제출**로 기록합니다. 이전 제출·결과는 덮어쓰지 않습니다. |
+| 그 문제가 ERROR이고 답안은 안 고쳤다 | `ckad grade --problem Q1 --retry` | 같은 제출을 **다시 관찰**합니다(기술적 재시도). |
+| 답안을 고쳤다 (결과가 FAIL이든 ERROR이든) | `ckad grade --problem Q1` | 답안이 바뀐 것을 확인하면 **새 제출**로 기록합니다. 이전 제출·결과는 덮어쓰지 않습니다. |
 
-답안이 바뀐 것이 확인되면 `--retry`는 거부되고 `--resubmit`을 안내합니다. 이미 제출한 세션에서 그냥 `ckad grade`를 다시 하면 "이미 제출했습니다. 기존 결과입니다..." 안내와 함께 기존 결과가 나옵니다.
+진행 중인 훈련에서 `--problem` 없이 `ckad grade --retry` 또는 `--resubmit`을 하면 "제출한 것이 없다"는 뜻으로 거부됩니다(종료 코드 2). 또 답안을 고치지 않고 ERROR 난 문제를 `ckad grade --problem Q1`만 다시 실행하면 새로 채점하지 않고 기존 결과를 보여 줍니다(종료 코드 0).
+
+**세션 전체를 `ckad grade`로 제출한 뒤** (모의시험 포함):
+
+| 상황 | 명령 | 의미 |
+| --- | --- | --- |
+| ERROR가 났지만 답안은 안 고쳤다 | `ckad grade --retry` | 같은 제출을 **다시 관찰**합니다. |
+| 답안을 고쳤다 | `ckad grade --resubmit` | **새 제출**로 기록합니다(모의시험이면 복습 제출). |
+
+답안이 바뀐 것이 확인되면 `--retry`는 거부되고 `--resubmit`을 안내합니다. 이미 제출한 세션에서 그냥 `ckad grade`를 다시 하면 "이미 제출했습니다. 기존 결과입니다..." 안내와 함께 기존 결과가 나옵니다. 지금 쓸 수 있는 복구 명령은 `ckad status`의 `허용되는 복구 명령:` 줄이 알려 줍니다.
 
 ### 5.8 문제 하나 초기화
 
@@ -489,18 +504,21 @@ ckad reset                        # 환경 ID를 입력해 정리
 
 ## 7. 이미지 빌드 문제
 
-`image-001`처럼 이미지를 만드는 문제는 관리 빌드 명령을 쓰면 reset 때 자동으로 정리됩니다.
+`image-001`처럼 이미지를 만드는 문제는 관리 빌드 명령을 쓰면 reset 때 자동으로 정리됩니다. **태그와 아카이브 파일 이름은 문제 문장이 요구하는 그대로** 써야 채점됩니다. `image-001`은 `junkloud.local/image-001:<namespace>`(`<namespace>`는 `ckad show`에 나온 값)로 빌드하고 같은 태그를 `image.tar`에 저장하라고 합니다.
 
 ```sh
-ckad image build --problem Q1 --context . --tag junkloud.local/app:practice
-docker save --output image.tar junkloud.local/app:practice   # 아카이브가 필요할 때
+ckad show Q1                      # 문제가 요구하는 태그와 파일 이름을 읽습니다
+ckad image build --problem Q1 --context . --tag junkloud.local/image-001:<namespace>
+docker save --output image.tar junkloud.local/image-001:<namespace>   # 아카이브가 필요할 때 (attempt 폴더에서)
 ```
+
+다른 문제에서 이미지가 필요하면 그 문제가 말하는 태그를 쓰세요. `junkloud.local/app:practice` 같은 임의 이름은 형식 예시일 뿐 채점되지 않습니다.
 
 `--problem`은 Q 번호나 문제 ID(필수), `--tag`는 이미지 이름(필수), `--context`는 빌드 폴더(기본 `.`, 현재 attempt 폴더 기준)입니다. 성공하면 `이미지 빌드 완료: <이미지> (<ID>)`가 나옵니다.
 
 - **빌드 조건:** 제한 시간 5분, 빌드 중 네트워크 없음. 베이스 이미지는 제공된 고정 이미지(또는 `scratch`)만 쓸 수 있습니다. Dockerfile은 `FROM` 한 단계와 로컬 `COPY`만 지원합니다.
 - **일반 `docker build`도 채점됩니다.** 다만 소유가 기록되지 않아 reset이 자동으로 지우지 않고 소유권 오류로 알려 줍니다. 이 경우 **이미지를 직접 확인하고 삭제**해야 합니다. reset 전에 미리 지워 두어도 되고, reset이 소유권 오류로 멈췄다면 지운 뒤 `ckad reset --recover`를 실행합니다(`docker image rm <이미지>`).
-- **모의시험을 채점한 뒤에는 `ckad image build`가 거부됩니다.** 현재 동작은 "세션이 진행 중(RUNNING)일 때만 관리 빌드 가능"입니다. 모의시험은 첫 `ckad grade`로 끝나므로, 채점한 뒤 복습하며 이미지를 다시 만들 때는 일반 `docker build`를 써야 하고(`image-001` 문제 문장도 이를 허용합니다) 그 이미지는 reset 전에 직접 지워야 합니다. 거부되면 종료 코드 2와 `현재 모드·상태에서 사용할 수 없는 요청입니다...`가 나옵니다.
+- **세션 전체를 채점한 뒤에는 `ckad image build`가 거부됩니다(모의시험과 훈련 모두).** 현재 동작은 "세션이 진행 중(RUNNING)일 때만 관리 빌드 가능"입니다. 전체 제출(`ckad grade`)로 세션이 끝나므로, 채점한 뒤 복습하며 이미지를 다시 만들 때는 일반 `docker build`를 써야 하고(`image-001` 문제 문장도 이를 허용합니다) 그 이미지는 reset 전에 직접 지워야 합니다. 거부되면 종료 코드 2와 `현재 모드·상태에서 사용할 수 없는 요청입니다...`가 나옵니다.
 
 자세한 규칙은 [`runtime/README.md`의 Image practice ownership](runtime/README.md#image-practice-ownership)을 참고하세요.
 
@@ -517,14 +535,14 @@ docker save --output image.tar junkloud.local/app:practice   # 아카이브가 �
 | `출제 가능한 문제가 요청한 수보다 적습니다...`(종료 코드 2) | 훈련은 최소 5문제입니다. `--domain` 같은 필터를 줄이거나 검증된 문제를 늘리세요(`ckad list`로 확인). |
 | `초기화가 중단되었습니다. 기존 풀이와 정리 기록을 보존했습니다. ckad status 확인 후 ckad reset --recover로 재개하세요.` | `reset`이나 이미지 빌드 중 끊겼습니다. `ckad status`가 미완료 작업을 보여 주면 `ckad reset --recover`로 이어서 정리합니다. 이 상태에서는 새 학습을 시작할 수 없습니다. |
 | `초기화를 완료하지 못했습니다: ...` | 정리를 확인할 수 없는 PVC/PV, finalizer, 소유를 증명할 수 없는 이미지 등이 남았습니다. 메시지에 나온 대상을 확인(이미지면 직접 삭제)한 뒤 `ckad reset --recover`. finalizer를 무조건 제거하지는 않습니다. |
-| 클러스터가 이상함(`kubectl`이 응답하지 않음, 객체가 사라짐 등) | 먼저 `ckad doctor`. 그래도 안 되면 `ckad reset --cluster`로 **전용 클러스터만** 다시 만듭니다(환경 ID 입력 확인). 풀이와 기록은 보존됩니다. 클러스터를 다시 만들기 때문에 진행 중이던 문제의 클러스터 리소스는 사라집니다. |
-| 채점 결과가 **ERROR** | 판정할 수 없는 항목입니다(점수가 아님). `ckad doctor`로 클러스터와 기능 상태를 확인한 뒤, 답안을 고치지 않았다면 `ckad grade --retry`. 고쳤다면 `ckad grade --resubmit`. |
-| 요구사항 이름이 `!inputs-changed`인 ERROR | 채점하는 동안 답안 대상이 바뀐 것으로 감지됐습니다. **채점 중에는 답안을 수정하지 마세요.** 건드리지 않았는데도 드물게 나타날 수 있습니다. HPA(자동 확장)가 있는 문제(`api-migration-001`)에서 채점 중 replicas가 바뀌면 그럴 수 있다고 의심하고 있으나 원인은 확정되지 않았습니다. `ckad grade --retry`가 거부되면(`답안이 바뀌었거나 동일함을 확인할 수 없습니다`) `ckad grade --resubmit`을 쓰세요. |
-| `이미 제출했습니다. 기존 결과입니다...` | 이미 제출한 세션에서 `ckad grade`를 다시 실행했습니다. 기술적 오류는 `--retry`, 답안을 고친 뒤에는 `--resubmit`, 결과는 `ckad review`. |
+| 클러스터가 이상함(`kubectl`이 응답하지 않음 등) | 먼저 `ckad doctor`. ① 노드 컨테이너가 멈췄으면(`docker ps -a --filter name=junkloud-`에서 `Exited`) `docker start <이름>`이나 Docker Desktop 재시작으로 먼저 살리세요. ② 노드가 실행 중이고 API가 응답하는데 환경이 꼬였다면 `ckad reset --cluster`로 **전용 클러스터만** 다시 만듭니다(환경 ID 입력 확인). **현재 세션은 포기(ABANDONED) 처리**되고 진행 중이던 문제의 클러스터 리소스는 사라지며, 풀이 폴더와 기록은 보존됩니다. ③ 노드 컨테이너가 사라졌거나(클러스터가 삭제됨) 정체성이 맞지 않으면 `ckad doctor`·`list`·`start`·`reset --cluster`가 모두 거부하고(종료 코드 3), 사라진 클러스터를 제품이 자동으로 다시 만들지 않습니다. 이 경우 제품 안에서의 복구 방법은 없으며, 학습 기록을 포기하고 [2.6](#26-컨테이너-멈추기와-완전히-지우기)의 전체 초기화(`docker compose down -v` 후 `bash runtime/up.sh`)로 처음부터 다시 시작해야 합니다. |
+| 채점 결과가 **ERROR** | 판정할 수 없는 항목입니다(점수가 아님). `ckad doctor`로 클러스터와 기능 상태를 확인한 뒤, 답안을 고치지 않았다면 훈련 문제 하나는 `ckad grade --problem Q1 --retry`, 세션 전체 제출은 `ckad grade --retry`. 고쳤다면 훈련 문제는 `ckad grade --problem Q1`을 다시, 전체 제출은 `ckad grade --resubmit`. `ckad status`의 `허용되는 복구 명령:` 줄을 따르는 것이 가장 안전합니다. |
+| 요구사항 이름이 `!inputs-changed`인 ERROR | 채점하는 동안 답안 대상이 바뀐 것으로 감지됐습니다. **채점 중에는 답안을 수정하지 마세요.** 건드리지 않았는데 나타난 경우가 한 번 관찰됐고, 그 원인은 `batch-001`의 Job이 채점 중에 TTL로 지워진 것으로 추적되어 해당 TTL을 제거했습니다. 다만 HPA(자동 확장)가 있는 문제(`api-migration-001`)에서 채점 중 replicas가 바뀌면 같은 ERROR가 날 수 있다는 위험은 확인되지 않은 채 기록되어 있습니다. `--retry`가 거부되면(`답안이 바뀌었거나 동일함을 확인할 수 없습니다`) 위 표처럼 새 제출(`ckad grade --problem Q1` 또는 `ckad grade --resubmit`)을 하세요. |
+| `이미 제출했습니다. 기존 결과입니다...` | 이미 제출한(또는 ERROR가 난) 결과가 있어 새로 채점하지 않고 기존 결과를 보여 줬습니다(종료 코드 0, 만점이 아니어도 0). 기술적 오류는 `--retry`(훈련 문제는 `--problem Q1 --retry`), 답안을 고친 뒤에는 새 제출, 결과는 `ckad review`. |
 | `모의시험은 문제별 채점을 지원하지 않습니다...`(종료 코드 2) | 모의시험은 `ckad grade`로 전체 제출만 가능합니다. |
 | `모의시험의 해설은 전체 제출을 오류 없이 채점한 후 열 수 있습니다...` | 먼저 `ckad grade`. ERROR가 남아 있으면 `--retry`/`--resubmit`으로 해결해야 열립니다. |
 | `현재 모드·상태에서 사용할 수 없는 요청입니다...`(종료 코드 2) | 명령이 지금의 모드·상태에 맞지 않습니다(예: 채점한 모의시험의 `ckad image build`, 진행 중 모의시험의 `reset --problem`). `ckad status`와 `--help`를 확인하세요. |
-| Pod가 `OOMKilled`이거나 `Pending`(스케줄 실패), 클러스터 응답이 느려지거나 ERROR가 늘어남 | Docker VM 메모리가 부족할 수 있는 증상입니다. `docker info --format '{{.MemTotal}}'`로 VM 메모리를 확인하고, `kubectl get pods -A`, `kubectl describe pod <이름>`으로 원인을 봅니다. Docker Desktop의 메모리를 늘리거나 다른 컨테이너를 멈춘 뒤 `ckad reset --cluster`를 고려하세요. 메모리가 부족해도 JunKloud는 문제를 몰래 빼거나 점수를 재분배하지 않습니다. 4GiB에서의 동작은 아직 실기기에서 확인하지 않았습니다. |
+| Pod가 `OOMKilled`이거나 `Pending`(스케줄 실패), 클러스터 응답이 느려지거나 ERROR가 늘어남 | Docker VM 메모리가 부족할 수 있는 증상입니다. `docker info --format '{{.MemTotal}}'`로 VM 메모리를 확인하고, `kubectl get pods -A`, `kubectl describe pod <이름>`으로 원인을 봅니다. Docker Desktop의 메모리를 늘리거나 다른 컨테이너를 멈추세요. 클러스터가 응답하는데 환경이 꼬였다면 `ckad reset --cluster`를 고려하세요. 메모리가 부족해도 JunKloud는 문제를 몰래 빼거나 점수를 재분배하지 않습니다. 4GiB에서의 동작은 아직 실기기에서 확인하지 않았습니다. |
 | `kubectl`이 엉뚱한 클러스터에 접속 | 호스트 터미널이 아니라 **작업 컨테이너 안**에서 실행하는지 확인하세요. 컨테이너 안에서는 `KUBECONFIG`가 전용 파일(`$CKAD_STATE_DIR/environment/kubeconfig`)로 설정됩니다. 상태 경로를 바꿨다면 `export KUBECONFIG="$CKAD_STATE_DIR/environment/kubeconfig"`도 적용하세요. JunKloud는 호스트의 kubeconfig나 current-context를 바꾸지 않습니다. |
 | `기록된 전용 환경 ID가 없습니다...` | 최초 환경 생성이 중단됐습니다. `ckad doctor`를 다시 실행하면 기록된 생성 작업을 재개합니다. |
 | 시작 스크립트가 `kind` 네트워크 오류로 중단 | 기존 `kind` Docker 네트워크가 bridge가 아니면 안전을 위해 중단합니다. `docker network inspect kind`로 확인하세요. |
@@ -692,13 +710,79 @@ go test -tags=integration ./tests/integration -run '^TestObservabilityBank$' -co
 
 Mac/Windows 실기기에서 수용 시험을 돌리는 절차입니다. **이 시험은 아직 실기기에서 실행하지 않았습니다.**
 
+**0. 먼저 내 JunKloud 클러스터를 멈추세요.** 수용 시험의 메모리 측정은 `junkloud-*`, `kindccm-*`, `envoy` 컨테이너의 사용량을 모두 더합니다. 3장을 따라 만든 내 전용 클러스터가 켜져 있으면 측정이 오염되고, 작은 Docker VM(4GiB) 안에 클러스터가 두 개 올라갑니다. 그래서 스크립트는 그런 컨테이너가 실행 중이면 **시작을 거부**합니다(작업 컨테이너 `junkloud-dev-1`, `junkloud-workspace-1`은 제외). 컨테이너 안에서:
+
+```sh
+docker ps --format '{{.Names}}'     # 실행 중인 컨테이너 확인: junkloud-<환경 ID>-control-plane, junkloud-cpk-<환경 ID>, kindccm-gw-… 가 클러스터입니다
+docker stop $(docker ps -q --filter "name=^junkloud-[0-9a-f]{12}-" --filter "name=^junkloud-cpk-" --filter "name=^kindccm-")
+```
+
+`docker stop`은 컨테이너를 **지우지 않으므로** 내 학습 기록, 풀이 폴더, 클러스터 데이터는 그대로입니다(작업 컨테이너 `junkloud-dev-1`, `junkloud-workspace-1`은 위 이름 패턴에 해당하지 않아 멈추지 않습니다). 시험이 끝난 뒤 같은 컨테이너를 `docker start`하고 `ckad doctor`로 확인하면 됩니다. 멈춘 노드가 되살아나는지는 Docker 설정에 따라 달라 보장하지 않으며, 안 되면 [8장](#8-자주-겪는-문제와-해결)을 보세요.
+
+```sh
+bash runtime/up.sh dev                       # Windows: runtime/up.ps1 -Service dev
+docker compose exec dev bash
+```
+
+컨테이너 안에서:
+
+| 명령 | 하는 일 |
+| --- | --- |
+| `make test` | `go test ./...` 단위 테스트 |
+| `make test-race` | `go test -race ./...` |
+| `make lint` | 모든 빌드 태그(`integration`, `e2e`, `acceptance`)의 `go vet`과 `gofmt` 검사 |
+| `make test-runtime` | 작업 환경 자체 검증(Linux, 볼륨, 고정 도구 버전) |
+| `make test-integration` | 실제 kind 클러스터를 만들고 지우는 통합 테스트 (매우 오래 걸림) |
+| `make test-e2e` | `ckad` CLI E2E(`TestCLIFlow` 등). 시간 상한은 Makefile 참고 |
+| `make test-acceptance` | 릴리스 수용 시험: 준비 → 모범 풀이 → 채점 → reset을 3회 연속 수행(수 시간) |
+
+문제은행 통합 테스트(실제 클러스터 검증) 예:
+
+```sh
+go test -tags=integration ./tests/integration -run '^TestObservabilityBankSmoke$' -count=1 -timeout=30m -v
+go test -tags=integration ./tests/integration -run '^TestObservabilityBank$' -count=1 -timeout=150m -v
+# 한 문제만: -run '^TestObservabilityBank$/^probes-001$'
+```
+
+다른 문제은행 테스트(`TestBuildBank`, `TestDeploymentBank`, `TestSecurityBank`, `TestNetworkBank` 등)도 같은 방식으로 실행합니다.
+
+호스트가 표준과 다를 때 쓰는 테스트 전용 환경 변수입니다. 제품 기본값을 바꾸지 않습니다. 실제 기기(Mac/Windows Docker Desktop)에서는 보통 설정하지 않습니다.
+
+| 변수 | 쓰는 경우 |
+| --- | --- |
+| `JUNKLOUD_TEST_HOST_COMPAT=cgroupv1` | cgroup v1 호스트, `oom_score_adj` 조정이 막힌 VM |
+| `JUNKLOUD_TEST_HOST_COMPAT=cgroupv1,no-ipv6` | 위 조건에 더해 엔진 커널의 IPv6가 꺼져 있을 때 |
+| `JUNKLOUD_TEST_UNSUPPORTED_CAPABILITIES=network-policy` | 커널이 NetworkPolicy 차단을 지원하지 않음을 미리 알 때. doctor가 FAIL로 보고하는지 확인하고, 해당 시험은 `PARTIAL: mock-01 minus [...]`로 표시되며 mock-01로 보고하지 않습니다. |
+| `JUNKLOUD_ACCEPTANCE_EVIDENCE=<폴더>` | `make test-acceptance`의 사이클별 JSON 증거를 보관 |
+| `JUNKLOUD_ACCEPTANCE_COLD=1` | 첫 시작을 cold start로 표시하도록 요청(이미지가 이미 있으면 "cold (unverified)"로 기록) |
+
+- E2E와 통합 테스트는 실제 Docker, kind, kubectl과 클러스터 자원이 필요합니다. 사용할 수 없으면 실패를 반환합니다. 건너뛴 검증을 통과로 표시하지 않습니다.
+
+### 실기기 검증 절차 (`runtime/acceptance.sh`)
+
+Mac/Windows 실기기에서 수용 시험을 돌리는 절차입니다. **이 시험은 아직 실기기에서 실행하지 않았습니다.**
+
+**0. 먼저 내 JunKloud 클러스터를 멈추세요.** 수용 시험의 메모리 측정은 `junkloud-*`, `kindccm-*`, `envoy` 컨테이너의 사용량을 모두 더합니다. 3장을 따라 만든 내 전용 클러스터가 켜져 있으면 측정이 오염되고, 작은 Docker VM(4GiB) 안에 클러스터가 두 개 올라갑니다. 그래서 스크립트는 그런 컨테이너가 실행 중이면 **시작을 거부**합니다(작업 컨테이너 `junkloud-dev-1`, `junkloud-workspace-1`은 제외). 컨테이너 안에서:
+
+```sh
+docker ps --format '{{.Names}}'                                        # 실행 중인 junkloud-*/kindccm-* 확인
+docker stop $(docker ps -q --filter name=junkloud- --filter name=kindccm- \
+              | grep -v -e "$(hostname)")                              # 클러스터 컨테이너만 멈춤 (작업 컨테이너 제외)
+```
+
+`docker stop`은 컨테이너를 **지우지 않으므로** 내 학습 기록, 풀이 폴더, 클러스터 데이터는 그대로입니다. 위 명령이 작업 컨테이너까지 멈추려 하면 멈추지 말고 `docker ps`로 이름을 보고 `junkloud-<환경 ID>-control-plane`, `junkloud-cpk-<환경 ID>`, `kindccm-gw-…`만 이름으로 지정해 멈추세요. 시험이 끝난 뒤 같은 이름으로 `docker start`하고 `ckad doctor`로 확인하면 됩니다(멈춘 노드가 되살아나는지는 Docker 설정에 따라 달라 보장하지 않습니다. 안 되면 [8장](#8-자주-겪는-문제와-해결)).
+
 ```sh
 bash runtime/up.sh dev                  # Windows: runtime/up.ps1 -Service dev
 docker compose exec dev bash
 bash runtime/acceptance.sh              # 수 시간. 끝나면 요약표가 출력됩니다
 ```
 
-스크립트는 호스트 정보(`uname -m`, Docker 메모리·CPU·버전)를 출력하고, 임시 상태 폴더에서 `ckad doctor`와 문제 20개의 `ckad bank validate`를 시간과 함께 실행한 뒤(내 학습 상태는 건드리지 않음) `make test-acceptance`를 돌립니다. `ckad doctor`에서 FAIL인 기능은 자동으로 `JUNKLOUD_TEST_UNSUPPORTED_CAPABILITIES`에 전달되어 **PARTIAL** 시험으로 실행되고 요약에 그렇게 표시됩니다. 요약표와 `$HOME/junkloud-acceptance` 안의 `acceptance.log`, `cycle-*.json`을 보내 주세요. 자세한 내용과 결과 칸은 [수용 시험 매트릭스](docs/validation/acceptance-matrix.md)에 있습니다.
+스크립트는 호스트 정보(`uname -m`, Docker 메모리·CPU·버전)를 출력하고, 위 사전 점검 뒤 **임시 상태 폴더**에서 `ckad doctor`와 문제 20개의 `ckad bank validate`를 시간과 함께 실행한 뒤 `make test-acceptance`를 돌립니다. 임시 환경은 끝나면 (Ctrl+C로 중단해도) 정확한 환경 ID로 지웁니다.
+
+- **내 학습 상태는 건드리지 않습니다.** 반대로 이 검증 기록은 임시 상태에 저장되므로 **내 상태에는 남지 않습니다.** 연습·모의시험 전에는 [4장](#4-문제-검증-ckad-bank-validate)의 `ckad bank validate` 반복문을 내 상태에서 따로 실행해야 합니다.
+- `ckad doctor`에서 `network-policy`만 FAIL이면 `JUNKLOUD_TEST_UNSUPPORTED_CAPABILITIES=network-policy`가 전달되어 **PARTIAL**(19문제) 시험으로 실행됩니다. 요약에는 테스트 자신의 `RESULT` 줄이 그대로 나옵니다. 다른 기능이 FAIL이면 **예상 밖(UNEXPECTED)** 으로 표시하고 거기서 멈춥니다(제품이 그 기능들을 필요로 하기 때문).
+- 보내 줄 것: 요약표, `$HOME/junkloud-acceptance` 안의 `acceptance.log`, `cycle-*.json`, `validate-*.log`. 자세한 내용과 결과 칸은 [수용 시험 매트릭스](docs/validation/acceptance-matrix.md)에 있습니다.
 
 ### CI
 
@@ -715,7 +799,7 @@ bash runtime/acceptance.sh              # 수 시간. 끝나면 요약표가 출
 - **`networkpolicy-001`은 NOT CERTIFIED입니다.** 정답·대표 오답 점수는 설계값이며, 차단하는 호스트에서 `ckad bank validate`로 확인한 기록이 아직 없습니다. 그래서 **mock-01을 실제로 끝까지 시작·채점한 실행도 NOT RUN**입니다(샌드박스에서는 모의시험이 거부되는 것까지만 확인했습니다).
 - **실기기 검증은 미완료입니다.** Apple M2(ARM64) 8GB에 4GiB Docker VM, Windows 16GB에서의 실행, cold/warm 시작·reset·채점 시간, 4GiB 적합 여부는 아직 측정하지 않았습니다. 4GiB는 목표 예산이며 실행 보장이 아닙니다. "출시 준비 완료"는 실기기 검증이 끝난 뒤에만 선언합니다.
 - **알려진 동작과 제한:**
-  - 모의시험을 채점한 뒤에는 `ckad image build`가 거부됩니다([7장](#7-이미지-빌드-문제)).
+  - 세션 전체를 채점한 뒤에는(모의시험·훈련 모두) `ckad image build`가 거부됩니다([7장](#7-이미지-빌드-문제)).
   - 이미 존재하지만 느슨해진 ResourceQuota 등, 오래된 실패 조건이 아직 있는 경우는 감지하지 못합니다.
   - 채점 중 답안 대상이 바뀐 것으로 감지되는 드문 ERROR(`!inputs-changed`)의 원인이 확정되지 않았습니다([8장](#8-자주-겪는-문제와-해결)).
   - 문제별·전체 reset과 전체 채점의 소요 시간은 샌드박스 측정만 있고 실기기 시간은 없습니다. 특정 초 단위 속도는 보장하지 않습니다([수용 시험 매트릭스](docs/validation/acceptance-matrix.md)).

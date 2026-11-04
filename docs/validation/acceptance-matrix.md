@@ -41,6 +41,8 @@ Sandbox = Linux amd64, cgroup v1, IPv6 disabled in the engine kernel, NetworkPol
 
 Note a. The lifecycle and `TestCLIFlow` cells come from Task 2's fix round (spec-order test). An earlier run at `47a8a15` used an order that the review rejected and is not the result of record. The `TestInterruptedOperations` and integration-bank cells are filled by Task 3 and Task 5 from their finished logs, with commit, log, duration and the exact result line.
 
+The lifecycle evidence above was produced at `f2fb82c`, before `b40a736` removed the `batch-001` Job TTL. `task-2-logs/fix2-batch001.log` is the separate live run of `batch-001` after that change: subtests `smoke-batch-001` and `batch-001` PASS (478.6 s), but the log's parent `TestBuildBank` line reads FAIL and its reason was not diagnosed in Task 4, so treat the revalidation as unconfirmed until Task 5 reads it. The lifecycle numbers are from a bank that differs from HEAD only in `batch-001`; they are not a re-run on HEAD.
+
 Known limits that apply to all sandbox cells:
 
 - A sandbox result says nothing about Apple M2 (ARM64) or Windows. The sandbox peak memory covers only that host's kind node and helpers and is not evidence for a 4GiB VM.
@@ -60,23 +62,33 @@ docker compose exec dev bash
 bash runtime/acceptance.sh          # warm run
 ```
 
-Before the first run on a device, set the Docker VM memory to 4GiB (the validation budget) and make sure nothing else heavy is running. Note the setting you used.
+Before the first run on a device:
+
+1. Set the Docker VM memory to 4GiB (the validation budget) and note the setting you used.
+2. **Stop your own JunKloud cluster, and nothing else heavy may run.** The lifecycle test sums the memory of every `junkloud-*`, `kindccm-*` and `envoy` container, so an idle cluster from your own practice would contaminate the peak and put two clusters into one small VM. `runtime/acceptance.sh` therefore refuses to start while such a container is running (the work containers `junkloud-dev-1` and `junkloud-workspace-1` are excluded). Stop them without removing anything:
+
+   ```sh
+   docker stop $(docker ps -q --filter "name=^junkloud-[0-9a-f]{12}-" --filter "name=^junkloud-cpk-" --filter "name=^kindccm-")
+   ```
+
+   Your state volume, answers and the stopped cluster containers are kept. After the run, `docker start` the same containers and check with `ckad doctor`. Whether stopped nodes come back depends on Docker; see the README FAQ.
 
 What `runtime/acceptance.sh` does:
 
 1. Prints `uname -m`, and `docker info` `MemTotal`, `NCPU`, `ServerVersion` (the MemTotal is the Docker Desktop VM memory).
-2. Runs `ckad doctor` and `ckad bank validate` for every problem of the bank (20 today), timing each, in a throwaway state directory. Your own practice state, kubeconfig and solutions are not touched. The throwaway environment is removed, matched by its exact environment ID.
-3. Exports `JUNKLOUD_TEST_UNSUPPORTED_CAPABILITIES` with the capabilities that `ckad doctor` reported as FAIL (empty when all PASS). The acceptance test then runs a labelled PARTIAL exam, and the summary says PARTIAL and why. It never sets this by hand.
+2. Refuses to start next to another JunKloud environment (step 2 above), then runs `ckad doctor` and `ckad bank validate` for every problem of the bank (20 today), timing each, in a throwaway state directory. Your own practice state, kubeconfig and solutions are not touched, and the validation records live only in that throwaway state, so before practising you still run the README section 4 validation loop in your own state. The throwaway environment is removed, matched by its exact environment ID, also after Ctrl+C.
+3. Exports `JUNKLOUD_TEST_UNSUPPORTED_CAPABILITIES=network-policy` only when `ckad doctor` reports `network-policy` FAIL. The acceptance test then runs a labelled PARTIAL exam (19 problems) and the summary shows the test's own `RESULT` line, cross-checked against the doctor result. Any other capability FAIL is UNEXPECTED: the script stops with a non-zero exit, because the product requires those capabilities and a full mock-01 cannot be served without them. It never sets the variable by hand (except `--unsupported network-policy` in the `--cold` mode).
 4. Runs `make test-acceptance` with `JUNKLOUD_ACCEPTANCE_EVIDENCE=$HOME/junkloud-acceptance`.
 5. Prints a summary table.
 
-Options: `--skip-validate` (skip the per-problem validation loop); `--cold` for a cold-start timing. A cold run must be the first thing run on a Docker that has never pulled the pinned images, and `ckad doctor` would pull them, so `--cold` skips phases 2-3 and takes the unsupported capabilities from `--unsupported <list>`. Do the cold run once, then a normal warm run.
+Options: `--skip-validate` (skip the per-problem validation loop); `--cold` for a cold-start timing. A cold run must be the first thing run on a Docker that has never pulled the pinned images, and `ckad doctor` would pull them, so `--cold` skips phases 2-3 and takes the unsupported capability from `--unsupported network-policy` (the only accepted value). The preflight still applies. Do the cold run once, then a normal warm run.
 
 **What to send back:**
 
 - the summary table that the script prints;
 - `$HOME/junkloud-acceptance/acceptance.log`;
 - `$HOME/junkloud-acceptance/cycle-1.json`, `cycle-2.json`, `cycle-3.json`;
+- `$HOME/junkloud-acceptance/validate-*.log` (the per-problem validation output of the script run);
 - the Docker Desktop memory setting you used and the exact device (model and RAM, or Windows build and RAM).
 
-The controller copies observed values into the device columns above. If a phase shows `NOT RUN`, that cell stays `미완료`. If `ckad doctor` reports `network-policy` FAIL on the device, the run is PARTIAL and the `networkpolicy-001` and positive mock-01 cells stay open. If it reports PASS, run `ckad bank validate networkpolicy-001` and record the result from its log.
+The controller copies observed values into the device columns above. If a phase shows `NOT RUN`, that cell stays `미완료`. If `ckad doctor` reports `network-policy` FAIL on the device, the run is PARTIAL and the `networkpolicy-001` and positive mock-01 cells stay open. If it reports PASS, the script's own `validate-networkpolicy-001.log` and its timed row in the summary are the certification evidence for the device; record the result from that log (the script's `ckad doctor` check only proves ingress deny, so also read the criteria results in the log). No separate re-run is needed unless that log is missing or the run was interrupted.

@@ -41,7 +41,7 @@ ckad start mock-01       # 같은 시험을 ID로 지정
 
 ```sh
 ckad status            # 세션, 모드, 상태, 경과·초과·제한 시간, 문제 목록(Q1...), 미완료 작업
-ckad show Q1           # 영어 문제, Context, Namespace, 제공 파일
+ckad show Q1           # 영어 문제, Context, Namespace, 제공 파일 이름과 내용
 ckad mark Q3 --review  # 다시 볼 문제 표시 (채점에 영향 없음)
 ckad mark Q3 --clear   # 표시 해제
 ```
@@ -64,11 +64,22 @@ ckad grade                 # 세션 전체 제출 (모의시험은 이것만 가
 
 ### 다시 채점: `--retry` / `--resubmit`
 
+진행 중인 훈련에서 문제 하나를 채점한 경우:
+
 | 상황 | 명령 |
 | --- | --- |
-| ERROR가 났고 답안은 그대로다 | `ckad grade --retry` (같은 제출을 다시 관찰. 새 grading run으로 기록) |
-| 답안을 고쳤다 | `ckad grade --resubmit` (새 제출. 이전 제출·결과는 덮어쓰지 않음) |
+| 그 문제가 ERROR이고 답안은 그대로다 | `ckad grade --problem Q1 --retry` (같은 제출을 다시 관찰. 새 grading run으로 기록) |
+| 답안을 고쳤다 | `ckad grade --problem Q1` (답안이 바뀐 것을 확인하면 새 제출로 기록. 이전 제출·결과는 덮어쓰지 않음) |
 
+세션 전체를 `ckad grade`로 제출한 뒤(모의시험 포함):
+
+| 상황 | 명령 |
+| --- | --- |
+| ERROR가 났고 답안은 그대로다 | `ckad grade --retry` |
+| 답안을 고쳤다 | `ckad grade --resubmit` |
+
+- 진행 중인 훈련에서 `--problem` 없이 `--retry`/`--resubmit`을 하면 거부됩니다(종료 코드 2). 답안을 고치지 않고 `ckad grade --problem Q1`만 다시 하면 기존 결과를 보여 줍니다(종료 코드 0).
+- 지금 허용되는 복구 명령은 `ckad status`의 `허용되는 복구 명령:` 줄이 알려 줍니다.
 - 답안이 바뀐 것이 확인되면 `--retry`는 `답안이 바뀌었거나 동일함을 확인할 수 없습니다. ckad grade --resubmit으로 새 제출을 기록하세요.`로 거부됩니다.
 - 이미 제출한 세션에서 그냥 `ckad grade`를 하면 기존 결과와 다음 명령 안내가 나옵니다(`이미 제출했습니다. 기존 결과입니다...`).
 - 모의시험을 제출한 뒤의 `--resubmit`은 최초 모의시험 점수를 바꾸지 않는 **복습 제출**로 기록됩니다(`복습 제출 기록입니다. 최초 모의시험 점수는 ckad review에서 별도로 확인하세요.`).
@@ -91,7 +102,7 @@ ckad review --problem Q4 --solution      # 해설·모범 풀이 (열람 기록�
 | --- | --- |
 | `ckad reset --problem Q1` | 진행 중인 **훈련** 문제 하나를 초기화. 이전 풀이는 `attempt-1`에 남고 `attempt-2`가 새로 생깁니다. 모의시험 진행 중에는 거부됩니다. |
 | `ckad reset` | 현재 세션을 끝내고(포기) 소유 리소스를 모두 정리. 환경 ID 입력으로 확인합니다. 끝낸 세션 뒤에 다음 학습을 시작하려면 필요합니다. |
-| `ckad reset --cluster` | 전용 클러스터를 지우고 다시 만듭니다. 환경 ID 입력으로 확인합니다. 클러스터가 망가졌을 때의 복구용입니다. |
+| `ckad reset --cluster` | **노드가 실행 중이고 API가 응답하는** 전용 클러스터를 지우고 다시 만듭니다. 환경 ID 입력으로 확인하며, **현재 세션은 포기(ABANDONED) 처리**됩니다. 노드 컨테이너가 멈췄거나 클러스터가 사라졌으면 거부합니다(종료 코드 3). |
 | `ckad reset --recover` | 중단된 초기화·이미지 빌드 기록을 이어서 정리합니다. |
 
 `ckad reset`은 다음과 같이 묻습니다. 환경 ID는 `ckad doctor`의 첫 줄(`전용 환경: ...`)이나 이 안내에 나옵니다. 입력이 다르면 `확인이 일치하지 않아 초기화하지 않았습니다.`(종료 코드 2)로 아무것도 지우지 않습니다.
@@ -124,9 +135,9 @@ ckad start --retry <세션 ID> --failed --new-seed   # 검증된 범위의 새 �
 | --- | --- |
 | 명령이 중단됐다(터미널 종료, `Ctrl+C`, 재부팅) | `ckad status`가 미완료 작업을 `미완료 작업: ...`과 `허용되는 복구 명령: ...`으로 알려 줍니다. 안내된 명령을 실행하세요. |
 | `초기화가 중단되었습니다...` | `ckad status` 확인 후 `ckad reset --recover`. 이 상태에서는 새 학습을 시작할 수 없습니다. |
-| 채점이 중단됐다 (`이전 채점이 중단되었습니다. ckad grade --retry 또는 수정 후 --resubmit으로 복구하세요.`) | 답안을 고치지 않았다면 `ckad grade --retry`, 고쳤다면 `ckad grade --resubmit`. |
-| 채점 결과에 ERROR | `ckad doctor` → 답안 그대로면 `--retry`, 고쳤으면 `--resubmit`. |
-| 클러스터 응답 없음·객체 사라짐 | `ckad doctor` → `ckad reset --cluster`. 누락된 namespace·클러스터를 답안과 함께 자동으로 새로 만들지 않습니다. |
+| 채점이 중단됐다 (`이전 채점이 중단되었습니다. ckad grade --retry 또는 수정 후 --resubmit으로 복구하세요.`) | 답안을 고치지 않았다면 `ckad grade --retry`(훈련 문제 하나는 `--problem Q1 --retry`), 고쳤다면 `--resubmit`(훈련 문제 하나는 `ckad grade --problem Q1`). 정확한 명령은 `ckad status`의 `허용되는 복구 명령:`을 따르세요. |
+| 채점 결과에 ERROR | `ckad doctor` → 답안 그대로면 `--retry`(훈련 문제 하나는 `--problem Q1 --retry`), 고쳤으면 새 제출(`--resubmit`, 훈련 문제 하나는 `ckad grade --problem Q1`). |
+| 클러스터 응답 없음 | `ckad doctor`. 노드 컨테이너가 멈췄으면(`docker ps -a --filter name=junkloud-`) `docker start`나 Docker Desktop 재시작. 노드가 실행 중인데 환경이 꼬였으면 `ckad reset --cluster`(세션 포기). 클러스터 자체가 삭제됐으면 제품 안에서 복구할 수 없습니다(누락된 클러스터·namespace를 자동으로 새로 만들지 않음). [README 8장](../../README.md#8-자주-겪는-문제와-해결)과 2.6의 전체 초기화를 보세요. |
 | `다른 준비·채점·검증 작업이 실행 중입니다...` | 다른 터미널의 작업이 끝난 뒤 다시 시도. `ckad status`는 언제든 조회할 수 있습니다. |
 
 더 많은 증상은 [README 8장](../../README.md#8-자주-겪는-문제와-해결)에 있습니다.
