@@ -309,6 +309,23 @@ func TestMockReferenceAndExistingGrade(t *testing.T) {
 	if code != 0 || h.engine.calls != calls || !strings.Contains(out, "--resubmit") {
 		t.Fatal(code, out)
 	}
+	if strings.Contains(out, "--retry") {
+		t.Fatal("a complete result must not suggest --retry, which the service refuses:", out)
+	}
+}
+
+// The existing-result hint names --retry only when the result is incomplete.
+func TestExistingGradeHintNamesRetryOnlyForIncompleteResult(t *testing.T) {
+	h := newHarness(t)
+	h.start(model.ModePractice)
+	h.engine.broken = true
+	if code, _, _ := h.run("", "grade"); code != 3 {
+		t.Fatal(code)
+	}
+	code, out, diag := h.run("", "grade")
+	if code != 3 || !strings.Contains(out, "이미 제출했습니다") || !strings.Contains(out, "ckad grade --retry") {
+		t.Fatal("an incomplete result must name --retry", code, out, diag)
+	}
 }
 func TestCancellationAndResetWithoutSession(t *testing.T) {
 	h := newHarness(t)
@@ -472,6 +489,52 @@ func TestStartResumesPreparedSessionWithGlobalPathFlag(t *testing.T) {
 	must(t, err)
 	if rec.StartedAt == nil {
 		t.Fatal("prepared session did not start")
+	}
+}
+
+// An unconfirmed preparation is resumed only by an argument-less start. An
+// explicit request (mode, count, mock id, ...) must not silently re-offer the
+// old session: it is refused and names both ways out.
+func TestExplicitStartDoesNotReofferUnconfirmedPreparation(t *testing.T) {
+	for _, args := range [][]string{{"start", "--mode", "mock"}, {"start", "--mode", "practice", "--count", "10"}, {"start", "dev-mock"}} {
+		h := newHarness(t)
+		if code, _, errOut := h.run("no\n", "start", "--mode", "practice", "--count", "5"); code != 0 {
+			t.Fatal(code, errOut)
+		}
+		code, out, errOut := h.run("yes\n", args...)
+		if code != 2 || strings.Contains(out, "준비 완료: practice-") || !strings.Contains(errOut, "ckad start") || !strings.Contains(errOut, "ckad reset") {
+			t.Fatal("explicit start must be refused with exit 2", args, code, out, errOut)
+		}
+		rec, err := h.deps.Store.LoadSession(context.Background(), "practice-1")
+		must(t, err)
+		if rec.StartedAt != nil {
+			t.Fatal("the refused start must not start the old session", args)
+		}
+		// The argument-less start still resumes it.
+		if code, out, errOut = h.run("yes\n", "start"); code != 0 || !strings.Contains(out, "학습 시작: practice-1") {
+			t.Fatal(code, out, errOut)
+		}
+	}
+}
+
+// After a failed preparation (SETUP_ERROR, for instance Ctrl-C during the
+// setup) start says the session must be reset first, not "finish the learning".
+func TestStartAfterFailedPreparationPointsToReset(t *testing.T) {
+	for _, args := range [][]string{{"start"}, {"start", "--mode", "mock"}} {
+		h := newHarness(t)
+		if code, _, errOut := h.run("no\n", "start", "--mode", "practice", "--count", "5"); code != 0 {
+			t.Fatal(code, errOut)
+		}
+		ctx := context.Background()
+		op, err := h.deps.Store.GetOperation(ctx, session.OperationID("practice-1"))
+		must(t, err)
+		op.Phase = session.PhaseFailed
+		must(t, h.deps.Store.PutOperation(ctx, op))
+		must(t, h.deps.Store.Transition(ctx, "practice-1", model.StatePreparing, model.StateSetupError))
+		code, out, errOut := h.run("yes\n", args...)
+		if code != 2 || strings.Contains(out, "준비 완료") || !strings.Contains(errOut, "ckad reset") || strings.Contains(errOut, "학습을 마친 뒤") {
+			t.Fatal(args, code, out, errOut)
+		}
 	}
 }
 

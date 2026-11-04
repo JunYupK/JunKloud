@@ -57,8 +57,14 @@ func gradeCommand(d *Dependencies) *cobra.Command {
 		printSubmissionTimes(c, rv.Submissions)
 		printSubmissionTimes(c, rv.ReviewSubmissions)
 		if existing {
-			fmt.Fprintln(c.OutOrStdout(), "이미 제출했습니다. 기존 결과입니다. 기술적 오류는 ckad grade --retry, 수정 후에는 --resubmit, 결과는 ckad review로 확인하세요.")
-			if !run.Evaluation.Complete || run.Evaluation.Score == nil {
+			incomplete := !run.Evaluation.Complete || run.Evaluation.Score == nil
+			if incomplete {
+				fmt.Fprintln(c.OutOrStdout(), "이미 제출했습니다. 기존 결과입니다. 기술적 오류는 ckad grade --retry, 수정 후에는 --resubmit, 결과는 ckad review로 확인하세요.")
+			} else {
+				// A confirmed result refuses --retry; do not offer it.
+				fmt.Fprintln(c.OutOrStdout(), "이미 제출했습니다. 기존 결과입니다. 답안을 고친 뒤에는 --resubmit, 결과는 ckad review로 확인하세요.")
+			}
+			if incomplete {
 				// Name only the commands the service accepts for this scope.
 				commands := recoveryCommand.FindAllString(grading.Error(), -1)
 				if len(commands) == 0 {
