@@ -157,7 +157,7 @@ func startCommand(d *Dependencies) *cobra.Command {
 				// Prepared and waiting for the yes/no answer: only an
 				// argument-less start resumes it.
 				if explicit {
-					return fail(2, "확인 대기 중인 준비 세션 "+st.Session.ID+"이(가) 있습니다. ckad start(인자 없이)로 그 세션을 확인해 시작하거나 ckad reset으로 버린 뒤 새로 시작하세요.")
+					return fail(2, "확인 대기 중인 준비 세션이 있습니다("+st.Session.ID+"). 인자 없이 ckad start로 그 세션을 확인해 시작하거나, ckad reset으로 버린 뒤 새로 시작하세요.")
 				}
 				view = st.Session
 			case model.StateSetupError:
