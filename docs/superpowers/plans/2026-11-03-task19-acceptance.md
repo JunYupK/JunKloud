@@ -313,7 +313,7 @@ Commits (local): `6983084` (start explicit-flag detection via `Flag.Changed`, SE
 | --- | --- | --- |
 | `go test ./... -count=1` | PASS (all packages ok) | final-fix-logs/unit.log |
 | `make lint` | exit 0 | final-fix-logs/lint.log |
-| `make test-race` | see final-fix-report.md | final-fix-logs/race.log |
+| `make test-race` | exit 0, all packages ok (ran at `54273e9`'s Go code, identical to `0d4b591`) | final-fix-logs/race.log |
 | `TestCLIFlow` live | PASS 562.86 s | final-fix-logs/live.log |
 | `TestInterruptedOperations` live | PASS 1092.68 s; KillDuringPrepare 129.61, InterruptDuringGrade 107.83, KillDuringReset 85.41, APIOutageDuringGrade 276.51, ConcurrentCommands 103.55 s. The pause-retry path was exercised once by a real refusal ("unable to freeze", attempt 1) | final-fix-logs/live.log |
 | README-vs-help and links/anchors checkers | 0 problems; fresh `--help` identical to Task 5 except the environment-dependent `--state-dir` default | final-fix-logs/links-help-check.log, final-fix-logs/help/ |
