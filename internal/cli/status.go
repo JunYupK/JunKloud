@@ -35,6 +35,16 @@ func statusCommand(d *Dependencies) *cobra.Command {
 			fmt.Fprintf(c.OutOrStdout(), "Q%d %s | %d점 | %s%s\n", i+1, p.ID, p.Points, p.Title, mark)
 		}
 		printPending(c, st.Pending)
+		for _, p := range st.Pending {
+			switch {
+			case p.Prepare && p.Running:
+				// Another terminal is preparing right now: nothing to recover.
+			case p.Prepare && p.Phase == session.PhaseFailed:
+				return fail(3, "준비에 실패했습니다. 풀이와 기록을 보존했습니다. ckad reset으로 정리한 뒤 다시 시작하세요.")
+			case p.Prepare:
+				return fail(3, "이전 준비가 중단되었습니다. 풀이와 기록을 보존했습니다. ckad reset으로 정리한 뒤 다시 시작하세요.")
+			}
+		}
 		return nil
 	}}
 }
@@ -103,10 +113,14 @@ func markCommand(d *Dependencies) *cobra.Command {
 	return c
 }
 
-var recoveryCommand = regexp.MustCompile(`ckad (?:reset --recover|grade(?: --problem [a-z0-9][a-z0-9-]*)?(?: --(?:retry|resubmit))?)`)
+var recoveryCommand = regexp.MustCompile(`ckad (?:reset --recover|reset|grade(?: --problem [a-z0-9][a-z0-9-]*)?(?: --(?:retry|resubmit))?)`)
 
 func printPending(c *cobra.Command, pending []session.Pending) {
 	for _, p := range pending {
+		if p.Prepare && p.Running {
+			fmt.Fprintf(c.OutOrStdout(), "준비가 진행 중입니다 (다른 터미널의 명령이 끝날 때까지 기다리세요): %s | %s\n", p.OperationID, p.Phase)
+			continue
+		}
 		fmt.Fprintf(c.OutOrStdout(), "미완료 작업: %s | %s | %s\n", p.OperationID, p.Phase, p.Since.Local().Format("2006-01-02 15:04:05 MST"))
 		// The service has already checked which commands are legal for this
 		// interrupted scope. Preserve that decision, including problem scope

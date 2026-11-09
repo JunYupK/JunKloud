@@ -230,7 +230,7 @@ func (c *ArtifactChecker) checkJob(ctx context.Context, t Target, crit model.Cri
 	if err != nil {
 		return model.CheckResult{}, err
 	}
-	cause := classifyRollout(pods, true, causeConfig{preloaded: c.set.preloaded, configured: c.set.preloadedSet, pullMessages: msgs})
+	cause := classifyRollout(pods, true, nil, causeConfig{preloaded: c.set.preloaded, configured: c.set.preloadedSet, pullMessages: msgs})
 	switch {
 	case cause.class == faultLearner:
 		res.Reason += "; cause: " + cause.text

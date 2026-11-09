@@ -309,6 +309,23 @@ func TestMockReferenceAndExistingGrade(t *testing.T) {
 	if code != 0 || h.engine.calls != calls || !strings.Contains(out, "--resubmit") {
 		t.Fatal(code, out)
 	}
+	if strings.Contains(out, "--retry") {
+		t.Fatal("a complete result must not suggest --retry, which the service refuses:", out)
+	}
+}
+
+// The existing-result hint names --retry only when the result is incomplete.
+func TestExistingGradeHintNamesRetryOnlyForIncompleteResult(t *testing.T) {
+	h := newHarness(t)
+	h.start(model.ModePractice)
+	h.engine.broken = true
+	if code, _, _ := h.run("", "grade"); code != 3 {
+		t.Fatal(code)
+	}
+	code, out, diag := h.run("", "grade")
+	if code != 3 || !strings.Contains(out, "이미 제출했습니다") || !strings.Contains(out, "ckad grade --retry") {
+		t.Fatal("an incomplete result must name --retry", code, out, diag)
+	}
 }
 func TestCancellationAndResetWithoutSession(t *testing.T) {
 	h := newHarness(t)
@@ -475,6 +492,52 @@ func TestStartResumesPreparedSessionWithGlobalPathFlag(t *testing.T) {
 	}
 }
 
+// An unconfirmed preparation is resumed only by an argument-less start. An
+// explicit request (mode, count, mock id, ...) must not silently re-offer the
+// old session: it is refused and names both ways out.
+func TestExplicitStartDoesNotReofferUnconfirmedPreparation(t *testing.T) {
+	for _, args := range [][]string{{"start", "--mode", "mock"}, {"start", "--mode", "practice", "--count", "10"}, {"start", "dev-mock"}} {
+		h := newHarness(t)
+		if code, _, errOut := h.run("no\n", "start", "--mode", "practice", "--count", "5"); code != 0 {
+			t.Fatal(code, errOut)
+		}
+		code, out, errOut := h.run("yes\n", args...)
+		if code != 2 || strings.Contains(out, "준비 완료: practice-") || !strings.Contains(errOut, "ckad start") || !strings.Contains(errOut, "ckad reset") {
+			t.Fatal("explicit start must be refused with exit 2", args, code, out, errOut)
+		}
+		rec, err := h.deps.Store.LoadSession(context.Background(), "practice-1")
+		must(t, err)
+		if rec.StartedAt != nil {
+			t.Fatal("the refused start must not start the old session", args)
+		}
+		// The argument-less start still resumes it.
+		if code, out, errOut = h.run("yes\n", "start"); code != 0 || !strings.Contains(out, "학습 시작: practice-1") {
+			t.Fatal(code, out, errOut)
+		}
+	}
+}
+
+// After a failed preparation (SETUP_ERROR, for instance Ctrl-C during the
+// setup) start says the session must be reset first, not "finish the learning".
+func TestStartAfterFailedPreparationPointsToReset(t *testing.T) {
+	for _, args := range [][]string{{"start"}, {"start", "--mode", "mock"}} {
+		h := newHarness(t)
+		if code, _, errOut := h.run("no\n", "start", "--mode", "practice", "--count", "5"); code != 0 {
+			t.Fatal(code, errOut)
+		}
+		ctx := context.Background()
+		op, err := h.deps.Store.GetOperation(ctx, session.OperationID("practice-1"))
+		must(t, err)
+		op.Phase = session.PhaseFailed
+		must(t, h.deps.Store.PutOperation(ctx, op))
+		must(t, h.deps.Store.Transition(ctx, "practice-1", model.StatePreparing, model.StateSetupError))
+		code, out, errOut := h.run("yes\n", args...)
+		if code != 2 || strings.Contains(out, "준비 완료") || !strings.Contains(errOut, "ckad reset") || strings.Contains(errOut, "학습을 마친 뒤") {
+			t.Fatal(args, code, out, errOut)
+		}
+	}
+}
+
 func TestPendingGuidancePreservesProblemScopeAndAcceptedCommand(t *testing.T) {
 	var out bytes.Buffer
 	root := NewRoot(Dependencies{}, strings.NewReader(""), &out, io.Discard)
@@ -522,5 +585,92 @@ func TestResetPendingFirstCreatePreservesIntentAndGivesRecoveryGuidance(t *testi
 	}
 	if _, err := os.Stat(m.IdentityPath()); !os.IsNotExist(err) {
 		t.Fatal("reset created an identity", err)
+	}
+}
+
+// An interrupted preparation (the process was killed after the setups were
+// applied) is detected: status names it and ckad reset, and neither status nor
+// a new start pretends the session is ready (spec 11).
+func TestInterruptedPrepareIsDetectedAndGuidesReset(t *testing.T) {
+	h := newHarness(t)
+	if code, _, errOut := h.run("no\n", "start", "--mode", "practice", "--count", "5"); code != 0 {
+		t.Fatal(code, errOut)
+	}
+	op, err := h.deps.Store.GetOperation(context.Background(), session.OperationID("practice-1"))
+	must(t, err)
+	op.Phase = session.PhaseSetupApplied
+	must(t, h.deps.Store.PutOperation(context.Background(), op))
+
+	code, out, errOut := h.run("", "status")
+	if code != 3 || !strings.Contains(out, op.ID) || !strings.Contains(out+errOut, "ckad reset") {
+		t.Fatal("status must exit 3 and name the interrupted prepare and ckad reset", code, out, errOut)
+	}
+	for _, args := range [][]string{{"start"}, {"start", "--mode", "practice", "--count", "5", "--seed", "42"}} {
+		code, out, errOut = h.run("yes\n", args...)
+		if code != 3 || strings.Contains(out, "준비 완료") || !strings.Contains(errOut, "ckad reset") {
+			t.Fatal("start must be refused with ckad reset guidance", args, code, out, errOut)
+		}
+	}
+}
+
+// A plain grade that finds the earlier grading incomplete (no confirmed score,
+// for instance after Ctrl-C) shows it but must not exit 0 as if it were
+// graded: it exits 3 and names the recovery commands.
+func TestPlainGradeOfIncompleteSubmissionExits3(t *testing.T) {
+	h := newHarness(t)
+	h.start(model.ModePractice)
+	h.engine.broken = true
+	if code, _, _ := h.run("", "grade"); code != 3 {
+		t.Fatal(code)
+	}
+	code, out, diag := h.run("", "grade")
+	if code != 3 || strings.Contains(out, "점수:") || !strings.Contains(diag, "채점을 확정할 수 없습니다") || strings.Contains(diag, "이전 채점이 중단되었습니다") || !strings.Contains(diag, "ckad grade --retry") {
+		t.Fatal(code, out, diag)
+	}
+}
+
+// Status takes no lock: while another terminal's command still holds the
+// environment lock the preparation is running, not interrupted. Status says
+// so and exits 0, and start is refused with the lock message (R12).
+func TestRunningPrepareIsNotReportedAsInterrupted(t *testing.T) {
+	h := newHarness(t)
+	if code, _, errOut := h.run("no\n", "start", "--mode", "practice", "--count", "5"); code != 0 {
+		t.Fatal(code, errOut)
+	}
+	op, err := h.deps.Store.GetOperation(context.Background(), session.OperationID("practice-1"))
+	must(t, err)
+	op.Phase = session.PhaseSetupApplied
+	must(t, h.deps.Store.PutOperation(context.Background(), op))
+	release, err := lock.Acquire(author.LockPath(h.state))
+	must(t, err)
+	defer release()
+
+	code, out, errOut := h.run("", "status")
+	if code != 0 || !strings.Contains(out, "준비가 진행 중입니다") || strings.Contains(out+errOut, "ckad reset") || strings.Contains(out+errOut, "중단되었습니다") {
+		t.Fatal(code, out, errOut)
+	}
+	code, out, errOut = h.run("yes\n", "start")
+	if code != 3 || strings.Contains(out, "준비 완료") || !strings.Contains(errOut, "다른 준비·채점·검증 작업이 실행 중입니다") {
+		t.Fatal(code, out, errOut)
+	}
+}
+
+// A failed setup (SETUP_ERROR) is not an interruption: status says the
+// preparation failed and names ckad reset.
+func TestFailedPrepareHasItsOwnWording(t *testing.T) {
+	h := newHarness(t)
+	if code, _, errOut := h.run("no\n", "start", "--mode", "practice", "--count", "5"); code != 0 {
+		t.Fatal(code, errOut)
+	}
+	ctx := context.Background()
+	op, err := h.deps.Store.GetOperation(ctx, session.OperationID("practice-1"))
+	must(t, err)
+	op.Phase = session.PhaseFailed
+	must(t, h.deps.Store.PutOperation(ctx, op))
+	must(t, h.deps.Store.Transition(ctx, "practice-1", model.StatePreparing, model.StateSetupError))
+
+	code, out, errOut := h.run("", "status")
+	if code != 3 || !strings.Contains(errOut, "준비에 실패했습니다") || !strings.Contains(out+errOut, "ckad reset") || strings.Contains(out+errOut, "중단되었습니다") {
+		t.Fatal(code, out, errOut)
 	}
 }

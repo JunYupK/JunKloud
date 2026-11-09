@@ -145,6 +145,8 @@ func publicError(err error) error {
 		return fail(3, "다른 준비·채점·검증 작업이 실행 중입니다. 해당 작업이 끝난 뒤 다시 시도하세요. ckad status는 조회할 수 있습니다.")
 	case errors.Is(err, session.ErrNotCertified):
 		return fail(3, "문제 검증 기록이 없거나 현재 환경과 다릅니다. ckad bank validate <problem-id>로 검증하세요.")
+	case errors.Is(err, session.ErrNotPrepared):
+		return fail(3, "이전 준비가 중단되었습니다. 풀이와 기록을 보존했습니다. ckad status 확인 후 ckad reset으로 정리하고 다시 시작하세요.")
 	case errors.Is(err, session.ErrCapabilityUnavailable):
 		return fail(3, "필요한 환경 capability가 준비되지 않았습니다. ckad doctor로 확인하세요.")
 	case errors.Is(err, session.ErrEnvironmentOccupied):

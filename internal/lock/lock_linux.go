@@ -1,6 +1,7 @@
 // Package lock provides the per-environment mutation lock. One environment
 // allows one mutating operation (start, reset, bank validation, grade) at a
-// time; read-only commands never take it.
+// time; read-only commands never take it (they may only probe it with Held,
+// which opens the file read-only and never creates or writes it).
 //
 // The lock is a Linux flock(2) on a file. The kernel drops it when the
 // holding process exits for any reason, including SIGKILL, so a crashed
@@ -60,4 +61,34 @@ func Acquire(path string) (release func() error, err error) {
 		})
 		return rerr
 	}, nil
+}
+
+// Held reports whether another open file description holds the lock at path,
+// without ever creating, truncating or writing the file, so a read-only
+// command can call it on a lock file it has no write access to. A missing file
+// is not held. The probe takes a shared non-blocking flock and drops it again
+// at once. A mutating command that tries to Acquire in that very instant gets
+// ErrLocked once; nothing is written, so the file is never left changed.
+func Held(path string) (bool, error) {
+	f, err := os.OpenFile(path, os.O_RDONLY, 0)
+	if errors.Is(err, os.ErrNotExist) {
+		return false, nil
+	}
+	if err != nil {
+		return false, fmt.Errorf("lock: open %q: %w", path, err)
+	}
+	defer f.Close()
+	for {
+		err = syscall.Flock(int(f.Fd()), syscall.LOCK_SH|syscall.LOCK_NB)
+		if err != syscall.EINTR {
+			break
+		}
+	}
+	if errors.Is(err, syscall.EWOULDBLOCK) {
+		return true, nil
+	}
+	if err != nil {
+		return false, fmt.Errorf("lock: flock %q: %w", path, err)
+	}
+	return false, syscall.Flock(int(f.Fd()), syscall.LOCK_UN)
 }

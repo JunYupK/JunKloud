@@ -100,7 +100,7 @@ const (
 	PhasePlanned      = "planned"       // intent recorded, nothing applied yet
 	PhaseSetupApplied = "setup-applied" // every setup applied
 	PhaseDone         = "done"          // initial states verified
-	PhaseFailed       = "failed"        // the session is SETUP_ERROR
+	PhaseFailed       = "failed"        // the session is SETUP_ERROR, or was abandoned before its preparation finished
 )
 
 // OperationID is the ID of a session's preparation operation.

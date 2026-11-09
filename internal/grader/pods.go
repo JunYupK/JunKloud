@@ -2,10 +2,13 @@ package grader
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"regexp"
 	"sort"
 	"strings"
+
+	"github.com/JunYupK/JunKloud/internal/model"
 )
 
 // Why is a workload not ready? Spec 8.1 splits the answer: the learner's
@@ -64,7 +67,9 @@ func (r rolloutCause) summary() []any {
 
 // classifyRollout decides whose fault an incomplete rollout is from the pods
 // the workload owns. expectPods: the workload should have pods by now.
-func classifyRollout(pods []object, expectPods bool, cfg causeConfig) rolloutCause {
+// workload is the observed Deployment or ReplicaSet (nil where there is none):
+// when it created no pods, its ReplicaFailure condition says why.
+func classifyRollout(pods []object, expectPods bool, workload object, cfg causeConfig) rolloutCause {
 	var findings []podFinding
 	for _, p := range pods {
 		if metaOf(p)["deletionTimestamp"] != nil || podReady(p) {
@@ -76,6 +81,13 @@ func classifyRollout(pods []object, expectPods bool, cfg causeConfig) rolloutCau
 
 	switch {
 	case len(pods) == 0 && expectPods:
+		if learner, msg := createFailure(workload); msg != "" {
+			if learner {
+				// The API server rejected the learner's own pod spec.
+				return rolloutCause{class: faultLearner, text: "the controller could not create pods: " + shorten(msg)}
+			}
+			return rolloutCause{class: faultUnknown, text: "the controller created no pods (FailedCreate: " + shorten(msg) + ")"}
+		}
 		return rolloutCause{class: faultUnknown, text: "the controller created no pods (quota, admission or controller trouble is possible)"}
 	case len(findings) == 0:
 		return rolloutCause{class: faultUnknown, text: "every pod is ready yet the rollout counters were not reached"}
@@ -98,6 +110,81 @@ func classifyRollout(pods []object, expectPods bool, cfg causeConfig) rolloutCau
 		}
 	}
 	return rolloutCause{class: faultUnknown, text: "no cause found", findings: findings}
+}
+
+// createFailure reads the ReplicaFailure/FailedCreate condition a Deployment
+// (copied from its ReplicaSet) or a ReplicaSet reports when its pods cannot be
+// created. learner is true only for an admission rejection of the pod spec
+// ("is forbidden:" - quota, missing ServiceAccount, PodSecurity, LimitRange)
+// that is not an infrastructure failure (webhook, timeout, unavailable API).
+// message is empty when there is no such condition.
+func createFailure(obj object) (learner bool, message string) {
+	if kind, _ := obj["kind"].(string); kind != "Deployment" && kind != "ReplicaSet" {
+		return false, "" // StatefulSet and DaemonSet keep their current behaviour
+	}
+	for _, c := range listAt(obj, "status", "conditions") {
+		m, _ := c.(map[string]any)
+		if m["type"] != "ReplicaFailure" || m["status"] != "True" || m["reason"] != "FailedCreate" {
+			continue
+		}
+		message, _ = m["message"].(string)
+		if !strings.Contains(message, "is forbidden:") {
+			return false, message
+		}
+		for _, infra := range []string{"failed calling webhook", "Internal error", "connection refused", "context deadline exceeded", "the server is currently unable", "cannot create resource", "because it is being terminated"} {
+			if strings.Contains(message, infra) {
+				return false, message
+			}
+		}
+		return true, message
+	}
+	return false, ""
+}
+
+var (
+	missingSARe = regexp.MustCompile(`serviceaccount "([^"]+)" not found`)
+	quotaRe     = regexp.MustCompile(`exceeded quota: ([A-Za-z0-9._-]+)`)
+)
+
+// staleCreateFailure re-checks the object a learner-fault FailedCreate message
+// names. The ReplicaSet controller does not watch ServiceAccounts or
+// ResourceQuotas: after a failed create it retries with back-off and the
+// condition keeps its old message until the next successful sync, so a
+// ServiceAccount created since, or a quota deleted since, leaves a stale
+// condition that must not FAIL a correct answer. stale is a human reason; err
+// is a failed lookup (wrapped as insufficient evidence). A quota that still
+// exists but was loosened is not detected.
+func staleCreateFailure(ctx context.Context, r ObjectReader, workload object, msg string) (stale string, err error) {
+	ns := stringAt(workload, "metadata", "namespace")
+	check := func(kind, name string) (bool, error) {
+		_, gerr := r.Get(ctx, model.ObjectRef{APIVersion: "v1", Kind: kind, Namespace: ns, Name: name})
+		switch {
+		case gerr == nil:
+			return true, nil
+		case errors.Is(gerr, ErrNotFound):
+			return false, nil
+		}
+		return false, fmt.Errorf("%w: cannot re-check %s %s behind the FailedCreate (%s): %v", ErrInsufficientEvidence, kind, name, shorten(msg), gerr)
+	}
+	if m := missingSARe.FindStringSubmatch(msg); m != nil {
+		exists, err := check("ServiceAccount", m[1])
+		if err != nil {
+			return "", err
+		}
+		if exists {
+			return fmt.Sprintf("ServiceAccount %s exists now, but the controller is backing off on an old FailedCreate (%s); re-grade shortly or run kubectl rollout restart", m[1], shorten(msg)), nil
+		}
+	}
+	if m := quotaRe.FindStringSubmatch(msg); m != nil {
+		exists, err := check("ResourceQuota", m[1])
+		if err != nil {
+			return "", err
+		}
+		if !exists {
+			return fmt.Sprintf("ResourceQuota %s no longer exists, but the controller is backing off on an old FailedCreate (%s); re-grade shortly or run kubectl rollout restart", m[1], shorten(msg)), nil
+		}
+	}
+	return "", nil
 }
 
 func podReady(p object) bool {

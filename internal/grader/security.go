@@ -378,7 +378,7 @@ func (c *SecurityChecker) explainNoRunningPods(ctx context.Context, pods []objec
 	if err != nil {
 		return "", err
 	}
-	cause := classifyRollout(pods, true, causeConfig{preloaded: c.set.preloaded, configured: c.set.preloadedSet, pullMessages: msgs})
+	cause := classifyRollout(pods, true, nil, causeConfig{preloaded: c.set.preloaded, configured: c.set.preloadedSet, pullMessages: msgs})
 	if cause.class == faultLearner {
 		return fmt.Sprintf("%s has no running pod: %s", what, cause.text), nil
 	}

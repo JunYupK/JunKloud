@@ -10,10 +10,12 @@ import (
 	"strings"
 
 	"github.com/JunYupK/JunKloud/internal/environment"
+	"github.com/JunYupK/JunKloud/internal/lock"
 	"github.com/JunYupK/JunKloud/internal/model"
 	"github.com/JunYupK/JunKloud/internal/session"
 	"github.com/JunYupK/JunKloud/internal/store"
 	"github.com/spf13/cobra"
+	"github.com/spf13/pflag"
 )
 
 func startOptions(c *cobra.Command, args []string) (session.StartOptions, error) {
@@ -125,21 +127,46 @@ func startCommand(d *Dependencies) *cobra.Command {
 		if d.Session == nil || d.Store == nil {
 			return publicError(errors.New("missing service"))
 		}
-		// Resume a prepared session after an interrupted confirmation. Explicit
-		// arguments request a new session and retain the service's active guard.
+		// An explicit request (an argument or any flag the learner typed on
+		// this command; global path flags such as --state-dir do not count)
+		// asks for a new session. Flag.Changed is the signal: the local flag
+		// set cobra builds is a fresh FlagSet whose NFlag() is always 0.
+		explicit := len(args) > 0
+		c.LocalNonPersistentFlags().VisitAll(func(f *pflag.Flag) {
+			if f.Changed {
+				explicit = true
+			}
+		})
+		// The current session decides what start may do, whatever was typed.
 		var view session.SessionView
-		if len(args) == 0 && c.LocalNonPersistentFlags().NFlag() == 0 {
-			if id, err := d.Store.CurrentSessionID(c.Context()); err == nil {
-				st, err := d.Session.Status(c.Context(), id, d.Now())
-				if err != nil {
-					return publicError(err)
-				}
-				if st.Session.State == model.StatePreparing {
-					view = st.Session
-				}
-			} else if !errors.Is(err, store.ErrNotFound) {
+		if id, err := d.Store.CurrentSessionID(c.Context()); err == nil {
+			st, err := d.Session.Status(c.Context(), id, d.Now())
+			if err != nil {
 				return publicError(err)
 			}
+			switch st.Session.State {
+			case model.StatePreparing:
+				for _, p := range st.Pending {
+					if p.Prepare && p.Running {
+						return publicError(lock.ErrLocked)
+					}
+					if p.Prepare {
+						return publicError(session.ErrNotPrepared)
+					}
+				}
+				// Prepared and waiting for the yes/no answer: only an
+				// argument-less start resumes it.
+				if explicit {
+					return fail(2, "확인 대기 중인 준비 세션이 있습니다("+st.Session.ID+"). 인자 없이 ckad start로 그 세션을 확인해 시작하거나, ckad reset으로 버린 뒤 새로 시작하세요.")
+				}
+				view = st.Session
+			case model.StateSetupError:
+				// Exit 2 like the active-session refusal: nothing is wrong with
+				// the environment, the learner has to clean up first.
+				return fail(2, "이전 준비가 완료되지 못했습니다(세션 "+st.Session.ID+"). ckad reset으로 정리한 뒤 다시 시작하세요.")
+			}
+		} else if !errors.Is(err, store.ErrNotFound) {
+			return publicError(err)
 		}
 		if view.ID == "" {
 			fmt.Fprintln(c.ErrOrStderr(), "환경과 문제를 준비하고 있습니다. 중단 후에는 ckad status로 확인하세요.")

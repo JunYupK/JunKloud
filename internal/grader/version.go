@@ -23,4 +23,6 @@ package grader
 // vouch for behaviour it never saw.
 // grader-8 includes the shared local Kustomize guard policy, deterministic
 // endpoint membership, and exact native probe UID observation/cleanup.
-const GraderVersion = "grader-8"
+// grader-9 classifies a learner-caused FailedCreate (admission rejection of the
+// workload's own pod spec) as FAIL instead of ERROR.
+const GraderVersion = "grader-9"

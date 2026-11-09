@@ -72,6 +72,10 @@ func (s *Service) resumeClusterReset(ctx context.Context, rec model.SessionRecor
 			}
 		}
 	}
+	// The abandoned session's interrupted preparation is over with it.
+	if err := s.closePrepare(ctx, rec.ID); err != nil {
+		return err
+	}
 	op.Phase = PhaseDone
 	return s.cfg.Store.PutOperation(ctx, op)
 }

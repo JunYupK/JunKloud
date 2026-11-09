@@ -382,3 +382,169 @@ func TestResourceGrading(t *testing.T) {
 		testutil.Equal(t, ev.MaxScore, 12)
 	})
 }
+
+// TestReadyFailedCreateIsLearnerFault: a Deployment whose pods the API server
+// refuses to create because of the learner's own spec (a ServiceAccount that
+// does not exist, a Pod over the namespace quota) is the learner's FAIL, not
+// an ERROR (grader-9). The reason carries the API server's message.
+func TestReadyFailedCreateIsLearnerFault(t *testing.T) {
+	requireTools(t, "docker", "kind")
+	ctx := context.Background()
+	m, id := bootEnvironment(t)
+	testutil.NoError(t, m.EnsurePlatform(ctx, id))
+	testutil.NoError(t, m.PreloadImages(ctx, id, environment.ProbeImage))
+
+	opts := []grader.Option{grader.WithRedactor(grader.NewRedactor()), grader.WithPreloadedImages(environment.ProbeImage.Name)}
+	reader, err := grader.NewClusterReader(m.KubeconfigPath(), id.Context)
+	testutil.NoError(t, err)
+	engine := grader.NewEngine(grader.DefaultCheckers(reader, opts...), opts...)
+
+	deploy := func(ns, name string, podSpec map[string]any, resources map[string]any) map[string]any {
+		container := map[string]any{"name": "web", "image": environment.ProbeImage.Name, "command": []any{"sleep", "3600"}}
+		if resources != nil {
+			container["resources"] = resources
+		}
+		podSpec["containers"] = []any{container}
+		return map[string]any{"apiVersion": "apps/v1", "kind": "Deployment",
+			"metadata": map[string]any{"name": name, "namespace": ns},
+			"spec": map[string]any{"replicas": 1,
+				"selector": map[string]any{"matchLabels": map[string]any{"app": name}},
+				"template": map[string]any{"metadata": map[string]any{"labels": map[string]any{"app": name}}, "spec": podSpec}}}
+	}
+	cases := []struct {
+		name, ns, want string
+		objects        []map[string]any
+	}{
+		{"missing-sa", "jk-fc-sa", "serviceaccount",
+			[]map[string]any{deploy("jk-fc-sa", "web", map[string]any{"serviceAccountName": "missing-sa"}, nil)}},
+		{"quota", "jk-fc-quota", "exceeded quota", []map[string]any{
+			{"apiVersion": "v1", "kind": "ResourceQuota", "metadata": map[string]any{"name": "team-quota", "namespace": "jk-fc-quota"},
+				"spec": map[string]any{"hard": map[string]any{"requests.memory": "64Mi"}}},
+			deploy("jk-fc-quota", "web", map[string]any{}, map[string]any{"requests": map[string]any{"memory": "128Mi"}}),
+		}},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			owner := environment.Owner{
+				Inventory:        model.Inventory{EnvironmentID: id.ID, SessionID: "s-" + tc.name, ProblemID: "grade-fc"},
+				Namespace:        tc.ns,
+				CreateNamespaces: true,
+			}
+			_, err := m.Apply(ctx, id, owner, []environment.Action{{Kind: model.ActionApply, Objects: tc.objects}})
+			testutil.NoError(t, err)
+
+			ref := model.ObjectRef{APIVersion: "apps/v1", Kind: "Deployment", Namespace: tc.ns, Name: "web"}
+			crit := model.Criterion{ID: "ready", Kind: model.CriterionReady, Target: ref, Points: 4, Timeout: 30 * time.Second,
+				Args: map[string]any{"replicas": 1}}
+			ev, err := engine.Evaluate(ctx, grader.Target{Identity: id, Problem: model.FrozenProblem{
+				Definition: model.Problem{ID: "grade-fc", Namespace: tc.ns, Criteria: []model.Criterion{crit}},
+				Namespace:  tc.ns,
+			}})
+			testutil.NoError(t, err)
+			testutil.Equal(t, ev.Results[0].Status, "FAIL")
+			if !strings.Contains(strings.ToLower(ev.Results[0].Reason), tc.want) {
+				t.Fatalf("reason lacks %q: %q", tc.want, ev.Results[0].Reason)
+			}
+			t.Logf("reason: %s", ev.Results[0].Reason)
+		})
+	}
+
+	// A ServiceAccount created after the failure: the ReplicaSet controller
+	// does not watch ServiceAccounts, backs off, and keeps the old FailedCreate
+	// condition. Grading right after the SA appears must be ERROR, not FAIL
+	// (the condition is stale).
+	//
+	// Timing: the controller's retries (rate-limited requeue, 5ms doubling)
+	// were measured (task review) at about 10.2 s, 20.5 s and 41 s after the first failure. The
+	// test therefore creates the ServiceAccount about 29 s after it saw the
+	// failure, in the middle of the 20.5-41 s gap, so that the next retry
+	// comes about 12 s later, after the 4 s grading window has ended. Creating
+	// it near a retry (for example at 20 s) would let that retry succeed and
+	// the Pod become Ready inside the window, which makes the run inconclusive
+	// (PASS, skipped) or, on a slow host, a Pod that is not Ready yet.
+	// Only the safety invariant is asserted: ERROR naming the backing-off
+	// controller passes; PASS is skipped as inconclusive; anything else,
+	// notably a confirmed FAIL, fails the subtest.
+	t.Run("late-sa-is-stale-error", func(t *testing.T) {
+		const ns = "jk-fc-late"
+		owner := environment.Owner{
+			Inventory:        model.Inventory{EnvironmentID: id.ID, SessionID: "s-late", ProblemID: "grade-fc"},
+			Namespace:        ns,
+			CreateNamespaces: true,
+		}
+		inv, err := m.Apply(ctx, id, owner, []environment.Action{{Kind: model.ActionApply, Objects: []map[string]any{
+			deploy(ns, "web", map[string]any{"serviceAccountName": "late-sa"}, nil)}}})
+		testutil.NoError(t, err)
+		owner.Inventory, owner.CreateNamespaces = inv, false
+		cs := kubeClient(t, m, id)
+		deadline := time.Now().Add(60 * time.Second)
+		for {
+			d, err := cs.AppsV1().Deployments(ns).Get(ctx, "web", metav1.GetOptions{})
+			testutil.NoError(t, err)
+			failed := false
+			for _, c := range d.Status.Conditions {
+				failed = failed || string(c.Type) == "ReplicaFailure" && string(c.Status) == "True"
+			}
+			if failed {
+				break
+			}
+			if time.Now().After(deadline) {
+				t.Fatal("the Deployment never reported ReplicaFailure")
+			}
+			time.Sleep(time.Second)
+		}
+		time.Sleep(29 * time.Second) // mid-interval between the controller's retries (see the comment above)
+		_, err = m.Apply(ctx, id, owner, []environment.Action{{Kind: model.ActionApply, Objects: []map[string]any{
+			{"apiVersion": "v1", "kind": "ServiceAccount", "metadata": map[string]any{"name": "late-sa", "namespace": ns}}}}})
+		testutil.NoError(t, err)
+
+		ref := model.ObjectRef{APIVersion: "apps/v1", Kind: "Deployment", Namespace: ns, Name: "web"}
+		crit := model.Criterion{ID: "ready", Kind: model.CriterionReady, Target: ref, Points: 4, Timeout: 4 * time.Second,
+			Args: map[string]any{"replicas": 1, "stable_for": "1s"}}
+		ev, err := engine.Evaluate(ctx, grader.Target{Identity: id, Problem: model.FrozenProblem{
+			Definition: model.Problem{ID: "grade-fc", Namespace: ns, Criteria: []model.Criterion{crit}},
+			Namespace:  ns,
+		}})
+		testutil.NoError(t, err)
+		t.Logf("status %s reason: %s", ev.Results[0].Status, ev.Results[0].Reason)
+		switch lateSAVerdict(ev.Results[0].Status, ev.Results[0].Reason) {
+		case "ok":
+		case "inconclusive":
+			t.Skip("inconclusive: the controller retried after the ServiceAccount appeared and the Deployment became Ready, so the stale-condition guard was not exercised")
+		default:
+			t.Fatalf("a correct answer must never be a confirmed FAIL and a stale condition must explain itself: status %s reason %q", ev.Results[0].Status, ev.Results[0].Reason)
+		}
+	})
+}
+
+// TestLateSAVerdict pins how the live late-SA subtest reads a grading result.
+// Only the safety invariant is asserted: a correct answer must never be a
+// confirmed FAIL. ERROR with the stale explanation is the expected outcome; a
+// PASS means the controller retried in time, which proves nothing about the
+// guard, so it is inconclusive rather than a pass or a failure.
+func TestLateSAVerdict(t *testing.T) {
+	cases := []struct{ status, reason, want string }{
+		{"ERROR", "the controller is backing off after FailedCreate; re-grade or kubectl rollout restart", "ok"},
+		{"PASS", "", "inconclusive"},
+		{"FAIL", "the controller could not create pods: serviceaccount \"late-sa\" not found", "fail"},
+		{"ERROR", "cluster unreachable", "fail"},
+	}
+	for _, tc := range cases {
+		testutil.Equal(t, lateSAVerdict(tc.status, tc.reason), tc.want)
+	}
+}
+
+// lateSAVerdict classifies the late-SA grading result: "ok" (ERROR that names
+// the backing-off controller), "inconclusive" (PASS: the controller recovered
+// in time) or "fail" (anything else, notably a confirmed FAIL).
+func lateSAVerdict(status, reason string) string {
+	switch {
+	case status == "ERROR" && strings.Contains(reason, "backing off"):
+		return "ok"
+	case status == "PASS":
+		return "inconclusive"
+	default:
+		return "fail"
+	}
+}
