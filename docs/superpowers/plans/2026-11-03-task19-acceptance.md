@@ -304,3 +304,18 @@ Logs are in the local, uncommitted workspace `.superpowers/sdd/2026-11-03-task19
 NOT RUN: full `make test-integration` (ruling R7); a bank re-run under grader-9; Apple M2 8GB/4GiB; Windows 16GB; GitHub CI; `runtime/acceptance.sh` on a real device; mock-01 positive start; networkpolicy-001 certification; 4GiB fit; cold start. Device cells stay `미완료`. "출시 준비 완료" (ready for release) is withheld until the user's device runs.
 
 Known product gaps recorded for the user (not changed): managed `ckad image build` is refused after a COMPLETED session; the grade fingerprint hashes whole Deployment specs, so an HPA scale during grading of `api-migration-001` could give a spurious `!inputs-changed` ERROR (M9); the `ckad status` lock probe writes `env.lock`; `start` explicit-flag detection (`NFlag()`) is always 0 (M5).
+
+### Final fix wave (BASE `dbe592b`)
+
+Commits (local): `6983084` (start explicit-flag detection via `Flag.Changed`, SETUP_ERROR message, grade `--retry` hint only for incomplete results), `0bb0436` (`lock.Held` read-only probe, race close), `cb070eb` (acceptance context 5h40m; unpause always, wait node and pods Ready), `b3da763` (compose-label preflight, `--unsupported` needs `--cold`), `0d4b591` (message wording), plus the docs commit. Each product change had a failing unit test first (`final-fix-logs/item1-3-red.log`, `item2-red.log`, `item2-session-red.log`, `item5-red.log`).
+
+| Item | Result | Log |
+| --- | --- | --- |
+| `go test ./... -count=1` | PASS (all packages ok) | final-fix-logs/unit.log |
+| `make lint` | exit 0 | final-fix-logs/lint.log |
+| `make test-race` | see final-fix-report.md | final-fix-logs/race.log |
+| `TestCLIFlow` live | PASS 562.86 s | final-fix-logs/live.log |
+| `TestInterruptedOperations` live | PASS 1092.68 s; KillDuringPrepare 129.61, InterruptDuringGrade 107.83, KillDuringReset 85.41, APIOutageDuringGrade 276.51, ConcurrentCommands 103.55 s. The pause-retry path was exercised once by a real refusal ("unable to freeze", attempt 1) | final-fix-logs/live.log |
+| README-vs-help and links/anchors checkers | 0 problems; fresh `--help` identical to Task 5 except the environment-dependent `--state-dir` default | final-fix-logs/links-help-check.log, final-fix-logs/help/ |
+
+Kept recorded, not fixed: M9 (a grader-10 follow-up), M-l, a managed image build after COMPLETED, test hygiene. Device cells stay 미완료.
